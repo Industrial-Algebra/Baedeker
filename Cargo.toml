@@ -1,6 +1,12 @@
-[package]
-name = "Baedeker"
+[workspace]
+resolver = "3"
+members = [
+    "crates/baedeker-core",
+    "crates/baedeker-cli",
+    "crates/baedeker-testdata",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-
-[dependencies]
+license = "MIT"
