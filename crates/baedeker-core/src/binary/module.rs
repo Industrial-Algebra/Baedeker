@@ -118,4 +118,53 @@ mod tests {
             crate::error::DecodeErrorKind::InvalidMagic
         ));
     }
+
+    #[test]
+    fn decode_empty_fixture() {
+        let bytes = baedeker_testdata::fixture_bytes("empty");
+        let module = Module::decode(&bytes).unwrap();
+        // Minimal module has at least a valid preamble; may have custom sections
+        // from the Rust toolchain but no required non-custom sections.
+        for s in &module.sections {
+            // Should parse without error regardless of section content.
+            let _ = s.id.name();
+        }
+    }
+
+    #[test]
+    fn decode_add_fixture() {
+        let bytes = baedeker_testdata::fixture_bytes("add");
+        let module = Module::decode(&bytes).unwrap();
+
+        // A cdylib with an exported function must have type, function, and code sections.
+        assert!(
+            module.section(SectionId::Type).is_some(),
+            "add.wasm missing type section"
+        );
+        assert!(
+            module.section(SectionId::Function).is_some(),
+            "add.wasm missing function section"
+        );
+        assert!(
+            module.section(SectionId::Code).is_some(),
+            "add.wasm missing code section"
+        );
+        assert!(
+            module.section(SectionId::Export).is_some(),
+            "add.wasm missing export section"
+        );
+    }
+
+    #[test]
+    fn decode_memory_fixture() {
+        let bytes = baedeker_testdata::fixture_bytes("memory");
+        let module = Module::decode(&bytes).unwrap();
+
+        // Module with static memory should have a memory or data section.
+        assert!(
+            module.section(SectionId::Memory).is_some()
+                || module.section(SectionId::Data).is_some(),
+            "memory.wasm missing memory/data section"
+        );
+    }
 }

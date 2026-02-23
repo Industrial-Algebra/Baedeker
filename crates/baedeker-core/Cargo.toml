@@ -13,3 +13,4 @@ std = ["alloc"]
 [dependencies]
 
 [dev-dependencies]
+baedeker-testdata = { path = "../baedeker-testdata" }
