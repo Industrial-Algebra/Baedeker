@@ -1,0 +1,15 @@
+[package]
+name = "baedeker-core"
+description = "WebAssembly runtime core — decode, validate, execute (no_std)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["alloc"]
+alloc = []
+std = ["alloc"]
+
+[dependencies]
+
+[dev-dependencies]
