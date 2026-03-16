@@ -6,10 +6,10 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["alloc"]
-alloc = []
-std = ["alloc"]
+default = []
+std = []
 
 [dependencies]
 
 [dev-dependencies]
+baedeker-testdata = { path = "../baedeker-testdata" }

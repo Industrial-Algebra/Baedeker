@@ -34,7 +34,11 @@ coverage. See [docs/ROADMAP.md](docs/ROADMAP.md) for the full phase plan.
 
 ## Building
 
+Baedeker's test fixtures are compiled to WebAssembly during the build, so the
+`wasm32-unknown-unknown` target must be installed locally.
+
 ```
+rustup target add wasm32-unknown-unknown
 cargo build
 cargo test
 cargo run -p baedeker-cli -- path/to/module.wasm
