@@ -3,6 +3,8 @@
 //! Sections are the top-level organizational unit of a WASM binary.
 //! See [Spec §5.5](https://webassembly.github.io/spec/core/binary/modules.html#sections).
 
+use alloc::vec::Vec;
+
 use crate::binary::leb128::{self, Cursor};
 use crate::error::{ByteOffset, DecodeContext, DecodeError, DecodeErrorKind};
 
@@ -123,10 +125,8 @@ pub fn parse_preamble<'a>(cursor: &mut Cursor<'a>) -> Result<(), DecodeError> {
 ///
 /// Returns the sections as raw byte spans. Non-custom sections must appear
 /// in order of their section IDs (custom sections may appear anywhere).
-pub fn parse_sections<'a>(
-    cursor: &mut Cursor<'a>,
-) -> Result<alloc::vec::Vec<RawSection<'a>>, DecodeError> {
-    let mut sections = alloc::vec::Vec::new();
+pub fn parse_sections<'a>(cursor: &mut Cursor<'a>) -> Result<Vec<RawSection<'a>>, DecodeError> {
+    let mut sections = Vec::new();
     let mut last_non_custom_id: Option<u8> = None;
 
     while !cursor.is_empty() {

@@ -3,16 +3,21 @@
 #![no_std]
 #![no_main]
 
-static mut BUFFER: [u8; 256] = [0u8; 256];
+const BUFFER_LEN: usize = 256;
+static mut BUFFER: [u8; BUFFER_LEN] = [0u8; BUFFER_LEN];
 
 /// Write a byte at the given offset in the buffer. Returns the previous value.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn write_byte(offset: u32, value: u8) -> u8 {
     let idx = offset as usize;
-    if idx < BUFFER.len() {
-        let prev = BUFFER[idx];
-        BUFFER[idx] = value;
-        prev
+    if idx < BUFFER_LEN {
+        unsafe {
+            let ptr = core::ptr::addr_of_mut!(BUFFER) as *mut u8;
+            let cell = ptr.add(idx);
+            let prev = cell.read();
+            cell.write(value);
+            prev
+        }
     } else {
         0
     }

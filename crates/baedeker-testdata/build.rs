@@ -50,6 +50,8 @@ fn main() {
                 "wasm32-unknown-unknown",
                 "--crate-type",
                 "cdylib",
+                "--edition",
+                "2024",
                 "-O",
                 "-o",
             ])

@@ -3,7 +3,6 @@
 //! These types mirror the WASM spec's abstract syntax for types.
 //! See [Spec §2.3](https://webassembly.github.io/spec/core/syntax/types.html).
 
-#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
 /// Number types.

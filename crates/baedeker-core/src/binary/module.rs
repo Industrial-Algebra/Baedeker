@@ -6,7 +6,6 @@
 //!
 //! See [Spec §5.5.1](https://webassembly.github.io/spec/core/binary/modules.html).
 
-#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
 use crate::binary::leb128::Cursor;
