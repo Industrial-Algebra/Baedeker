@@ -1,0 +1,150 @@
+# Phase 1 Validation and Future Register Lowering
+
+This note records the intended relationship between Baedeker's Phase 1 validation work and the
+future Phase 2 register-based execution architecture.
+
+## Core distinction
+
+Baedeker still targets a **register-based internal IR** for execution.
+
+However, WebAssembly validation is defined by the spec in terms of an **abstract operand stack**
+and **structured control stack**. That means Phase 1 must model stack-machine semantics even if
+Baedeker never executes stack-machine code directly.
+
+These are different concerns:
+
+- **Validation stack** — abstract type stack used to prove a module is well-typed.
+- **Control stack** — abstract structured-control model for `block`, `loop`, `if`, labels, and
+  stack discipline.
+- **Execution IR** — future register-based lowered form used for efficient interpretation or AOT.
+
+## Intended pipeline
+
+The architecture remains:
+
+```text
+WASM bytes
+  -> DecodedModule
+  -> ValidatedModule
+  -> RegModule
+  -> Execution
+```
+
+More concretely:
+
+1. **Decode**
+   - Parse sections, types, imports, functions, code bodies, and instruction sequences.
+2. **Validate**
+   - Check stack-machine typing rules from the WASM spec.
+   - Resolve block signatures, local indices, function indices, and label structure.
+3. **Lower**
+   - Transform validated stack instructions into register-based IR.
+4. **Execute**
+   - Run register IR, not the original stack machine.
+
+## Why validation still uses a stack
+
+The validator's operand stack is not a runtime value stack. It is a **proof artifact**.
+
+Examples:
+
+- `local.get 0` pushes the local's `ValType`
+- `i32.add` pops two `i32` operands and pushes one `i32`
+- `br` and `return` trigger stack-polymorphic unreachable regions
+
+This is required by the WebAssembly validation algorithm regardless of the eventual runtime model.
+
+## How validation feeds lowering
+
+The future lowering pass will reuse the same high-level structure as validation, but enrich it with
+value identities.
+
+### Validation view
+
+```text
+operand stack: [i32, i32]
+control frames: block/loop/if typing information
+```
+
+### Lowering view
+
+```text
+operand stack: [r3:i32, r4:i32]
+control frames: block/loop/if typing + register-flow information
+```
+
+In other words:
+
+- **validation tracks types**
+- **lowering tracks typed value identities**
+
+That makes the Phase 1 validator the semantic front-end for the future register allocator/lowerer.
+
+## Example: simple arithmetic
+
+WASM source semantics:
+
+```text
+local.get 0
+local.get 1
+i32.add
+```
+
+Validation tracks:
+
+```text
+[] -> [i32] -> [i32, i32] -> [i32]
+```
+
+Lowering will later track:
+
+```text
+[] -> [r0:i32] -> [r0:i32, r1:i32] -> [r2:i32]
+```
+
+and emit something like:
+
+```text
+r2 = i32.add r0, r1
+```
+
+## Example: structured control flow
+
+Validation answers questions like:
+
+- what result types does this block produce?
+- what values must a branch provide to its label?
+- when is the operand stack polymorphic because control flow is unreachable?
+
+Lowering will use those same answers to decide:
+
+- what registers cross block boundaries?
+- what registers become block results?
+- what values a branch transfers to a target frame?
+
+This is why the control-frame machinery built in Phase 1 is directly useful for Phase 2.
+
+## Working principle for implementation
+
+The intended layering is:
+
+- `Instr` = decoded, spec-shaped stack-machine instruction
+- `ValidationState` = spec-shaped abstract typing state
+- `RegInstr` / `RegBlock` / `RegFunc` = future execution IR
+
+Baedeker should avoid conflating these layers.
+
+## Practical implication for current work
+
+Phase 1 should continue to improve:
+
+- operand stack typing
+- control-frame semantics
+- block signature resolution
+- label typing
+- stack polymorphism after unreachable control flow
+- `if`/`else` merge behavior
+
+These improvements are not architectural drift toward a stack interpreter.
+They are the semantic groundwork required before a correct stack-to-register lowering pass can
+exist.
