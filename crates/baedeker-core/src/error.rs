@@ -24,6 +24,12 @@ pub enum DecodeContext {
     Leb128,
     /// Decoding a type section entry.
     TypeSection,
+    /// Decoding an import section entry.
+    ImportSection,
+    /// Decoding a function section entry.
+    FunctionSection,
+    /// Decoding a code section entry.
+    CodeSection,
 }
 
 impl fmt::Display for DecodeContext {
@@ -35,6 +41,9 @@ impl fmt::Display for DecodeContext {
             DecodeContext::SectionBody { id } => write!(f, "section body (id={id})"),
             DecodeContext::Leb128 => write!(f, "LEB128 value"),
             DecodeContext::TypeSection => write!(f, "type section"),
+            DecodeContext::ImportSection => write!(f, "import section"),
+            DecodeContext::FunctionSection => write!(f, "function section"),
+            DecodeContext::CodeSection => write!(f, "code section"),
         }
     }
 }
@@ -73,6 +82,18 @@ pub enum DecodeErrorKind {
     DuplicateSection { id: u8 },
     /// Unknown value type encoding byte.
     UnknownValType { byte: u8 },
+    /// Unknown reference type encoding byte.
+    UnknownRefType { byte: u8 },
+    /// Unknown import descriptor tag.
+    UnknownImportDesc { byte: u8 },
+    /// Invalid global mutability encoding.
+    InvalidMutability { byte: u8 },
+    /// Invalid UTF-8 in a name string.
+    InvalidUtf8,
+    /// Function and code section counts disagree.
+    FunctionCodeLengthMismatch { functions: u32, codes: u32 },
+    /// Unknown instruction opcode.
+    UnknownOpcode { byte: u8 },
     /// Unexpected byte value.
     UnexpectedByte { expected: u8, found: u8 },
     /// Section body was not fully consumed.
@@ -116,6 +137,25 @@ impl fmt::Display for DecodeErrorKind {
             }
             DecodeErrorKind::UnknownValType { byte } => {
                 write!(f, "unknown value type {byte:#04x}")
+            }
+            DecodeErrorKind::UnknownRefType { byte } => {
+                write!(f, "unknown reference type {byte:#04x}")
+            }
+            DecodeErrorKind::UnknownImportDesc { byte } => {
+                write!(f, "unknown import descriptor {byte:#04x}")
+            }
+            DecodeErrorKind::InvalidMutability { byte } => {
+                write!(f, "invalid mutability {byte:#04x}")
+            }
+            DecodeErrorKind::InvalidUtf8 => write!(f, "invalid UTF-8 string"),
+            DecodeErrorKind::FunctionCodeLengthMismatch { functions, codes } => {
+                write!(
+                    f,
+                    "function/code section length mismatch: {functions} declarations, {codes} bodies"
+                )
+            }
+            DecodeErrorKind::UnknownOpcode { byte } => {
+                write!(f, "unknown opcode {byte:#04x}")
             }
             DecodeErrorKind::UnexpectedByte { expected, found } => {
                 write!(f, "expected {expected:#04x}, found {found:#04x}")

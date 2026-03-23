@@ -3,7 +3,7 @@
 //! These types mirror the WASM spec's abstract syntax for types.
 //! See [Spec §2.3](https://webassembly.github.io/spec/core/syntax/types.html).
 
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 
 /// Number types.
 /// See [Spec §2.3.1](https://webassembly.github.io/spec/core/syntax/types.html#number-types).
@@ -77,6 +77,23 @@ pub struct FuncType {
     pub results: Vec<ValType>,
 }
 
+/// A local declaration in a function body.
+/// See [Spec §5.5.13](https://webassembly.github.io/spec/core/binary/modules.html#code-section).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalDecl {
+    pub count: u32,
+    pub val_type: ValType,
+}
+
+/// A function body from the code section.
+/// The instruction stream is still stored as raw bytes until instruction decoding is implemented.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeBody<'a> {
+    pub locals: Vec<LocalDecl>,
+    pub body: &'a [u8],
+    pub body_offset: usize,
+}
+
 /// Limits — used by memories and tables to specify size constraints.
 /// See [Spec §2.3.7](https://webassembly.github.io/spec/core/syntax/types.html#limits).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +107,24 @@ pub struct Limits {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemType {
     pub limits: Limits,
+}
+
+/// An imported item declaration.
+/// See [Spec §2.5.11](https://webassembly.github.io/spec/core/syntax/modules.html#imports).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Import {
+    pub module: String,
+    pub name: String,
+    pub desc: ImportDesc,
+}
+
+/// Import descriptor specifying what kind of item is imported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImportDesc {
+    Func(TypeIdx),
+    Table(TableType),
+    Mem(MemType),
+    Global(GlobalType),
 }
 
 /// Table types.

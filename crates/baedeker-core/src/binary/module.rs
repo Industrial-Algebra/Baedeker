@@ -8,9 +8,14 @@
 
 use alloc::vec::Vec;
 
+use crate::binary::codesec;
+use crate::binary::functionsec;
+use crate::binary::importsec;
 use crate::binary::leb128::Cursor;
 use crate::binary::section::{self, RawSection, SectionId};
-use crate::error::DecodeError;
+use crate::binary::typesec;
+use crate::error::{ByteOffset, DecodeError, DecodeErrorKind};
+use crate::types::{CodeBody, FuncType, Import, TypeIdx};
 
 /// A parsed WASM module. Contains the raw section data segmented by type.
 ///
@@ -20,6 +25,14 @@ use crate::error::DecodeError;
 pub struct Module<'a> {
     /// All sections in the order they appeared, as raw byte spans.
     pub sections: Vec<RawSection<'a>>,
+    /// Decoded function signatures from the type section.
+    pub types: Vec<FuncType>,
+    /// Imported items declared by the module.
+    pub imports: Vec<Import>,
+    /// Type indices for module-defined (non-imported) functions.
+    pub functions: Vec<TypeIdx>,
+    /// Function bodies from the code section.
+    pub codes: Vec<CodeBody<'a>>,
 }
 
 impl<'a> Module<'a> {
@@ -32,13 +45,74 @@ impl<'a> Module<'a> {
 
         section::parse_preamble(&mut cursor)?;
         let sections = section::parse_sections(&mut cursor)?;
+        let types = match sections.iter().find(|s| s.id == SectionId::Type) {
+            Some(section) => typesec::parse_type_section(section)?,
+            None => Vec::new(),
+        };
+        let imports = match sections.iter().find(|s| s.id == SectionId::Import) {
+            Some(section) => importsec::parse_import_section(section)?,
+            None => Vec::new(),
+        };
+        let functions = match sections.iter().find(|s| s.id == SectionId::Function) {
+            Some(section) => functionsec::parse_function_section(section)?,
+            None => Vec::new(),
+        };
+        let codes = match sections.iter().find(|s| s.id == SectionId::Code) {
+            Some(section) => codesec::parse_code_section(section)?,
+            None => Vec::new(),
+        };
 
-        Ok(Module { sections })
+        if functions.len() != codes.len() {
+            return Err(DecodeError {
+                offset: ByteOffset(0),
+                context: crate::error::DecodeContext::CodeSection,
+                kind: DecodeErrorKind::FunctionCodeLengthMismatch {
+                    functions: functions.len() as u32,
+                    codes: codes.len() as u32,
+                },
+            });
+        }
+
+        Ok(Module {
+            sections,
+            types,
+            imports,
+            functions,
+            codes,
+        })
     }
 
     /// Get the first section with the given ID, if present.
     pub fn section(&self, id: SectionId) -> Option<&RawSection<'a>> {
         self.sections.iter().find(|s| s.id == id)
+    }
+
+    /// Function signatures declared in the type section.
+    pub fn types(&self) -> &[FuncType] {
+        &self.types
+    }
+
+    /// Imported items declared by the module.
+    pub fn imports(&self) -> &[Import] {
+        &self.imports
+    }
+
+    /// Type indices for module-defined functions.
+    pub fn functions(&self) -> &[TypeIdx] {
+        &self.functions
+    }
+
+    /// Number of imported functions in the function index space.
+    pub fn imported_function_count(&self) -> usize {
+        self.imports
+            .iter()
+            .filter(|import| matches!(import.desc, crate::types::ImportDesc::Func(_)))
+            .count()
+    }
+
+    /// Function bodies from the code section.
+    pub fn codes(&self) -> &[CodeBody<'a>] {
+        &self.codes
     }
 
     /// Iterate over all custom sections.
@@ -57,6 +131,8 @@ impl<'a> Module<'a> {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
+
     use super::*;
 
     #[test]
@@ -67,6 +143,10 @@ mod tests {
         ];
         let module = Module::decode(&bytes).unwrap();
         assert!(module.sections.is_empty());
+        assert!(module.types.is_empty());
+        assert!(module.imports.is_empty());
+        assert!(module.functions.is_empty());
+        assert!(module.codes.is_empty());
     }
 
     #[test]
@@ -76,11 +156,20 @@ mod tests {
             0x01, 0x00, 0x00, 0x00, // version
             0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type section: 1 functype () -> ()
             0x03, 0x02, 0x01, 0x00, // function section: 1 function referencing type 0
+            0x0A, 0x04, 0x01, 0x02, 0x00, 0x0B, // code section: 1 empty body
         ];
         let module = Module::decode(&bytes).unwrap();
-        assert_eq!(module.sections.len(), 2);
+        assert_eq!(module.sections.len(), 3);
         assert_eq!(module.sections[0].id, SectionId::Type);
         assert_eq!(module.sections[1].id, SectionId::Function);
+        assert_eq!(module.sections[2].id, SectionId::Code);
+        assert_eq!(module.types.len(), 1);
+        assert!(module.types[0].params.is_empty());
+        assert!(module.types[0].results.is_empty());
+        assert_eq!(module.functions, vec![TypeIdx(0)]);
+        assert_eq!(module.codes.len(), 1);
+        assert!(module.codes[0].locals.is_empty());
+        assert_eq!(module.codes[0].body, &[0x0B]);
     }
 
     #[test]
@@ -88,11 +177,15 @@ mod tests {
         let bytes = [
             0x00, 0x61, 0x73, 0x6D, // magic
             0x01, 0x00, 0x00, 0x00, // version
-            0x01, 0x01, 0xFF, // type section (1 byte)
+            0x01, 0x01, 0x00, // type section: zero entries
         ];
         let module = Module::decode(&bytes).unwrap();
         assert!(module.section(SectionId::Type).is_some());
         assert!(module.section(SectionId::Import).is_none());
+        assert_eq!(module.types().len(), 0);
+        assert!(module.imports().is_empty());
+        assert!(module.functions().is_empty());
+        assert!(module.codes().is_empty());
     }
 
     #[test]
@@ -134,6 +227,19 @@ mod tests {
     fn decode_add_fixture() {
         let bytes = baedeker_testdata::fixture_bytes("add");
         let module = Module::decode(&bytes).unwrap();
+        assert!(
+            !module.types().is_empty(),
+            "add.wasm should decode at least one function type"
+        );
+        assert!(
+            !module.functions().is_empty(),
+            "add.wasm should decode at least one function declaration"
+        );
+        assert!(
+            !module.codes().is_empty(),
+            "add.wasm should decode at least one function body"
+        );
+        assert_eq!(module.functions().len(), module.codes().len());
 
         // A cdylib with an exported function must have type, function, and code sections.
         assert!(
