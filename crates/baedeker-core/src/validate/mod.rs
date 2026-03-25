@@ -6,13 +6,17 @@
 //! - call target validation
 //! - basic structured control-flow balancing
 //! - basic operand/result typing for a small instruction subset
+//!
+//! Validation errors are reported against precise instruction byte offsets so
+//! malformed functions can be diagnosed at the failing opcode rather than only
+//! at the enclosing function body.
 
 pub mod error;
 pub mod state;
 
 use alloc::{vec, vec::Vec};
 
-use crate::binary::instr::Instr;
+use crate::binary::instr::{DecodedInstr, Instr};
 use crate::binary::module::Module;
 use crate::error::ByteOffset;
 use crate::types::{BlockType, FuncIdx, FuncType, ImportDesc, LocalDecl, ValType};
@@ -68,16 +72,18 @@ fn validate_function(
     let mut locals = ty.params.clone();
     expand_locals(&mut locals, local_decls);
 
-    let instrs = code.instructions().map_err(|e| ValidationError {
-        offset: e.offset,
-        function: Some(function),
-        kind: ValidationErrorKind::UnexpectedEnd,
-    })?;
+    let instrs = code
+        .instructions_with_offsets()
+        .map_err(|e| ValidationError {
+            offset: e.offset,
+            function: Some(function),
+            kind: e.into(),
+        })?;
 
     let mut state = ValidationState::new(locals, ty.results.clone());
 
-    for instr in &instrs {
-        validate_instr(module, function, instr, code.body_offset, &mut state)?;
+    for decoded in &instrs {
+        validate_instr(module, function, decoded, &mut state)?;
     }
 
     if state.controls.len() != 1 {
@@ -106,11 +112,12 @@ fn validate_function(
 fn validate_instr(
     module: &Module<'_>,
     function: FuncIdx,
-    instr: &Instr,
-    base_offset: usize,
+    decoded: &DecodedInstr,
     state: &mut ValidationState,
 ) -> Result<(), ValidationError> {
-    match instr {
+    let offset = decoded.offset.0;
+
+    match &decoded.instr {
         Instr::Unreachable => state.enter_unreachable(),
         Instr::Nop => {}
         Instr::Else => {
@@ -118,14 +125,14 @@ fn validate_instr(
                 let frame = state.current_frame_mut();
                 if frame.kind != If {
                     return Err(ValidationError {
-                        offset: ByteOffset(base_offset),
+                        offset: ByteOffset(offset),
                         function: Some(function),
                         kind: ValidationErrorKind::ElseOutsideIf,
                     });
                 }
                 if frame.has_else {
                     return Err(ValidationError {
-                        offset: ByteOffset(base_offset),
+                        offset: ByteOffset(offset),
                         function: Some(function),
                         kind: ValidationErrorKind::UnexpectedElse,
                     });
@@ -137,7 +144,7 @@ fn validate_instr(
                     frame.end_types.clone(),
                 )
             };
-            pop_exact(function, state, &end_types, base_offset)?;
+            pop_exact(function, state, &end_types, offset)?;
             state.operands.truncate(outer_height);
             for ty in start_types {
                 state.operands.push(ty);
@@ -148,13 +155,13 @@ fn validate_instr(
             state.reachability = Reachability::Reachable;
         }
         Instr::Block(block_type) => {
-            let sig = resolve_block_type(module, function, *block_type, base_offset)?;
-            pop_exact(function, state, &sig.params, base_offset)?;
+            let sig = resolve_block_type(module, function, *block_type, offset)?;
+            pop_exact(function, state, &sig.params, offset)?;
             state.push_frame(Block, *block_type, sig.params, sig.results);
         }
         Instr::Loop(block_type) => {
-            let sig = resolve_block_type(module, function, *block_type, base_offset)?;
-            pop_exact(function, state, &sig.params, base_offset)?;
+            let sig = resolve_block_type(module, function, *block_type, offset)?;
+            pop_exact(function, state, &sig.params, offset)?;
             state.push_frame(Loop, *block_type, sig.params, sig.results);
         }
         Instr::If(block_type) => {
@@ -162,20 +169,20 @@ fn validate_instr(
                 function,
                 state,
                 ValType::Num(crate::types::NumType::I32),
-                base_offset,
+                offset,
             )?;
-            let sig = resolve_block_type(module, function, *block_type, base_offset)?;
-            pop_exact(function, state, &sig.params, base_offset)?;
+            let sig = resolve_block_type(module, function, *block_type, offset)?;
+            pop_exact(function, state, &sig.params, offset)?;
             state.push_frame(If, *block_type, sig.params, sig.results);
         }
         Instr::End => {
             if state.controls.len() > 1 {
-                finish_frame(function, state, base_offset)?;
+                finish_frame(function, state, offset)?;
             }
         }
         Instr::Br(label) => {
-            let label_types = validate_label(function, state, *label, base_offset)?.to_vec();
-            pop_exact(function, state, &label_types, base_offset)?;
+            let label_types = validate_label(function, state, *label, offset)?.to_vec();
+            pop_exact(function, state, &label_types, offset)?;
             state.enter_unreachable();
         }
         Instr::BrIf(label) => {
@@ -183,49 +190,49 @@ fn validate_instr(
                 function,
                 state,
                 ValType::Num(crate::types::NumType::I32),
-                base_offset,
+                offset,
             )?;
-            let label_types = validate_label(function, state, *label, base_offset)?.to_vec();
-            pop_exact(function, state, &label_types, base_offset)?;
+            let label_types = validate_label(function, state, *label, offset)?.to_vec();
+            pop_exact(function, state, &label_types, offset)?;
             for ty in label_types {
                 state.operands.push(ty);
             }
         }
         Instr::Return => {
             let expected = state.controls[0].end_types.clone();
-            pop_exact(function, state, &expected, base_offset)?;
+            pop_exact(function, state, &expected, offset)?;
             state.enter_unreachable();
         }
         Instr::Call(idx) => {
-            let ty = resolve_func_type(module, *idx, function, base_offset)?;
-            pop_exact(function, state, &ty.params, base_offset)?;
+            let ty = resolve_func_type(module, *idx, function, offset)?;
+            pop_exact(function, state, &ty.params, offset)?;
             for result in &ty.results {
                 state.operands.push(*result);
             }
         }
         Instr::Drop => {
-            pop_any(function, state, base_offset)?;
+            pop_any(function, state, offset)?;
         }
         Instr::Select => {
             pop_expect(
                 function,
                 state,
                 ValType::Num(crate::types::NumType::I32),
-                base_offset,
+                offset,
             )?;
             let rhs = state.operands.pop().map_err(|kind| ValidationError {
-                offset: ByteOffset(base_offset),
+                offset: ByteOffset(offset),
                 function: Some(function),
                 kind,
             })?;
             let lhs = state.operands.pop().map_err(|kind| ValidationError {
-                offset: ByteOffset(base_offset),
+                offset: ByteOffset(offset),
                 function: Some(function),
                 kind,
             })?;
             if lhs != rhs {
                 return Err(ValidationError {
-                    offset: ByteOffset(base_offset),
+                    offset: ByteOffset(offset),
                     function: Some(function),
                     kind: ValidationErrorKind::TypeMismatch {
                         expected: lhs,
@@ -237,7 +244,7 @@ fn validate_instr(
         }
         Instr::LocalGet(idx) => {
             let ty = *state.locals.get(idx.0 as usize).ok_or(ValidationError {
-                offset: ByteOffset(base_offset),
+                offset: ByteOffset(offset),
                 function: Some(function),
                 kind: ValidationErrorKind::UnknownLocalIdx { idx: *idx },
             })?;
@@ -245,19 +252,19 @@ fn validate_instr(
         }
         Instr::LocalSet(idx) => {
             let ty = *state.locals.get(idx.0 as usize).ok_or(ValidationError {
-                offset: ByteOffset(base_offset),
+                offset: ByteOffset(offset),
                 function: Some(function),
                 kind: ValidationErrorKind::UnknownLocalIdx { idx: *idx },
             })?;
-            pop_expect(function, state, ty, base_offset)?;
+            pop_expect(function, state, ty, offset)?;
         }
         Instr::LocalTee(idx) => {
             let ty = *state.locals.get(idx.0 as usize).ok_or(ValidationError {
-                offset: ByteOffset(base_offset),
+                offset: ByteOffset(offset),
                 function: Some(function),
                 kind: ValidationErrorKind::UnknownLocalIdx { idx: *idx },
             })?;
-            pop_expect(function, state, ty, base_offset)?;
+            pop_expect(function, state, ty, offset)?;
             state.operands.push(ty);
         }
         Instr::I32Const(_) => state
@@ -277,7 +284,7 @@ fn validate_instr(
                 function,
                 state,
                 ValType::Num(crate::types::NumType::I32),
-                base_offset,
+                offset,
             )?;
             state
                 .operands
@@ -297,13 +304,13 @@ fn validate_instr(
                 function,
                 state,
                 ValType::Num(crate::types::NumType::I32),
-                base_offset,
+                offset,
             )?;
             pop_expect(
                 function,
                 state,
                 ValType::Num(crate::types::NumType::I32),
-                base_offset,
+                offset,
             )?;
             state
                 .operands
@@ -314,13 +321,13 @@ fn validate_instr(
                 function,
                 state,
                 ValType::Num(crate::types::NumType::I32),
-                base_offset,
+                offset,
             )?;
             pop_expect(
                 function,
                 state,
                 ValType::Num(crate::types::NumType::I32),
-                base_offset,
+                offset,
             )?;
             state
                 .operands
@@ -483,11 +490,15 @@ fn pop_any(
         return Ok(());
     }
 
-    state.operands.pop().map(|_| ()).map_err(|kind| ValidationError {
-        offset: ByteOffset(offset),
-        function: Some(function),
-        kind,
-    })
+    state
+        .operands
+        .pop()
+        .map(|_| ())
+        .map_err(|kind| ValidationError {
+            offset: ByteOffset(offset),
+            function: Some(function),
+            kind,
+        })
 }
 
 fn expand_locals(locals: &mut Vec<ValType>, local_decls: &[LocalDecl]) {
@@ -526,6 +537,23 @@ mod tests {
             err.kind,
             ValidationErrorKind::UnknownLocalIdx { .. }
         ));
+        assert_eq!(err.offset, ByteOffset(24));
+    }
+
+    #[test]
+    fn report_precise_offset_for_later_instruction() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7F,
+            0x01, 0x7F, 0x03, 0x02, 0x01, 0x00, 0x0A, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20,
+            0x01, 0x6A, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::UnknownLocalIdx { .. }
+        ));
+        assert_eq!(err.offset, ByteOffset(27));
     }
 
     #[test]
@@ -565,6 +593,42 @@ mod tests {
         assert!(matches!(
             err.kind,
             ValidationErrorKind::MissingElseForResult
+        ));
+    }
+
+    #[test]
+    fn map_unknown_opcode_into_validation_error() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x03, 0x02, 0x01, 0x00, 0x0A, 0x05, 0x01, 0x03, 0x00, 0xFF, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(23));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::Decode {
+                context: crate::error::DecodeContext::CodeSection,
+                kind: crate::error::DecodeErrorKind::UnknownOpcode { byte: 0xFF },
+            }
+        ));
+    }
+
+    #[test]
+    fn map_unterminated_body_into_validation_error() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x03, 0x02, 0x01, 0x00, 0x0A, 0x05, 0x01, 0x03, 0x00, 0x20, 0x00,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(25));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::Decode {
+                context: crate::error::DecodeContext::CodeSection,
+                kind: crate::error::DecodeErrorKind::UnexpectedEof,
+            }
         ));
     }
 }

@@ -6,7 +6,7 @@
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::error::ByteOffset;
+use crate::error::{ByteOffset, DecodeContext, DecodeError, DecodeErrorKind};
 use crate::types::{BlockType, FuncIdx, LabelIdx, LocalIdx, TypeIdx, ValType};
 
 /// A validation error with byte offset and function context.
@@ -31,6 +31,10 @@ pub enum ValidationErrorKind {
     },
     UnknownLabelIdx {
         idx: LabelIdx,
+    },
+    Decode {
+        context: DecodeContext,
+        kind: DecodeErrorKind,
     },
     UnexpectedElse,
     UnexpectedEnd,
@@ -83,6 +87,9 @@ impl fmt::Display for ValidationErrorKind {
             ValidationErrorKind::UnknownLabelIdx { idx } => {
                 write!(f, "unknown label index {}", idx.0)
             }
+            ValidationErrorKind::Decode { context, kind } => {
+                write!(f, "instruction decode error in {}: {}", context, kind)
+            }
             ValidationErrorKind::UnexpectedElse => write!(f, "unexpected else"),
             ValidationErrorKind::UnexpectedEnd => write!(f, "unexpected end"),
             ValidationErrorKind::UnterminatedControlFrames => {
@@ -110,6 +117,15 @@ impl fmt::Display for ValidationErrorKind {
                     expected, found
                 )
             }
+        }
+    }
+}
+
+impl From<DecodeError> for ValidationErrorKind {
+    fn from(error: DecodeError) -> Self {
+        Self::Decode {
+            context: error.context,
+            kind: error.kind,
         }
     }
 }

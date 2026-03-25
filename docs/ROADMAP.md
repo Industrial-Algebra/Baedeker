@@ -5,6 +5,11 @@
 
 ## Philosophy
 
+Baedeker is a language-runtime and systems project: its binary decoding, validation, malformed-input
+handling, and future robustness testing are all in service of standards-compliant WebAssembly
+execution, portability, and implementation quality. This roadmap is therefore framed around spec
+compliance, safe execution, and embedding ergonomics rather than offensive security use cases.
+
 This roadmap is structured as a bottom-up traversal of the WebAssembly abstraction stack.
 Each phase builds expertise in a specific layer before moving upward. Phases are designed to
 produce a working (if incomplete) artifact at each boundary, so the project is always runnable
@@ -199,6 +204,12 @@ WASM 2.0 core before moving to proposals.
 Once the interpreter is functional, set up differential testing against Wasmtime or Wasmer:
 feed the same modules to both runtimes and compare outputs. This catches spec misunderstandings
 that the official test suite might not cover.
+
+## Ongoing: Robustness Testing
+
+As parser and validator coverage grows, add fuzzing and malformed-input testing specifically to
+harden decoding, validation, and error reporting against truncated or invalid WebAssembly modules.
+This work is strictly for standards compliance, runtime robustness, and implementation quality.
 
 ## Ongoing: Creusot Contracts
 

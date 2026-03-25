@@ -2,6 +2,11 @@
 
 A WebAssembly runtime implemented in Rust, targeting iOS as a first-class platform.
 
+Baedeker focuses on correct decoding, validation, lowering, and execution of WebAssembly modules,
+with an architecture that begins from spec-aligned validation and later lowers validated programs
+into a register-based internal IR for execution. The project is intended for language runtime
+research, portability, and safe systems engineering.
+
 Named after the Hindmost Baedeker from Larry Niven's *Ringworld* / *Fleet of Worlds* series —
 cautious, methodical, but ultimately willing to venture into the unknown.
 
@@ -13,6 +18,13 @@ crates for geometric algebra, information geometry, and high-performance functio
 accepting the limitations of existing WASM runtimes. Baedeker exists to close that gap: a
 purpose-built WASM 2.0 engine that embeds natively into iOS via Rust FFI, with a clear path to
 GPU acceleration through Metal compute.
+
+## Non-goals
+
+- Baedeker is not a security exploitation framework.
+- It is not intended for offensive security workflows.
+- Its binary parsing, validation, malformed-input handling, and future robustness testing exist
+  to improve correctness, spec compliance, and runtime reliability.
 
 ## Goals
 
