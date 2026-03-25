@@ -13,10 +13,11 @@ use crate::binary::functionsec;
 use crate::binary::globalsec;
 use crate::binary::importsec;
 use crate::binary::leb128::Cursor;
+use crate::binary::memorysec;
 use crate::binary::section::{self, RawSection, SectionId};
 use crate::binary::typesec;
 use crate::error::{ByteOffset, DecodeError, DecodeErrorKind};
-use crate::types::{CodeBody, FuncType, Global, Import, TypeIdx};
+use crate::types::{CodeBody, FuncType, Global, Import, MemType, TypeIdx};
 
 /// A parsed WASM module. Contains the raw section data segmented by type.
 ///
@@ -34,6 +35,8 @@ pub struct Module<'a> {
     pub functions: Vec<TypeIdx>,
     /// Defined globals from the global section.
     pub globals: Vec<Global<'a>>,
+    /// Defined memories from the memory section.
+    pub memories: Vec<MemType>,
     /// Function bodies from the code section.
     pub codes: Vec<CodeBody<'a>>,
 }
@@ -64,6 +67,10 @@ impl<'a> Module<'a> {
             Some(section) => globalsec::parse_global_section(section)?,
             None => Vec::new(),
         };
+        let memories = match sections.iter().find(|s| s.id == SectionId::Memory) {
+            Some(section) => memorysec::parse_memory_section(section)?,
+            None => Vec::new(),
+        };
         let codes = match sections.iter().find(|s| s.id == SectionId::Code) {
             Some(section) => codesec::parse_code_section(section)?,
             None => Vec::new(),
@@ -86,6 +93,7 @@ impl<'a> Module<'a> {
             imports,
             functions,
             globals,
+            memories,
             codes,
         })
     }
@@ -121,6 +129,11 @@ impl<'a> Module<'a> {
     /// Defined globals from the global section.
     pub fn globals(&self) -> &[Global<'a>] {
         &self.globals
+    }
+
+    /// Defined memories from the memory section.
+    pub fn memories(&self) -> &[MemType] {
+        &self.memories
     }
 
     /// Function bodies from the code section.
@@ -160,6 +173,7 @@ mod tests {
         assert!(module.imports.is_empty());
         assert!(module.functions.is_empty());
         assert!(module.globals.is_empty());
+        assert!(module.memories.is_empty());
         assert!(module.codes.is_empty());
     }
 
@@ -182,6 +196,7 @@ mod tests {
         assert!(module.types[0].results.is_empty());
         assert_eq!(module.functions, vec![TypeIdx(0)]);
         assert!(module.globals.is_empty());
+        assert!(module.memories.is_empty());
         assert_eq!(module.codes.len(), 1);
         assert!(module.codes[0].locals.is_empty());
         assert_eq!(module.codes[0].body, &[0x0B]);
@@ -201,6 +216,7 @@ mod tests {
         assert!(module.imports().is_empty());
         assert!(module.functions().is_empty());
         assert!(module.globals().is_empty());
+        assert!(module.memories().is_empty());
         assert!(module.codes().is_empty());
     }
 
@@ -287,6 +303,12 @@ mod tests {
                 || module.section(SectionId::Data).is_some(),
             "memory.wasm missing memory/data section"
         );
+        if module.section(SectionId::Memory).is_some() {
+            assert!(
+                !module.memories().is_empty(),
+                "memory.wasm memory section should decode memory types"
+            );
+        }
     }
 
     #[test]
@@ -298,5 +320,16 @@ mod tests {
         let module = Module::decode(&bytes).unwrap();
         assert_eq!(module.globals().len(), 1);
         assert_eq!(module.globals()[0].init_expr, &[0x41, 0x2A, 0x0B]);
+    }
+
+    #[test]
+    fn decode_module_with_memory_section() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x05, 0x03, 0x01, 0x00, 0x02,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        assert_eq!(module.memories().len(), 1);
+        assert_eq!(module.memories()[0].limits.min, 2);
+        assert_eq!(module.memories()[0].limits.max, None);
     }
 }

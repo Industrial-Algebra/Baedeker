@@ -30,6 +30,8 @@ pub enum DecodeContext {
     FunctionSection,
     /// Decoding a global section entry.
     GlobalSection,
+    /// Decoding a memory section entry.
+    MemorySection,
     /// Decoding a code section entry.
     CodeSection,
 }
@@ -46,6 +48,7 @@ impl fmt::Display for DecodeContext {
             DecodeContext::ImportSection => write!(f, "import section"),
             DecodeContext::FunctionSection => write!(f, "function section"),
             DecodeContext::GlobalSection => write!(f, "global section"),
+            DecodeContext::MemorySection => write!(f, "memory section"),
             DecodeContext::CodeSection => write!(f, "code section"),
         }
     }

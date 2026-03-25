@@ -629,13 +629,17 @@ fn resolve_memory_type(
     function: FuncIdx,
     offset: usize,
 ) -> Result<crate::types::MemType, ValidationError> {
-    module
+    let imported = module
         .imports
         .iter()
         .filter_map(|import| match import.desc {
             ImportDesc::Mem(memory) => Some(memory),
             _ => None,
-        })
+        });
+    let defined = module.memories.iter().copied();
+
+    imported
+        .chain(defined)
         .nth(idx.0 as usize)
         .ok_or(ValidationError {
             offset: ByteOffset(offset),
@@ -1059,6 +1063,17 @@ mod tests {
             0x7F, 0x02, 0x0C, 0x01, 0x03, b'e', b'n', b'v', 0x03, b'm', b'e', b'm', 0x02, 0x00,
             0x01, 0x03, 0x02, 0x01, 0x00, 0x0A, 0x0B, 0x01, 0x09, 0x00, 0x41, 0x01, 0x40, 0x00,
             0x1A, 0x3F, 0x00, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_memory_size_and_grow_for_defined_memory() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01,
+            0x7F, 0x03, 0x02, 0x01, 0x00, 0x05, 0x03, 0x01, 0x00, 0x01, 0x0A, 0x0B, 0x01, 0x09,
+            0x00, 0x41, 0x01, 0x40, 0x00, 0x1A, 0x3F, 0x00, 0x0B,
         ];
         let module = Module::decode(&bytes).unwrap();
         module.validate().unwrap();

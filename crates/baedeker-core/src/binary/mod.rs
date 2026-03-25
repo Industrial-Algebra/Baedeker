@@ -8,6 +8,7 @@ pub mod globalsec;
 pub mod importsec;
 pub mod instr;
 pub mod leb128;
+pub mod memorysec;
 pub mod module;
 pub mod section;
 pub mod typesec;
