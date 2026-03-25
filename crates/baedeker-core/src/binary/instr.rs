@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 
 use crate::binary::leb128::{self, Cursor};
 use crate::error::{ByteOffset, DecodeContext, DecodeError, DecodeErrorKind};
-use crate::types::{BlockType, CodeBody, FuncIdx, LabelIdx, LocalIdx, ValType};
+use crate::types::{BlockType, CodeBody, FuncIdx, GlobalIdx, LabelIdx, LocalIdx, MemIdx, ValType};
 
 /// A decoded instruction paired with its absolute byte offset in the module.
 #[derive(Debug, Clone, PartialEq)]
@@ -31,13 +31,22 @@ pub enum Instr {
     End,
     Br(LabelIdx),
     BrIf(LabelIdx),
+    BrTable {
+        targets: Vec<LabelIdx>,
+        default: LabelIdx,
+    },
     Return,
     Call(FuncIdx),
     Drop,
     Select,
+    SelectTyped(Vec<ValType>),
     LocalGet(LocalIdx),
     LocalSet(LocalIdx),
     LocalTee(LocalIdx),
+    GlobalGet(GlobalIdx),
+    GlobalSet(GlobalIdx),
+    MemorySize(MemIdx),
+    MemoryGrow(MemIdx),
     I32Const(i32),
     I64Const(i64),
     F32Const(f32),
@@ -54,6 +63,7 @@ pub enum Instr {
     I32GeS,
     I32GeU,
     I32Add,
+    I64Add,
 }
 
 impl<'a> CodeBody<'a> {
@@ -137,13 +147,27 @@ pub fn decode_instr_with_offset(
         0x0B => Instr::End,
         0x0C => Instr::Br(LabelIdx(decode_u32(cursor, base_offset)?)),
         0x0D => Instr::BrIf(LabelIdx(decode_u32(cursor, base_offset)?)),
+        0x0E => {
+            let target_count = decode_u32(cursor, base_offset)?;
+            let mut targets = Vec::with_capacity(target_count as usize);
+            for _ in 0..target_count {
+                targets.push(LabelIdx(decode_u32(cursor, base_offset)?));
+            }
+            let default = LabelIdx(decode_u32(cursor, base_offset)?);
+            Instr::BrTable { targets, default }
+        }
         0x0F => Instr::Return,
         0x10 => Instr::Call(FuncIdx(decode_u32(cursor, base_offset)?)),
         0x1A => Instr::Drop,
         0x1B => Instr::Select,
+        0x1C => Instr::SelectTyped(parse_result_types(cursor, base_offset)?),
         0x20 => Instr::LocalGet(LocalIdx(decode_u32(cursor, base_offset)?)),
         0x21 => Instr::LocalSet(LocalIdx(decode_u32(cursor, base_offset)?)),
         0x22 => Instr::LocalTee(LocalIdx(decode_u32(cursor, base_offset)?)),
+        0x23 => Instr::GlobalGet(GlobalIdx(decode_u32(cursor, base_offset)?)),
+        0x24 => Instr::GlobalSet(GlobalIdx(decode_u32(cursor, base_offset)?)),
+        0x3F => Instr::MemorySize(parse_mem_idx(cursor, base_offset)?),
+        0x40 => Instr::MemoryGrow(parse_mem_idx(cursor, base_offset)?),
         0x41 => Instr::I32Const(decode_i32(cursor, base_offset)?),
         0x42 => Instr::I64Const(decode_i64(cursor, base_offset)?),
         0x43 => Instr::F32Const(decode_f32(cursor, base_offset)?),
@@ -160,6 +184,7 @@ pub fn decode_instr_with_offset(
         0x4E => Instr::I32GeS,
         0x4F => Instr::I32GeU,
         0x6A => Instr::I32Add,
+        0x7C => Instr::I64Add,
         _ => {
             return Err(DecodeError {
                 offset: ByteOffset(base_offset + opcode_offset),
@@ -173,6 +198,49 @@ pub fn decode_instr_with_offset(
         offset: ByteOffset(base_offset + opcode_offset),
         instr,
     })
+}
+
+fn parse_mem_idx(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<MemIdx, DecodeError> {
+    let pos = cursor.position();
+    let byte = cursor.read_byte().map_err(|_| DecodeError {
+        offset: ByteOffset(base_offset + pos),
+        context: DecodeContext::CodeSection,
+        kind: DecodeErrorKind::UnexpectedEof,
+    })?;
+    if byte != 0x00 {
+        return Err(DecodeError {
+            offset: ByteOffset(base_offset + pos),
+            context: DecodeContext::CodeSection,
+            kind: DecodeErrorKind::UnexpectedByte {
+                expected: 0x00,
+                found: byte,
+            },
+        });
+    }
+    Ok(MemIdx(0))
+}
+
+fn parse_result_types(
+    cursor: &mut Cursor<'_>,
+    base_offset: usize,
+) -> Result<Vec<ValType>, DecodeError> {
+    let count = decode_u32(cursor, base_offset)?;
+    let mut types = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let pos = cursor.position();
+        let byte = cursor.read_byte().map_err(|_| DecodeError {
+            offset: ByteOffset(base_offset + pos),
+            context: DecodeContext::CodeSection,
+            kind: DecodeErrorKind::UnexpectedEof,
+        })?;
+        let ty = ValType::from_encoding(byte).ok_or(DecodeError {
+            offset: ByteOffset(base_offset + pos),
+            context: DecodeContext::CodeSection,
+            kind: DecodeErrorKind::UnknownValType { byte },
+        })?;
+        types.push(ty);
+    }
+    Ok(types)
 }
 
 fn parse_block_type(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<BlockType, DecodeError> {
@@ -319,6 +387,50 @@ mod tests {
                 Instr::Block(BlockType::Empty),
                 Instr::Br(LabelIdx(0)),
                 Instr::End,
+                Instr::End,
+            ]
+        );
+    }
+
+    #[test]
+    fn decode_br_table() {
+        let instrs = decode_instr_sequence(&[0x0E, 0x02, 0x00, 0x01, 0x02, 0x0B], 220).unwrap();
+        assert_eq!(
+            instrs,
+            vec![
+                Instr::BrTable {
+                    targets: vec![LabelIdx(0), LabelIdx(1)],
+                    default: LabelIdx(2),
+                },
+                Instr::End,
+            ]
+        );
+    }
+
+    #[test]
+    fn decode_typed_select() {
+        let instrs = decode_instr_sequence(&[0x1C, 0x01, 0x7E, 0x0B], 230).unwrap();
+        assert_eq!(
+            instrs,
+            vec![
+                Instr::SelectTyped(vec![ValType::Num(NumType::I64)]),
+                Instr::End,
+            ]
+        );
+    }
+
+    #[test]
+    fn decode_globals_and_memory_ops() {
+        let instrs =
+            decode_instr_sequence(&[0x23, 0x00, 0x24, 0x01, 0x3F, 0x00, 0x40, 0x00, 0x0B], 240)
+                .unwrap();
+        assert_eq!(
+            instrs,
+            vec![
+                Instr::GlobalGet(GlobalIdx(0)),
+                Instr::GlobalSet(GlobalIdx(1)),
+                Instr::MemorySize(MemIdx(0)),
+                Instr::MemoryGrow(MemIdx(0)),
                 Instr::End,
             ]
         );

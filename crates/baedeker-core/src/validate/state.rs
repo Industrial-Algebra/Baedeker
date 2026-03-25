@@ -6,7 +6,6 @@
 use alloc::{vec, vec::Vec};
 
 use crate::types::{BlockType, ValType};
-use crate::validate::error::ValidationErrorKind;
 
 /// Reachability state of the current validation point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,8 +62,8 @@ impl TypeStack {
         self.values.push(value);
     }
 
-    pub fn pop(&mut self) -> Result<ValType, ValidationErrorKind> {
-        self.values.pop().ok_or(ValidationErrorKind::StackUnderflow)
+    pub fn pop(&mut self) -> Option<ValType> {
+        self.values.pop()
     }
 
     pub fn as_slice(&self) -> &[ValType] {

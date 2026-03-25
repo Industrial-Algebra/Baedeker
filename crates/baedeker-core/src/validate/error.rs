@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use crate::error::{ByteOffset, DecodeContext, DecodeError, DecodeErrorKind};
-use crate::types::{BlockType, FuncIdx, LabelIdx, LocalIdx, TypeIdx, ValType};
+use crate::types::{BlockType, FuncIdx, GlobalIdx, LabelIdx, LocalIdx, MemIdx, TypeIdx, ValType};
 
 /// A validation error with byte offset and function context.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,12 +29,27 @@ pub enum ValidationErrorKind {
     UnknownLocalIdx {
         idx: LocalIdx,
     },
+    UnknownGlobalIdx {
+        idx: GlobalIdx,
+    },
+    UnknownMemIdx {
+        idx: MemIdx,
+    },
     UnknownLabelIdx {
         idx: LabelIdx,
     },
     Decode {
         context: DecodeContext,
         kind: DecodeErrorKind,
+    },
+    BranchTypeMismatch {
+        label: LabelIdx,
+        expected: Vec<ValType>,
+        found: Vec<ValType>,
+    },
+    InconsistentBranchTypes {
+        expected: Vec<ValType>,
+        found: Vec<ValType>,
     },
     UnexpectedElse,
     UnexpectedEnd,
@@ -44,10 +59,30 @@ pub enum ValidationErrorKind {
     InvalidBlockType {
         block_type: BlockType,
     },
-    StackUnderflow,
+    ControlResultTypeMismatch {
+        expected: Vec<ValType>,
+        found: Vec<ValType>,
+    },
+    InvalidSelectResultArity {
+        found: usize,
+    },
+    SelectOperandTypeMismatch {
+        expected: ValType,
+        found: Vec<ValType>,
+    },
+    StackUnderflow {
+        op: &'static str,
+        expected: Vec<ValType>,
+        available: Vec<ValType>,
+    },
     TypeMismatch {
         expected: ValType,
         found: ValType,
+    },
+    FunctionResultTypeMismatch {
+        expected: Vec<ValType>,
+        found: Vec<ValType>,
+        full_stack: Vec<ValType>,
     },
     ResultTypeMismatch {
         expected: Vec<ValType>,
@@ -84,11 +119,35 @@ impl fmt::Display for ValidationErrorKind {
             ValidationErrorKind::UnknownLocalIdx { idx } => {
                 write!(f, "unknown local index {}", idx.0)
             }
+            ValidationErrorKind::UnknownGlobalIdx { idx } => {
+                write!(f, "unknown global index {}", idx.0)
+            }
+            ValidationErrorKind::UnknownMemIdx { idx } => {
+                write!(f, "unknown memory index {}", idx.0)
+            }
             ValidationErrorKind::UnknownLabelIdx { idx } => {
                 write!(f, "unknown label index {}", idx.0)
             }
             ValidationErrorKind::Decode { context, kind } => {
                 write!(f, "instruction decode error in {}: {}", context, kind)
+            }
+            ValidationErrorKind::BranchTypeMismatch {
+                label,
+                expected,
+                found,
+            } => {
+                write!(
+                    f,
+                    "branch to label {} has type mismatch: expected {:?}, found {:?}",
+                    label.0, expected, found
+                )
+            }
+            ValidationErrorKind::InconsistentBranchTypes { expected, found } => {
+                write!(
+                    f,
+                    "branch targets have inconsistent types: expected {:?}, found {:?}",
+                    expected, found
+                )
             }
             ValidationErrorKind::UnexpectedElse => write!(f, "unexpected else"),
             ValidationErrorKind::UnexpectedEnd => write!(f, "unexpected end"),
@@ -102,12 +161,54 @@ impl fmt::Display for ValidationErrorKind {
             ValidationErrorKind::InvalidBlockType { block_type } => {
                 write!(f, "invalid block type {:?}", block_type)
             }
-            ValidationErrorKind::StackUnderflow => write!(f, "operand stack underflow"),
+            ValidationErrorKind::ControlResultTypeMismatch { expected, found } => {
+                write!(
+                    f,
+                    "control frame result type mismatch: expected {:?}, found {:?}",
+                    expected, found
+                )
+            }
+            ValidationErrorKind::InvalidSelectResultArity { found } => {
+                write!(
+                    f,
+                    "typed select requires exactly one result type, found {}",
+                    found
+                )
+            }
+            ValidationErrorKind::SelectOperandTypeMismatch { expected, found } => {
+                write!(
+                    f,
+                    "select operands must match {:?}, found {:?}",
+                    expected, found
+                )
+            }
+            ValidationErrorKind::StackUnderflow {
+                op,
+                expected,
+                available,
+            } => {
+                write!(
+                    f,
+                    "operand stack underflow in {}: expected {:?}, available {:?}",
+                    op, expected, available
+                )
+            }
             ValidationErrorKind::TypeMismatch { expected, found } => {
                 write!(
                     f,
                     "type mismatch: expected {:?}, found {:?}",
                     expected, found
+                )
+            }
+            ValidationErrorKind::FunctionResultTypeMismatch {
+                expected,
+                found,
+                full_stack,
+            } => {
+                write!(
+                    f,
+                    "function result type mismatch: expected {:?}, found {:?} at stack top (full stack {:?})",
+                    expected, found, full_stack
                 )
             }
             ValidationErrorKind::ResultTypeMismatch { expected, found } => {
