@@ -4,6 +4,7 @@
 
 pub mod codesec;
 pub mod functionsec;
+pub mod globalsec;
 pub mod importsec;
 pub mod instr;
 pub mod leb128;

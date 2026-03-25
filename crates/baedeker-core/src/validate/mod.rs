@@ -16,11 +16,11 @@ pub mod state;
 
 use alloc::{vec, vec::Vec};
 
-use crate::binary::instr::{DecodedInstr, Instr};
+use crate::binary::instr::{DecodedInstr, Instr, decode_instr_sequence_with_offsets};
 use crate::binary::module::Module;
 use crate::error::ByteOffset;
 use crate::types::{
-    BlockType, FuncIdx, FuncType, GlobalIdx, ImportDesc, LocalDecl, MemIdx, ValType,
+    BlockType, FuncIdx, FuncType, GlobalIdx, ImportDesc, LocalDecl, MemIdx, Mutability, ValType,
 };
 use crate::validate::error::{ValidationError, ValidationErrorKind};
 use crate::validate::state::{ControlKind::*, Reachability, ValidationState};
@@ -50,6 +50,8 @@ pub fn validate_module(module: &Module<'_>) -> Result<(), ValidationError> {
         }
     }
 
+    validate_globals(module)?;
+
     for (func_idx, (type_idx, code)) in module.functions.iter().zip(module.codes()).enumerate() {
         let ty = &module.types[type_idx.0 as usize];
         validate_function(
@@ -59,6 +61,90 @@ pub fn validate_module(module: &Module<'_>) -> Result<(), ValidationError> {
             code.locals.as_slice(),
             code,
         )?;
+    }
+
+    Ok(())
+}
+
+fn validate_globals(module: &Module<'_>) -> Result<(), ValidationError> {
+    for global in module.globals() {
+        validate_global_init_expr(module, global)?;
+    }
+    Ok(())
+}
+
+fn validate_global_init_expr(
+    module: &Module<'_>,
+    global: &crate::types::Global<'_>,
+) -> Result<(), ValidationError> {
+    let instrs =
+        decode_instr_sequence_with_offsets(global.init_expr, global.init_offset).map_err(|e| {
+            ValidationError {
+                offset: e.offset,
+                function: None,
+                kind: e.into(),
+            }
+        })?;
+
+    if instrs.len() != 2 || !matches!(instrs.last().map(|d| &d.instr), Some(Instr::End)) {
+        return Err(ValidationError {
+            offset: instrs
+                .first()
+                .map(|decoded| decoded.offset)
+                .unwrap_or(ByteOffset(global.init_offset)),
+            function: None,
+            kind: ValidationErrorKind::InvalidGlobalInitExpr,
+        });
+    }
+
+    let found = match instrs[0].instr {
+        Instr::I32Const(_) => ValType::Num(crate::types::NumType::I32),
+        Instr::I64Const(_) => ValType::Num(crate::types::NumType::I64),
+        Instr::F32Const(_) => ValType::Num(crate::types::NumType::F32),
+        Instr::F64Const(_) => ValType::Num(crate::types::NumType::F64),
+        Instr::GlobalGet(idx) => {
+            let imported_global = module
+                .imports
+                .iter()
+                .filter_map(|import| match import.desc {
+                    ImportDesc::Global(global) => Some(global),
+                    _ => None,
+                })
+                .nth(idx.0 as usize)
+                .ok_or(ValidationError {
+                    offset: instrs[0].offset,
+                    function: None,
+                    kind: ValidationErrorKind::UnknownGlobalIdx { idx },
+                })?;
+
+            if imported_global.mutability != Mutability::Const {
+                return Err(ValidationError {
+                    offset: instrs[0].offset,
+                    function: None,
+                    kind: ValidationErrorKind::MutableGlobalInInitExpr { idx },
+                });
+            }
+
+            imported_global.val_type
+        }
+        _ => {
+            return Err(ValidationError {
+                offset: instrs[0].offset,
+                function: None,
+                kind: ValidationErrorKind::NonConstantGlobalInitExpr,
+            });
+        }
+    };
+
+    if found != global.global_type.val_type {
+        return Err(ValidationError {
+            offset: instrs[0].offset,
+            function: None,
+            kind: ValidationErrorKind::GlobalInitTypeMismatch {
+                expected: global.global_type.val_type,
+                found,
+            },
+        });
     }
 
     Ok(())
@@ -518,13 +604,17 @@ fn resolve_global_type(
     function: FuncIdx,
     offset: usize,
 ) -> Result<crate::types::GlobalType, ValidationError> {
-    module
+    let imported = module
         .imports
         .iter()
         .filter_map(|import| match import.desc {
             ImportDesc::Global(global) => Some(global),
             _ => None,
-        })
+        });
+    let defined = module.globals.iter().map(|global| global.global_type);
+
+    imported
+        .chain(defined)
         .nth(idx.0 as usize)
         .ok_or(ValidationError {
             offset: ByteOffset(offset),
@@ -634,7 +724,11 @@ fn pop_expect(
         return Err(ValidationError {
             offset: ByteOffset(offset),
             function: Some(function),
-            kind: ValidationErrorKind::TypeMismatch { expected, found },
+            kind: ValidationErrorKind::TypeMismatch {
+                op,
+                expected,
+                found,
+            },
         });
     }
     Ok(())
@@ -795,6 +889,25 @@ mod tests {
     }
 
     #[test]
+    fn report_type_mismatch_with_operation_context() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x03, 0x02, 0x01, 0x00, 0x0A, 0x09, 0x01, 0x07, 0x00, 0x42, 0x01, 0x41, 0x02, 0x6A,
+            0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(27));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::TypeMismatch { op, expected, found }
+                if op == "i32.add"
+                    && expected == ValType::Num(crate::types::NumType::I32)
+                    && found == ValType::Num(crate::types::NumType::I64)
+        ));
+    }
+
+    #[test]
     fn report_precise_offset_for_later_instruction() {
         let bytes = [
             0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7F,
@@ -866,6 +979,77 @@ mod tests {
         ];
         let module = Module::decode(&bytes).unwrap();
         module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_defined_global_get() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01,
+            0x7F, 0x03, 0x02, 0x01, 0x00, 0x06, 0x06, 0x01, 0x7F, 0x00, 0x41, 0x2A, 0x0B, 0x0A,
+            0x06, 0x01, 0x04, 0x00, 0x23, 0x00, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_global_init_expr_from_imported_const_global() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x02, 0x0A, 0x01, 0x03, b'e', b'n',
+            b'v', 0x01, b'g', 0x03, 0x7F, 0x00, 0x06, 0x06, 0x01, 0x7F, 0x00, 0x23, 0x00, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn reject_global_init_expr_from_mutable_imported_global() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x02, 0x0A, 0x01, 0x03, b'e', b'n',
+            b'v', 0x01, b'g', 0x03, 0x7F, 0x01, 0x06, 0x06, 0x01, 0x7F, 0x00, 0x23, 0x00, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(25));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::MutableGlobalInInitExpr {
+                idx: crate::types::GlobalIdx(0)
+            }
+        ));
+    }
+
+    #[test]
+    fn reject_global_init_expr_type_mismatch() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x06, 0x06, 0x01, 0x7E, 0x00, 0x41,
+            0x2A, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(13));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::GlobalInitTypeMismatch {
+                expected: ValType::Num(crate::types::NumType::I64),
+                found: ValType::Num(crate::types::NumType::I32),
+            }
+        ));
+    }
+
+    #[test]
+    fn reject_non_constant_global_init_expr() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x06, 0x08, 0x01, 0x7F, 0x00, 0x41,
+            0x01, 0x41, 0x02, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(13));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::InvalidGlobalInitExpr
+        ));
     }
 
     #[test]

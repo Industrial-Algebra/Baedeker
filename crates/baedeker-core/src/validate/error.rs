@@ -42,6 +42,15 @@ pub enum ValidationErrorKind {
         context: DecodeContext,
         kind: DecodeErrorKind,
     },
+    InvalidGlobalInitExpr,
+    NonConstantGlobalInitExpr,
+    MutableGlobalInInitExpr {
+        idx: GlobalIdx,
+    },
+    GlobalInitTypeMismatch {
+        expected: ValType,
+        found: ValType,
+    },
     BranchTypeMismatch {
         label: LabelIdx,
         expected: Vec<ValType>,
@@ -76,6 +85,7 @@ pub enum ValidationErrorKind {
         available: Vec<ValType>,
     },
     TypeMismatch {
+        op: &'static str,
         expected: ValType,
         found: ValType,
     },
@@ -130,6 +140,26 @@ impl fmt::Display for ValidationErrorKind {
             }
             ValidationErrorKind::Decode { context, kind } => {
                 write!(f, "instruction decode error in {}: {}", context, kind)
+            }
+            ValidationErrorKind::InvalidGlobalInitExpr => {
+                write!(f, "invalid global initializer expression")
+            }
+            ValidationErrorKind::NonConstantGlobalInitExpr => {
+                write!(f, "global initializer must be a constant expression")
+            }
+            ValidationErrorKind::MutableGlobalInInitExpr { idx } => {
+                write!(
+                    f,
+                    "global initializer references mutable imported global {}",
+                    idx.0
+                )
+            }
+            ValidationErrorKind::GlobalInitTypeMismatch { expected, found } => {
+                write!(
+                    f,
+                    "global initializer type mismatch: expected {:?}, found {:?}",
+                    expected, found
+                )
             }
             ValidationErrorKind::BranchTypeMismatch {
                 label,
@@ -193,11 +223,15 @@ impl fmt::Display for ValidationErrorKind {
                     op, expected, available
                 )
             }
-            ValidationErrorKind::TypeMismatch { expected, found } => {
+            ValidationErrorKind::TypeMismatch {
+                op,
+                expected,
+                found,
+            } => {
                 write!(
                     f,
-                    "type mismatch: expected {:?}, found {:?}",
-                    expected, found
+                    "type mismatch in {}: expected {:?}, found {:?}",
+                    op, expected, found
                 )
             }
             ValidationErrorKind::FunctionResultTypeMismatch {

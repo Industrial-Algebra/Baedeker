@@ -94,6 +94,15 @@ pub struct CodeBody<'a> {
     pub body_offset: usize,
 }
 
+/// A defined global from the global section.
+/// See [Spec §5.5.11](https://webassembly.github.io/spec/core/binary/modules.html#global-section).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Global<'a> {
+    pub global_type: GlobalType,
+    pub init_expr: &'a [u8],
+    pub init_offset: usize,
+}
+
 /// Limits — used by memories and tables to specify size constraints.
 /// See [Spec §2.3.7](https://webassembly.github.io/spec/core/syntax/types.html#limits).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

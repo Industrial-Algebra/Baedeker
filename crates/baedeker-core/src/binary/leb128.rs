@@ -28,6 +28,11 @@ impl<'a> Cursor<'a> {
         &self.data[self.pos..]
     }
 
+    /// Original backing slice.
+    pub fn original(&self) -> &'a [u8] {
+        self.data
+    }
+
     /// Whether we've consumed all input.
     pub fn is_empty(&self) -> bool {
         self.pos >= self.data.len()
