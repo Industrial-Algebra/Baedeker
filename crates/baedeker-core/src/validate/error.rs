@@ -31,9 +31,11 @@ pub enum ValidationErrorKind {
     },
     UnknownGlobalIdx {
         idx: GlobalIdx,
+        available: u32,
     },
     UnknownMemIdx {
         idx: MemIdx,
+        available: u32,
     },
     UnknownLabelIdx {
         idx: LabelIdx,
@@ -129,11 +131,19 @@ impl fmt::Display for ValidationErrorKind {
             ValidationErrorKind::UnknownLocalIdx { idx } => {
                 write!(f, "unknown local index {}", idx.0)
             }
-            ValidationErrorKind::UnknownGlobalIdx { idx } => {
-                write!(f, "unknown global index {}", idx.0)
+            ValidationErrorKind::UnknownGlobalIdx { idx, available } => {
+                write!(
+                    f,
+                    "unknown global index {} (available globals: {})",
+                    idx.0, available
+                )
             }
-            ValidationErrorKind::UnknownMemIdx { idx } => {
-                write!(f, "unknown memory index {}", idx.0)
+            ValidationErrorKind::UnknownMemIdx { idx, available } => {
+                write!(
+                    f,
+                    "unknown memory index {} (available memories: {})",
+                    idx.0, available
+                )
             }
             ValidationErrorKind::UnknownLabelIdx { idx } => {
                 write!(f, "unknown label index {}", idx.0)

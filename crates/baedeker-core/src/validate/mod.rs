@@ -103,6 +103,11 @@ fn validate_global_init_expr(
         Instr::F32Const(_) => ValType::Num(crate::types::NumType::F32),
         Instr::F64Const(_) => ValType::Num(crate::types::NumType::F64),
         Instr::GlobalGet(idx) => {
+            let available = module
+                .imports
+                .iter()
+                .filter(|import| matches!(import.desc, ImportDesc::Global(_)))
+                .count() as u32;
             let imported_global = module
                 .imports
                 .iter()
@@ -114,7 +119,7 @@ fn validate_global_init_expr(
                 .ok_or(ValidationError {
                     offset: instrs[0].offset,
                     function: None,
-                    kind: ValidationErrorKind::UnknownGlobalIdx { idx },
+                    kind: ValidationErrorKind::UnknownGlobalIdx { idx, available },
                 })?;
 
             if imported_global.mutability != Mutability::Const {
@@ -604,6 +609,14 @@ fn resolve_global_type(
     function: FuncIdx,
     offset: usize,
 ) -> Result<crate::types::GlobalType, ValidationError> {
+    let imported_count = module
+        .imports
+        .iter()
+        .filter(|import| matches!(import.desc, ImportDesc::Global(_)))
+        .count();
+    let defined_count = module.globals.len();
+    let available = (imported_count + defined_count) as u32;
+
     let imported = module
         .imports
         .iter()
@@ -619,7 +632,7 @@ fn resolve_global_type(
         .ok_or(ValidationError {
             offset: ByteOffset(offset),
             function: Some(function),
-            kind: ValidationErrorKind::UnknownGlobalIdx { idx },
+            kind: ValidationErrorKind::UnknownGlobalIdx { idx, available },
         })
 }
 
@@ -629,6 +642,14 @@ fn resolve_memory_type(
     function: FuncIdx,
     offset: usize,
 ) -> Result<crate::types::MemType, ValidationError> {
+    let imported_count = module
+        .imports
+        .iter()
+        .filter(|import| matches!(import.desc, ImportDesc::Mem(_)))
+        .count();
+    let defined_count = module.memories.len();
+    let available = (imported_count + defined_count) as u32;
+
     let imported = module
         .imports
         .iter()
@@ -644,7 +665,7 @@ fn resolve_memory_type(
         .ok_or(ValidationError {
             offset: ByteOffset(offset),
             function: Some(function),
-            kind: ValidationErrorKind::UnknownMemIdx { idx },
+            kind: ValidationErrorKind::UnknownMemIdx { idx, available },
         })
 }
 
@@ -1089,7 +1110,10 @@ mod tests {
         let err = module.validate().unwrap_err();
         assert!(matches!(
             err.kind,
-            ValidationErrorKind::UnknownGlobalIdx { .. }
+            ValidationErrorKind::UnknownGlobalIdx {
+                idx: crate::types::GlobalIdx(0),
+                available: 0,
+            }
         ));
     }
 
@@ -1103,7 +1127,10 @@ mod tests {
         let err = module.validate().unwrap_err();
         assert!(matches!(
             err.kind,
-            ValidationErrorKind::UnknownMemIdx { .. }
+            ValidationErrorKind::UnknownMemIdx {
+                idx: crate::types::MemIdx(0),
+                available: 0,
+            }
         ));
     }
 
