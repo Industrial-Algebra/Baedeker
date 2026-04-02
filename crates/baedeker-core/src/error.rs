@@ -100,6 +100,8 @@ pub enum DecodeErrorKind {
     FunctionCodeLengthMismatch { functions: u32, codes: u32 },
     /// Unknown instruction opcode.
     UnknownOpcode { byte: u8 },
+    /// Unknown SIMD-prefixed instruction opcode.
+    UnknownSimdOpcode { opcode: u32 },
     /// Unexpected byte value.
     UnexpectedByte { expected: u8, found: u8 },
     /// Section body was not fully consumed.
@@ -162,6 +164,9 @@ impl fmt::Display for DecodeErrorKind {
             }
             DecodeErrorKind::UnknownOpcode { byte } => {
                 write!(f, "unknown opcode {byte:#04x}")
+            }
+            DecodeErrorKind::UnknownSimdOpcode { opcode } => {
+                write!(f, "unknown SIMD opcode {opcode:#04x}")
             }
             DecodeErrorKind::UnexpectedByte { expected, found } => {
                 write!(f, "expected {expected:#04x}, found {found:#04x}")

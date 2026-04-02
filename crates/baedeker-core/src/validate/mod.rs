@@ -428,6 +428,458 @@ fn validate_instr(
             let ty = resolve_global_type(module, *idx, function, offset)?;
             pop_expect(function, state, ty.val_type, offset, "global.set")?;
         }
+        Instr::V128Load(memarg) => validate_load(
+            module,
+            function,
+            state,
+            offset,
+            MemLoadValidation {
+                op: "v128.load",
+                found_align: memarg.align,
+                max_align: 4,
+                result: ValType::Vec(crate::types::VecType::V128),
+            },
+        )?,
+        Instr::V128Load8x8S(memarg) | Instr::V128Load8x8U(memarg) => validate_load(
+            module,
+            function,
+            state,
+            offset,
+            MemLoadValidation {
+                op: "v128.load8x8",
+                found_align: memarg.align,
+                max_align: 3,
+                result: ValType::Vec(crate::types::VecType::V128),
+            },
+        )?,
+        Instr::V128Load16x4S(memarg) | Instr::V128Load16x4U(memarg) => validate_load(
+            module,
+            function,
+            state,
+            offset,
+            MemLoadValidation {
+                op: "v128.load16x4",
+                found_align: memarg.align,
+                max_align: 3,
+                result: ValType::Vec(crate::types::VecType::V128),
+            },
+        )?,
+        Instr::V128Load32x2S(memarg) | Instr::V128Load32x2U(memarg) => validate_load(
+            module,
+            function,
+            state,
+            offset,
+            MemLoadValidation {
+                op: "v128.load32x2",
+                found_align: memarg.align,
+                max_align: 3,
+                result: ValType::Vec(crate::types::VecType::V128),
+            },
+        )?,
+        Instr::V128Load8Splat(memarg) => validate_load(
+            module,
+            function,
+            state,
+            offset,
+            MemLoadValidation {
+                op: "v128.load8_splat",
+                found_align: memarg.align,
+                max_align: 0,
+                result: ValType::Vec(crate::types::VecType::V128),
+            },
+        )?,
+        Instr::V128Load16Splat(memarg) => validate_load(
+            module,
+            function,
+            state,
+            offset,
+            MemLoadValidation {
+                op: "v128.load16_splat",
+                found_align: memarg.align,
+                max_align: 1,
+                result: ValType::Vec(crate::types::VecType::V128),
+            },
+        )?,
+        Instr::V128Load32Splat(memarg) => validate_load(
+            module,
+            function,
+            state,
+            offset,
+            MemLoadValidation {
+                op: "v128.load32_splat",
+                found_align: memarg.align,
+                max_align: 2,
+                result: ValType::Vec(crate::types::VecType::V128),
+            },
+        )?,
+        Instr::V128Load64Splat(memarg) => validate_load(
+            module,
+            function,
+            state,
+            offset,
+            MemLoadValidation {
+                op: "v128.load64_splat",
+                found_align: memarg.align,
+                max_align: 3,
+                result: ValType::Vec(crate::types::VecType::V128),
+            },
+        )?,
+        Instr::V128Load32Zero(memarg) => validate_load(
+            module,
+            function,
+            state,
+            offset,
+            MemLoadValidation {
+                op: "v128.load32_zero",
+                found_align: memarg.align,
+                max_align: 2,
+                result: ValType::Vec(crate::types::VecType::V128),
+            },
+        )?,
+        Instr::V128Load64Zero(memarg) => validate_load(
+            module,
+            function,
+            state,
+            offset,
+            MemLoadValidation {
+                op: "v128.load64_zero",
+                found_align: memarg.align,
+                max_align: 3,
+                result: ValType::Vec(crate::types::VecType::V128),
+            },
+        )?,
+        Instr::V128Store(memarg) => validate_store(
+            module,
+            function,
+            state,
+            offset,
+            MemStoreValidation {
+                op: "v128.store",
+                found_align: memarg.align,
+                max_align: 4,
+                stored: ValType::Vec(crate::types::VecType::V128),
+            },
+        )?,
+        Instr::V128Load8Lane { memarg, lane } => validate_simd_load_lane(
+            module,
+            function,
+            state,
+            offset,
+            SimdLaneValidation {
+                op: "v128.load8_lane",
+                found_align: memarg.align,
+                max_align: 0,
+                lane: *lane,
+                max_lane: 15,
+            },
+        )?,
+        Instr::V128Load16Lane { memarg, lane } => validate_simd_load_lane(
+            module,
+            function,
+            state,
+            offset,
+            SimdLaneValidation {
+                op: "v128.load16_lane",
+                found_align: memarg.align,
+                max_align: 1,
+                lane: *lane,
+                max_lane: 7,
+            },
+        )?,
+        Instr::V128Load32Lane { memarg, lane } => validate_simd_load_lane(
+            module,
+            function,
+            state,
+            offset,
+            SimdLaneValidation {
+                op: "v128.load32_lane",
+                found_align: memarg.align,
+                max_align: 2,
+                lane: *lane,
+                max_lane: 3,
+            },
+        )?,
+        Instr::V128Load64Lane { memarg, lane } => validate_simd_load_lane(
+            module,
+            function,
+            state,
+            offset,
+            SimdLaneValidation {
+                op: "v128.load64_lane",
+                found_align: memarg.align,
+                max_align: 3,
+                lane: *lane,
+                max_lane: 1,
+            },
+        )?,
+        Instr::V128Store8Lane { memarg, lane } => validate_simd_store_lane(
+            module,
+            function,
+            state,
+            offset,
+            SimdLaneValidation {
+                op: "v128.store8_lane",
+                found_align: memarg.align,
+                max_align: 0,
+                lane: *lane,
+                max_lane: 15,
+            },
+        )?,
+        Instr::V128Store16Lane { memarg, lane } => validate_simd_store_lane(
+            module,
+            function,
+            state,
+            offset,
+            SimdLaneValidation {
+                op: "v128.store16_lane",
+                found_align: memarg.align,
+                max_align: 1,
+                lane: *lane,
+                max_lane: 7,
+            },
+        )?,
+        Instr::V128Store32Lane { memarg, lane } => validate_simd_store_lane(
+            module,
+            function,
+            state,
+            offset,
+            SimdLaneValidation {
+                op: "v128.store32_lane",
+                found_align: memarg.align,
+                max_align: 2,
+                lane: *lane,
+                max_lane: 3,
+            },
+        )?,
+        Instr::V128Store64Lane { memarg, lane } => validate_simd_store_lane(
+            module,
+            function,
+            state,
+            offset,
+            SimdLaneValidation {
+                op: "v128.store64_lane",
+                found_align: memarg.align,
+                max_align: 3,
+                lane: *lane,
+                max_lane: 1,
+            },
+        )?,
+        Instr::I32Load(memarg) => validate_load(
+            module,
+            function,
+            state,
+            offset,
+            MemLoadValidation {
+                op: "i32.load",
+                found_align: memarg.align,
+                max_align: 2,
+                result: ValType::Num(crate::types::NumType::I32),
+            },
+        )?,
+        Instr::I64Load(memarg) => validate_load(
+            module,
+            function,
+            state,
+            offset,
+            MemLoadValidation {
+                op: "i64.load",
+                found_align: memarg.align,
+                max_align: 3,
+                result: ValType::Num(crate::types::NumType::I64),
+            },
+        )?,
+        Instr::F32Load(memarg) => validate_load(
+            module,
+            function,
+            state,
+            offset,
+            MemLoadValidation {
+                op: "f32.load",
+                found_align: memarg.align,
+                max_align: 2,
+                result: ValType::Num(crate::types::NumType::F32),
+            },
+        )?,
+        Instr::F64Load(memarg) => validate_load(
+            module,
+            function,
+            state,
+            offset,
+            MemLoadValidation {
+                op: "f64.load",
+                found_align: memarg.align,
+                max_align: 3,
+                result: ValType::Num(crate::types::NumType::F64),
+            },
+        )?,
+        Instr::I32Load8S(memarg) | Instr::I32Load8U(memarg) => validate_load(
+            module,
+            function,
+            state,
+            offset,
+            MemLoadValidation {
+                op: "i32.load8",
+                found_align: memarg.align,
+                max_align: 0,
+                result: ValType::Num(crate::types::NumType::I32),
+            },
+        )?,
+        Instr::I32Load16S(memarg) | Instr::I32Load16U(memarg) => validate_load(
+            module,
+            function,
+            state,
+            offset,
+            MemLoadValidation {
+                op: "i32.load16",
+                found_align: memarg.align,
+                max_align: 1,
+                result: ValType::Num(crate::types::NumType::I32),
+            },
+        )?,
+        Instr::I64Load8S(memarg) | Instr::I64Load8U(memarg) => validate_load(
+            module,
+            function,
+            state,
+            offset,
+            MemLoadValidation {
+                op: "i64.load8",
+                found_align: memarg.align,
+                max_align: 0,
+                result: ValType::Num(crate::types::NumType::I64),
+            },
+        )?,
+        Instr::I64Load16S(memarg) | Instr::I64Load16U(memarg) => validate_load(
+            module,
+            function,
+            state,
+            offset,
+            MemLoadValidation {
+                op: "i64.load16",
+                found_align: memarg.align,
+                max_align: 1,
+                result: ValType::Num(crate::types::NumType::I64),
+            },
+        )?,
+        Instr::I64Load32S(memarg) | Instr::I64Load32U(memarg) => validate_load(
+            module,
+            function,
+            state,
+            offset,
+            MemLoadValidation {
+                op: "i64.load32",
+                found_align: memarg.align,
+                max_align: 2,
+                result: ValType::Num(crate::types::NumType::I64),
+            },
+        )?,
+        Instr::I32Store(memarg) => validate_store(
+            module,
+            function,
+            state,
+            offset,
+            MemStoreValidation {
+                op: "i32.store",
+                found_align: memarg.align,
+                max_align: 2,
+                stored: ValType::Num(crate::types::NumType::I32),
+            },
+        )?,
+        Instr::I64Store(memarg) => validate_store(
+            module,
+            function,
+            state,
+            offset,
+            MemStoreValidation {
+                op: "i64.store",
+                found_align: memarg.align,
+                max_align: 3,
+                stored: ValType::Num(crate::types::NumType::I64),
+            },
+        )?,
+        Instr::F32Store(memarg) => validate_store(
+            module,
+            function,
+            state,
+            offset,
+            MemStoreValidation {
+                op: "f32.store",
+                found_align: memarg.align,
+                max_align: 2,
+                stored: ValType::Num(crate::types::NumType::F32),
+            },
+        )?,
+        Instr::F64Store(memarg) => validate_store(
+            module,
+            function,
+            state,
+            offset,
+            MemStoreValidation {
+                op: "f64.store",
+                found_align: memarg.align,
+                max_align: 3,
+                stored: ValType::Num(crate::types::NumType::F64),
+            },
+        )?,
+        Instr::I32Store8(memarg) => validate_store(
+            module,
+            function,
+            state,
+            offset,
+            MemStoreValidation {
+                op: "i32.store8",
+                found_align: memarg.align,
+                max_align: 0,
+                stored: ValType::Num(crate::types::NumType::I32),
+            },
+        )?,
+        Instr::I32Store16(memarg) => validate_store(
+            module,
+            function,
+            state,
+            offset,
+            MemStoreValidation {
+                op: "i32.store16",
+                found_align: memarg.align,
+                max_align: 1,
+                stored: ValType::Num(crate::types::NumType::I32),
+            },
+        )?,
+        Instr::I64Store8(memarg) => validate_store(
+            module,
+            function,
+            state,
+            offset,
+            MemStoreValidation {
+                op: "i64.store8",
+                found_align: memarg.align,
+                max_align: 0,
+                stored: ValType::Num(crate::types::NumType::I64),
+            },
+        )?,
+        Instr::I64Store16(memarg) => validate_store(
+            module,
+            function,
+            state,
+            offset,
+            MemStoreValidation {
+                op: "i64.store16",
+                found_align: memarg.align,
+                max_align: 1,
+                stored: ValType::Num(crate::types::NumType::I64),
+            },
+        )?,
+        Instr::I64Store32(memarg) => validate_store(
+            module,
+            function,
+            state,
+            offset,
+            MemStoreValidation {
+                op: "i64.store32",
+                found_align: memarg.align,
+                max_align: 2,
+                stored: ValType::Num(crate::types::NumType::I64),
+            },
+        )?,
         Instr::MemorySize(idx) => {
             resolve_memory_type(module, *idx, function, offset)?;
             state
@@ -459,6 +911,9 @@ fn validate_instr(
         Instr::F64Const(_) => state
             .operands
             .push(ValType::Num(crate::types::NumType::F64)),
+        Instr::V128Const(_) => state
+            .operands
+            .push(ValType::Vec(crate::types::VecType::V128)),
         Instr::I32Eqz => {
             pop_expect(
                 function,
@@ -537,6 +992,167 @@ fn validate_instr(
                 .operands
                 .push(ValType::Num(crate::types::NumType::I64));
         }
+    }
+
+    Ok(())
+}
+
+struct MemLoadValidation {
+    op: &'static str,
+    found_align: u32,
+    max_align: u32,
+    result: ValType,
+}
+
+struct MemStoreValidation {
+    op: &'static str,
+    found_align: u32,
+    max_align: u32,
+    stored: ValType,
+}
+
+struct SimdLaneValidation {
+    op: &'static str,
+    found_align: u32,
+    max_align: u32,
+    lane: u8,
+    max_lane: u8,
+}
+
+fn validate_load(
+    module: &Module<'_>,
+    function: FuncIdx,
+    state: &mut ValidationState,
+    offset: usize,
+    load: MemLoadValidation,
+) -> Result<(), ValidationError> {
+    validate_memarg_align(function, offset, load.op, load.found_align, load.max_align)?;
+    resolve_memory_type(module, MemIdx(0), function, offset)?;
+    pop_expect(
+        function,
+        state,
+        ValType::Num(crate::types::NumType::I32),
+        offset,
+        load.op,
+    )?;
+    state.operands.push(load.result);
+    Ok(())
+}
+
+fn validate_store(
+    module: &Module<'_>,
+    function: FuncIdx,
+    state: &mut ValidationState,
+    offset: usize,
+    store: MemStoreValidation,
+) -> Result<(), ValidationError> {
+    validate_memarg_align(
+        function,
+        offset,
+        store.op,
+        store.found_align,
+        store.max_align,
+    )?;
+    resolve_memory_type(module, MemIdx(0), function, offset)?;
+    pop_expect(function, state, store.stored, offset, store.op)?;
+    pop_expect(
+        function,
+        state,
+        ValType::Num(crate::types::NumType::I32),
+        offset,
+        store.op,
+    )?;
+    Ok(())
+}
+
+fn validate_simd_load_lane(
+    module: &Module<'_>,
+    function: FuncIdx,
+    state: &mut ValidationState,
+    offset: usize,
+    lane: SimdLaneValidation,
+) -> Result<(), ValidationError> {
+    validate_memarg_align(function, offset, lane.op, lane.found_align, lane.max_align)?;
+    validate_simd_lane_idx(function, offset, lane.op, lane.lane, lane.max_lane)?;
+    resolve_memory_type(module, MemIdx(0), function, offset)?;
+    pop_expect(
+        function,
+        state,
+        ValType::Vec(crate::types::VecType::V128),
+        offset,
+        lane.op,
+    )?;
+    pop_expect(
+        function,
+        state,
+        ValType::Num(crate::types::NumType::I32),
+        offset,
+        lane.op,
+    )?;
+    state
+        .operands
+        .push(ValType::Vec(crate::types::VecType::V128));
+    Ok(())
+}
+
+fn validate_simd_store_lane(
+    module: &Module<'_>,
+    function: FuncIdx,
+    state: &mut ValidationState,
+    offset: usize,
+    lane: SimdLaneValidation,
+) -> Result<(), ValidationError> {
+    validate_memarg_align(function, offset, lane.op, lane.found_align, lane.max_align)?;
+    validate_simd_lane_idx(function, offset, lane.op, lane.lane, lane.max_lane)?;
+    resolve_memory_type(module, MemIdx(0), function, offset)?;
+    pop_expect(
+        function,
+        state,
+        ValType::Vec(crate::types::VecType::V128),
+        offset,
+        lane.op,
+    )?;
+    pop_expect(
+        function,
+        state,
+        ValType::Num(crate::types::NumType::I32),
+        offset,
+        lane.op,
+    )?;
+    Ok(())
+}
+
+fn validate_memarg_align(
+    function: FuncIdx,
+    offset: usize,
+    op: &'static str,
+    found: u32,
+    max: u32,
+) -> Result<(), ValidationError> {
+    if found > max {
+        return Err(ValidationError {
+            offset: ByteOffset(offset),
+            function: Some(function),
+            kind: ValidationErrorKind::InvalidMemArgAlign { op, max, found },
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_simd_lane_idx(
+    function: FuncIdx,
+    offset: usize,
+    op: &'static str,
+    found: u8,
+    max: u8,
+) -> Result<(), ValidationError> {
+    if found > max {
+        return Err(ValidationError {
+            offset: ByteOffset(offset),
+            function: Some(function),
+            kind: ValidationErrorKind::InvalidSimdLaneIdx { op, max, found },
+        });
     }
 
     Ok(())
@@ -1098,6 +1714,166 @@ mod tests {
         ];
         let module = Module::decode(&bytes).unwrap();
         module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_i32_load_and_store_for_defined_memory() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01,
+            0x7F, 0x03, 0x02, 0x01, 0x00, 0x05, 0x03, 0x01, 0x00, 0x01, 0x0A, 0x10, 0x01, 0x0E,
+            0x00, 0x41, 0x00, 0x41, 0x2A, 0x36, 0x02, 0x00, 0x41, 0x00, 0x28, 0x02, 0x00, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_narrow_memory_ops_for_defined_memory() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x09, 0x02, 0x60, 0x00, 0x01,
+            0x7F, 0x60, 0x00, 0x01, 0x7E, 0x03, 0x03, 0x02, 0x00, 0x01, 0x05, 0x03, 0x01, 0x00,
+            0x01, 0x0A, 0x1D, 0x02, 0x0D, 0x00, 0x41, 0x00, 0x2C, 0x00, 0x00, 0x1A, 0x41, 0x00,
+            0x2F, 0x01, 0x00, 0x0B, 0x0D, 0x00, 0x41, 0x00, 0x30, 0x00, 0x00, 0x1A, 0x41, 0x00,
+            0x35, 0x02, 0x00, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_narrow_memory_stores_for_defined_memory() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x03, 0x02, 0x01, 0x00, 0x05, 0x03, 0x01, 0x00, 0x01, 0x0A, 0x27, 0x01, 0x25, 0x00,
+            0x41, 0x00, 0x41, 0x7F, 0x3A, 0x00, 0x00, 0x41, 0x00, 0x41, 0x7F, 0x3B, 0x01, 0x00,
+            0x41, 0x00, 0x42, 0x01, 0x3C, 0x00, 0x00, 0x41, 0x00, 0x42, 0x01, 0x3D, 0x01, 0x00,
+            0x41, 0x00, 0x42, 0x01, 0x3E, 0x02, 0x00, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_v128_load_and_store_for_defined_memory() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x60, 0x00, 0x01,
+            0x7B, 0x60, 0x00, 0x00, 0x03, 0x03, 0x02, 0x00, 0x01, 0x05, 0x03, 0x01, 0x00, 0x01,
+            0x0A, 0x25, 0x02, 0x08, 0x00, 0x41, 0x00, 0xFD, 0x00, 0x04, 0x00, 0x0B, 0x1A, 0x00,
+            0x41, 0x00, 0xFD, 0x0C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFD, 0x0B, 0x04, 0x00, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_v128_lane_memory_ops() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x03, 0x02, 0x01, 0x00, 0x05, 0x03, 0x01, 0x00, 0x01, 0x0A, 0x37, 0x01, 0x35, 0x00,
+            0x41, 0x00, 0xFD, 0x0C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFD, 0x54, 0x00, 0x00, 0x0F, 0x1A, 0x41, 0x00,
+            0xFD, 0x0C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0xFD, 0x58, 0x00, 0x00, 0x0F, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn reject_v128_load16_lane_with_invalid_lane_index() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x03, 0x02, 0x01, 0x00, 0x05, 0x03, 0x01, 0x00, 0x01, 0x0A, 0x1E, 0x01, 0x1C, 0x00,
+            0x41, 0x00, 0xFD, 0x0C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFD, 0x55, 0x01, 0x00, 0x08, 0x1A, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::InvalidSimdLaneIdx {
+                op: "v128.load16_lane",
+                max: 7,
+                found: 8,
+            }
+        ));
+    }
+
+    #[test]
+    fn reject_i64_load32_with_invalid_memarg_align() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01,
+            0x7E, 0x03, 0x02, 0x01, 0x00, 0x05, 0x03, 0x01, 0x00, 0x01, 0x0A, 0x0A, 0x01, 0x08,
+            0x00, 0x41, 0x00, 0x35, 0x03, 0x00, 0x1A, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::InvalidMemArgAlign {
+                op: "i64.load32",
+                max: 2,
+                found: 3,
+            }
+        ));
+    }
+
+    #[test]
+    fn reject_i64_store32_with_wrong_value_type() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x03, 0x02, 0x01, 0x00, 0x05, 0x03, 0x01, 0x00, 0x01, 0x0A, 0x0B, 0x01, 0x09, 0x00,
+            0x41, 0x00, 0x41, 0x01, 0x3E, 0x02, 0x00, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::TypeMismatch {
+                op: "i64.store32",
+                expected: ValType::Num(crate::types::NumType::I64),
+                found: ValType::Num(crate::types::NumType::I32),
+            }
+        ));
+    }
+
+    #[test]
+    fn reject_i32_load_with_invalid_memarg_align() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01,
+            0x7F, 0x03, 0x02, 0x01, 0x00, 0x05, 0x03, 0x01, 0x00, 0x01, 0x0A, 0x0C, 0x01, 0x0A,
+            0x00, 0x41, 0x00, 0x28, 0x03, 0x00, 0x1A, 0x41, 0x00, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::InvalidMemArgAlign {
+                op: "i32.load",
+                max: 2,
+                found: 3,
+            }
+        ));
+    }
+
+    #[test]
+    fn reject_i32_store_with_wrong_value_type() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x03, 0x02, 0x01, 0x00, 0x05, 0x03, 0x01, 0x00, 0x01, 0x0A, 0x0B, 0x01, 0x09, 0x00,
+            0x41, 0x00, 0x42, 0x01, 0x36, 0x02, 0x00, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::TypeMismatch {
+                op: "i32.store",
+                expected: ValType::Num(crate::types::NumType::I32),
+                found: ValType::Num(crate::types::NumType::I64),
+            }
+        ));
     }
 
     #[test]

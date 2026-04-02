@@ -37,6 +37,16 @@ pub enum ValidationErrorKind {
         idx: MemIdx,
         available: u32,
     },
+    InvalidMemArgAlign {
+        op: &'static str,
+        max: u32,
+        found: u32,
+    },
+    InvalidSimdLaneIdx {
+        op: &'static str,
+        max: u8,
+        found: u8,
+    },
     UnknownLabelIdx {
         idx: LabelIdx,
     },
@@ -143,6 +153,20 @@ impl fmt::Display for ValidationErrorKind {
                     f,
                     "unknown memory index {} (available memories: {})",
                     idx.0, available
+                )
+            }
+            ValidationErrorKind::InvalidMemArgAlign { op, max, found } => {
+                write!(
+                    f,
+                    "invalid memarg alignment in {}: found {}, maximum natural alignment exponent {}",
+                    op, found, max
+                )
+            }
+            ValidationErrorKind::InvalidSimdLaneIdx { op, max, found } => {
+                write!(
+                    f,
+                    "invalid SIMD lane index in {}: found {}, maximum lane {}",
+                    op, found, max
                 )
             }
             ValidationErrorKind::UnknownLabelIdx { idx } => {

@@ -10,7 +10,9 @@ use alloc::vec::Vec;
 
 use crate::binary::leb128::{self, Cursor};
 use crate::error::{ByteOffset, DecodeContext, DecodeError, DecodeErrorKind};
-use crate::types::{BlockType, CodeBody, FuncIdx, GlobalIdx, LabelIdx, LocalIdx, MemIdx, ValType};
+use crate::types::{
+    BlockType, CodeBody, FuncIdx, GlobalIdx, LabelIdx, LocalIdx, MemArg, MemIdx, ValType,
+};
 
 /// A decoded instruction paired with its absolute byte offset in the module.
 #[derive(Debug, Clone, PartialEq)]
@@ -45,12 +47,82 @@ pub enum Instr {
     LocalTee(LocalIdx),
     GlobalGet(GlobalIdx),
     GlobalSet(GlobalIdx),
+    V128Load(MemArg),
+    V128Load8x8S(MemArg),
+    V128Load8x8U(MemArg),
+    V128Load16x4S(MemArg),
+    V128Load16x4U(MemArg),
+    V128Load32x2S(MemArg),
+    V128Load32x2U(MemArg),
+    V128Load8Splat(MemArg),
+    V128Load16Splat(MemArg),
+    V128Load32Splat(MemArg),
+    V128Load64Splat(MemArg),
+    V128Load32Zero(MemArg),
+    V128Load64Zero(MemArg),
+    V128Store(MemArg),
+    V128Load8Lane {
+        memarg: MemArg,
+        lane: u8,
+    },
+    V128Load16Lane {
+        memarg: MemArg,
+        lane: u8,
+    },
+    V128Load32Lane {
+        memarg: MemArg,
+        lane: u8,
+    },
+    V128Load64Lane {
+        memarg: MemArg,
+        lane: u8,
+    },
+    V128Store8Lane {
+        memarg: MemArg,
+        lane: u8,
+    },
+    V128Store16Lane {
+        memarg: MemArg,
+        lane: u8,
+    },
+    V128Store32Lane {
+        memarg: MemArg,
+        lane: u8,
+    },
+    V128Store64Lane {
+        memarg: MemArg,
+        lane: u8,
+    },
+    I32Load(MemArg),
+    I64Load(MemArg),
+    F32Load(MemArg),
+    F64Load(MemArg),
+    I32Load8S(MemArg),
+    I32Load8U(MemArg),
+    I32Load16S(MemArg),
+    I32Load16U(MemArg),
+    I64Load8S(MemArg),
+    I64Load8U(MemArg),
+    I64Load16S(MemArg),
+    I64Load16U(MemArg),
+    I64Load32S(MemArg),
+    I64Load32U(MemArg),
+    I32Store(MemArg),
+    I64Store(MemArg),
+    F32Store(MemArg),
+    F64Store(MemArg),
+    I32Store8(MemArg),
+    I32Store16(MemArg),
+    I64Store8(MemArg),
+    I64Store16(MemArg),
+    I64Store32(MemArg),
     MemorySize(MemIdx),
     MemoryGrow(MemIdx),
     I32Const(i32),
     I64Const(i64),
     F32Const(f32),
     F64Const(f64),
+    V128Const([u8; 16]),
     I32Eqz,
     I32Eq,
     I32Ne,
@@ -166,6 +238,30 @@ pub fn decode_instr_with_offset(
         0x22 => Instr::LocalTee(LocalIdx(decode_u32(cursor, base_offset)?)),
         0x23 => Instr::GlobalGet(GlobalIdx(decode_u32(cursor, base_offset)?)),
         0x24 => Instr::GlobalSet(GlobalIdx(decode_u32(cursor, base_offset)?)),
+        0xFD => decode_simd_instr(cursor, base_offset)?,
+        0x28 => Instr::I32Load(parse_memarg(cursor, base_offset)?),
+        0x29 => Instr::I64Load(parse_memarg(cursor, base_offset)?),
+        0x2A => Instr::F32Load(parse_memarg(cursor, base_offset)?),
+        0x2B => Instr::F64Load(parse_memarg(cursor, base_offset)?),
+        0x2C => Instr::I32Load8S(parse_memarg(cursor, base_offset)?),
+        0x2D => Instr::I32Load8U(parse_memarg(cursor, base_offset)?),
+        0x2E => Instr::I32Load16S(parse_memarg(cursor, base_offset)?),
+        0x2F => Instr::I32Load16U(parse_memarg(cursor, base_offset)?),
+        0x30 => Instr::I64Load8S(parse_memarg(cursor, base_offset)?),
+        0x31 => Instr::I64Load8U(parse_memarg(cursor, base_offset)?),
+        0x32 => Instr::I64Load16S(parse_memarg(cursor, base_offset)?),
+        0x33 => Instr::I64Load16U(parse_memarg(cursor, base_offset)?),
+        0x34 => Instr::I64Load32S(parse_memarg(cursor, base_offset)?),
+        0x35 => Instr::I64Load32U(parse_memarg(cursor, base_offset)?),
+        0x36 => Instr::I32Store(parse_memarg(cursor, base_offset)?),
+        0x37 => Instr::I64Store(parse_memarg(cursor, base_offset)?),
+        0x38 => Instr::F32Store(parse_memarg(cursor, base_offset)?),
+        0x39 => Instr::F64Store(parse_memarg(cursor, base_offset)?),
+        0x3A => Instr::I32Store8(parse_memarg(cursor, base_offset)?),
+        0x3B => Instr::I32Store16(parse_memarg(cursor, base_offset)?),
+        0x3C => Instr::I64Store8(parse_memarg(cursor, base_offset)?),
+        0x3D => Instr::I64Store16(parse_memarg(cursor, base_offset)?),
+        0x3E => Instr::I64Store32(parse_memarg(cursor, base_offset)?),
         0x3F => Instr::MemorySize(parse_mem_idx(cursor, base_offset)?),
         0x40 => Instr::MemoryGrow(parse_mem_idx(cursor, base_offset)?),
         0x41 => Instr::I32Const(decode_i32(cursor, base_offset)?),
@@ -198,6 +294,94 @@ pub fn decode_instr_with_offset(
         offset: ByteOffset(base_offset + opcode_offset),
         instr,
     })
+}
+
+fn decode_simd_instr(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Instr, DecodeError> {
+    let opcode = decode_u32(cursor, base_offset)?;
+    match opcode {
+        0 => Ok(Instr::V128Load(parse_memarg(cursor, base_offset)?)),
+        1 => Ok(Instr::V128Load8x8S(parse_memarg(cursor, base_offset)?)),
+        2 => Ok(Instr::V128Load8x8U(parse_memarg(cursor, base_offset)?)),
+        3 => Ok(Instr::V128Load16x4S(parse_memarg(cursor, base_offset)?)),
+        4 => Ok(Instr::V128Load16x4U(parse_memarg(cursor, base_offset)?)),
+        5 => Ok(Instr::V128Load32x2S(parse_memarg(cursor, base_offset)?)),
+        6 => Ok(Instr::V128Load32x2U(parse_memarg(cursor, base_offset)?)),
+        7 => Ok(Instr::V128Load8Splat(parse_memarg(cursor, base_offset)?)),
+        8 => Ok(Instr::V128Load16Splat(parse_memarg(cursor, base_offset)?)),
+        9 => Ok(Instr::V128Load32Splat(parse_memarg(cursor, base_offset)?)),
+        10 => Ok(Instr::V128Load64Splat(parse_memarg(cursor, base_offset)?)),
+        11 => Ok(Instr::V128Store(parse_memarg(cursor, base_offset)?)),
+        12 => Ok(Instr::V128Const(parse_v128_const(cursor, base_offset)?)),
+        84 => {
+            let (memarg, lane) = parse_memarg_lane(cursor, base_offset)?;
+            Ok(Instr::V128Load8Lane { memarg, lane })
+        }
+        85 => {
+            let (memarg, lane) = parse_memarg_lane(cursor, base_offset)?;
+            Ok(Instr::V128Load16Lane { memarg, lane })
+        }
+        86 => {
+            let (memarg, lane) = parse_memarg_lane(cursor, base_offset)?;
+            Ok(Instr::V128Load32Lane { memarg, lane })
+        }
+        87 => {
+            let (memarg, lane) = parse_memarg_lane(cursor, base_offset)?;
+            Ok(Instr::V128Load64Lane { memarg, lane })
+        }
+        88 => {
+            let (memarg, lane) = parse_memarg_lane(cursor, base_offset)?;
+            Ok(Instr::V128Store8Lane { memarg, lane })
+        }
+        89 => {
+            let (memarg, lane) = parse_memarg_lane(cursor, base_offset)?;
+            Ok(Instr::V128Store16Lane { memarg, lane })
+        }
+        90 => {
+            let (memarg, lane) = parse_memarg_lane(cursor, base_offset)?;
+            Ok(Instr::V128Store32Lane { memarg, lane })
+        }
+        91 => {
+            let (memarg, lane) = parse_memarg_lane(cursor, base_offset)?;
+            Ok(Instr::V128Store64Lane { memarg, lane })
+        }
+        92 => Ok(Instr::V128Load32Zero(parse_memarg(cursor, base_offset)?)),
+        93 => Ok(Instr::V128Load64Zero(parse_memarg(cursor, base_offset)?)),
+        _ => Err(DecodeError {
+            offset: ByteOffset(base_offset),
+            context: DecodeContext::CodeSection,
+            kind: DecodeErrorKind::UnknownSimdOpcode { opcode },
+        }),
+    }
+}
+
+fn parse_memarg(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<MemArg, DecodeError> {
+    let align = decode_u32(cursor, base_offset)?;
+    let offset = decode_u32(cursor, base_offset)?;
+    Ok(MemArg { align, offset })
+}
+
+fn parse_memarg_lane(
+    cursor: &mut Cursor<'_>,
+    base_offset: usize,
+) -> Result<(MemArg, u8), DecodeError> {
+    let memarg = parse_memarg(cursor, base_offset)?;
+    let pos = cursor.position();
+    let lane = cursor.read_byte().map_err(|_| DecodeError {
+        offset: ByteOffset(base_offset + pos),
+        context: DecodeContext::CodeSection,
+        kind: DecodeErrorKind::UnexpectedEof,
+    })?;
+    Ok((memarg, lane))
+}
+
+fn parse_v128_const(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<[u8; 16], DecodeError> {
+    let pos = cursor.position();
+    let bytes = cursor.read_bytes(16).map_err(|_| DecodeError {
+        offset: ByteOffset(base_offset + pos),
+        context: DecodeContext::CodeSection,
+        kind: DecodeErrorKind::UnexpectedEof,
+    })?;
+    Ok(bytes.try_into().expect("16 bytes"))
 }
 
 fn parse_mem_idx(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<MemIdx, DecodeError> {
@@ -421,19 +605,144 @@ mod tests {
 
     #[test]
     fn decode_globals_and_memory_ops() {
-        let instrs =
-            decode_instr_sequence(&[0x23, 0x00, 0x24, 0x01, 0x3F, 0x00, 0x40, 0x00, 0x0B], 240)
-                .unwrap();
+        let instrs = decode_instr_sequence(
+            &[
+                0x23, 0x00, 0x24, 0x01, 0x28, 0x02, 0x00, 0x2C, 0x00, 0x01, 0x35, 0x02, 0x02, 0x36,
+                0x02, 0x04, 0x3A, 0x00, 0x08, 0x3E, 0x02, 0x0C, 0x3F, 0x00, 0x40, 0x00, 0x0B,
+            ],
+            240,
+        )
+        .unwrap();
         assert_eq!(
             instrs,
             vec![
                 Instr::GlobalGet(GlobalIdx(0)),
                 Instr::GlobalSet(GlobalIdx(1)),
+                Instr::I32Load(MemArg {
+                    align: 2,
+                    offset: 0
+                }),
+                Instr::I32Load8S(MemArg {
+                    align: 0,
+                    offset: 1
+                }),
+                Instr::I64Load32U(MemArg {
+                    align: 2,
+                    offset: 2
+                }),
+                Instr::I32Store(MemArg {
+                    align: 2,
+                    offset: 4
+                }),
+                Instr::I32Store8(MemArg {
+                    align: 0,
+                    offset: 8
+                }),
+                Instr::I64Store32(MemArg {
+                    align: 2,
+                    offset: 12
+                }),
                 Instr::MemorySize(MemIdx(0)),
                 Instr::MemoryGrow(MemIdx(0)),
                 Instr::End,
             ]
         );
+    }
+
+    #[test]
+    fn decode_all_scalar_memory_opcodes() {
+        let instrs = decode_instr_sequence(
+            &[
+                0x28, 0x02, 0x00, 0x29, 0x03, 0x00, 0x2A, 0x02, 0x00, 0x2B, 0x03, 0x00, 0x2C, 0x00,
+                0x00, 0x2D, 0x00, 0x00, 0x2E, 0x01, 0x00, 0x2F, 0x01, 0x00, 0x30, 0x00, 0x00, 0x31,
+                0x00, 0x00, 0x32, 0x01, 0x00, 0x33, 0x01, 0x00, 0x34, 0x02, 0x00, 0x35, 0x02, 0x00,
+                0x36, 0x02, 0x00, 0x37, 0x03, 0x00, 0x38, 0x02, 0x00, 0x39, 0x03, 0x00, 0x3A, 0x00,
+                0x00, 0x3B, 0x01, 0x00, 0x3C, 0x00, 0x00, 0x3D, 0x01, 0x00, 0x3E, 0x02, 0x00, 0x0B,
+            ],
+            280,
+        )
+        .unwrap();
+
+        assert_eq!(instrs.len(), 24);
+        assert!(matches!(instrs[0], Instr::I32Load(_)));
+        assert!(matches!(instrs[1], Instr::I64Load(_)));
+        assert!(matches!(instrs[2], Instr::F32Load(_)));
+        assert!(matches!(instrs[3], Instr::F64Load(_)));
+        assert!(matches!(instrs[4], Instr::I32Load8S(_)));
+        assert!(matches!(instrs[5], Instr::I32Load8U(_)));
+        assert!(matches!(instrs[6], Instr::I32Load16S(_)));
+        assert!(matches!(instrs[7], Instr::I32Load16U(_)));
+        assert!(matches!(instrs[8], Instr::I64Load8S(_)));
+        assert!(matches!(instrs[9], Instr::I64Load8U(_)));
+        assert!(matches!(instrs[10], Instr::I64Load16S(_)));
+        assert!(matches!(instrs[11], Instr::I64Load16U(_)));
+        assert!(matches!(instrs[12], Instr::I64Load32S(_)));
+        assert!(matches!(instrs[13], Instr::I64Load32U(_)));
+        assert!(matches!(instrs[14], Instr::I32Store(_)));
+        assert!(matches!(instrs[15], Instr::I64Store(_)));
+        assert!(matches!(instrs[16], Instr::F32Store(_)));
+        assert!(matches!(instrs[17], Instr::F64Store(_)));
+        assert!(matches!(instrs[18], Instr::I32Store8(_)));
+        assert!(matches!(instrs[19], Instr::I32Store16(_)));
+        assert!(matches!(instrs[20], Instr::I64Store8(_)));
+        assert!(matches!(instrs[21], Instr::I64Store16(_)));
+        assert!(matches!(instrs[22], Instr::I64Store32(_)));
+        assert!(matches!(instrs[23], Instr::End));
+    }
+
+    #[test]
+    fn decode_vector_memory_ops() {
+        let instrs = decode_instr_sequence(
+            &[
+                0xFD, 0x00, 0x04, 0x00, 0xFD, 0x0B, 0x04, 0x00, 0xFD, 0x54, 0x00, 0x00, 0x0F, 0xFD,
+                0x58, 0x00, 0x00, 0x0F, 0xFD, 0x5C, 0x02, 0x00, 0xFD, 0x0C, 0x00, 0x01, 0x02, 0x03,
+                0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x0B,
+            ],
+            320,
+        )
+        .unwrap();
+        assert_eq!(
+            instrs,
+            vec![
+                Instr::V128Load(MemArg {
+                    align: 4,
+                    offset: 0
+                }),
+                Instr::V128Store(MemArg {
+                    align: 4,
+                    offset: 0
+                }),
+                Instr::V128Load8Lane {
+                    memarg: MemArg {
+                        align: 0,
+                        offset: 0
+                    },
+                    lane: 15,
+                },
+                Instr::V128Store8Lane {
+                    memarg: MemArg {
+                        align: 0,
+                        offset: 0
+                    },
+                    lane: 15,
+                },
+                Instr::V128Load32Zero(MemArg {
+                    align: 2,
+                    offset: 0
+                }),
+                Instr::V128Const([
+                    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C,
+                    0x0D, 0x0E, 0x0F,
+                ]),
+                Instr::End,
+            ]
+        );
+    }
+
+    #[test]
+    fn reject_unknown_simd_opcode() {
+        let err = decode_instr_sequence(&[0xFD, 0xC8, 0x01, 0x0B], 410).unwrap_err();
+        assert_eq!(err.kind, DecodeErrorKind::UnknownSimdOpcode { opcode: 200 });
     }
 
     #[test]
