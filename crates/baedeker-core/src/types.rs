@@ -118,6 +118,14 @@ pub struct MemType {
     pub limits: Limits,
 }
 
+/// Memory instruction immediate.
+/// See [Spec §2.4.5](https://webassembly.github.io/spec/core/syntax/instructions.html#memory-instructions).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemArg {
+    pub align: u32,
+    pub offset: u32,
+}
+
 /// An imported item declaration.
 /// See [Spec §2.5.11](https://webassembly.github.io/spec/core/syntax/modules.html#imports).
 #[derive(Debug, Clone, PartialEq, Eq)]
