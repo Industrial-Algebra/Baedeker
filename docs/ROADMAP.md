@@ -45,20 +45,87 @@ for the initial architecture; the engine is interpreter-first with AOT as a futu
 
 **Focus:** The WASM type system, structured control flow, and the validation algorithm.
 
-- Parse the Type section: function signatures (`functype`), with the full numtype/vectype/reftype
-  taxonomy from WASM 2.0.
-- Parse Import and Function sections to build the function index space.
-- Implement the **validation algorithm** for instruction sequences. This is the heart of WASM's
-  safety model: a type-checking pass over the structured operand stack that enforces:
-  - Stack polymorphism after unconditional branches
-  - Block signature matching for `block`, `loop`, `if`
-  - Correct label indexing for `br`, `br_if`, `br_table`
-  - Type-correct `select` with explicit type annotations (2.0)
-- Build a validation error type that produces genuinely useful diagnostics (byte offset,
-  expected vs actual stack state, surrounding instruction context).
-- **Milestone:** Can validate the type-correctness of any WASM 2.0 module and reject malformed ones
-  with clear errors. Run against the official spec test suite's `assert_invalid` and
-  `assert_malformed` cases.
+### Progress checklist
+
+#### Done
+- [x] Parse the Type section: function signatures (`functype`), with the current decoded subset of
+  WASM 2.0 value types used by Baedeker so far.
+- [x] Parse Import and Function sections to build the function index space.
+- [x] Parse the Code section and decode a growing instruction subset on demand.
+- [x] Parse the Global section, including defined globals and raw initializer expressions.
+- [x] Parse the Memory section, including defined memory limits.
+- [x] Implement a first substantial slice of the **validation algorithm** for instruction
+  sequences, including:
+  - [x] stack polymorphism after unconditional branches
+  - [x] block signature matching for `block`, `loop`, `if`
+  - [x] correct label indexing for `br`, `br_if`, `br_table`
+  - [x] type-correct `select` with explicit type annotations (2.0)
+  - [x] function type index resolution
+  - [x] call target resolution across imported and defined functions
+  - [x] local index validation
+  - [x] global index validation across imported and defined globals
+  - [x] memory index validation across imported and defined memories
+  - [x] final function result stack checking
+- [x] Validate a useful current instruction subset including structured control flow, locals,
+  calls, globals, `memory.size`, `memory.grow`, `select`, typed `select`, `i32.add`, `i64.add`,
+  `i32.eqz`, and a small constant/comparison subset.
+- [x] Validate defined global initializer expressions for the current const-expression subset:
+  `i32.const`, `i64.const`, `f32.const`, `f64.const`, and `global.get` of imported immutable
+  globals.
+- [x] Build a validation error type that produces genuinely useful diagnostics, including:
+  - [x] precise byte offsets for failing instructions
+  - [x] decode-preserving validation errors
+  - [x] operation-aware stack underflow diagnostics
+  - [x] operation-aware type mismatch diagnostics
+  - [x] richer branch/control result mismatch diagnostics
+  - [x] final result mismatch diagnostics with full stack context
+  - [x] index-space diagnostics with available-count context for globals and memories
+
+#### In progress / partial
+- [ ] Expand instruction coverage toward a broader WebAssembly 2.0 validation subset.
+- [ ] Enrich module-level validation beyond current globals/memories coverage.
+- [ ] Run the growing validator against a disciplined spec-test subset rather than only crate-local
+  tests.
+
+#### Still to do before Phase 1 can be called complete
+- [ ] Cover substantially more instruction families, especially memory load/store instructions,
+  conversions, and remaining numeric operators.
+- [ ] Parse and validate additional module sections needed for broader spec compliance,
+  especially tables/exports/elements/data/start as Phase 1 inputs demand.
+- [ ] Strengthen const-expression coverage as instruction support grows.
+- [ ] Integrate official spec tests for `assert_invalid` / `assert_malformed` cases and track
+  compliance explicitly.
+- [ ] Decide and document the exact “Phase 1 done” bar: either a sharply defined validated subset,
+  or near-complete core validation coverage.
+
+### Recommended next steps
+1. Add validation support for memory load/store instructions with the same diagnostics standard now
+   used for globals, branches, and result mismatches.
+2. Parse the next module sections most likely to unblock broader validation inputs: exports first,
+   then tables/elements/data as needed.
+3. Introduce spec-test harnessing for invalid/malformed modules so Phase 1 progress is measured
+   against external ground truth, not only internal unit tests.
+4. Keep the architectural boundary explicit: validation state remains proof/type state; register IR
+   design and lowering stay in Phase 2.
+
+### Current verification snapshot
+- `cargo fmt -- --check`
+- `cargo test -p baedeker-core`
+- `cargo clippy -p baedeker-core --all-targets -- -D warnings`
+- Current crate-local test count: **111 passing**
+
+### Current branch snapshot
+Recent Phase 1 commits on `feature/phase1-type-section` include:
+- `c6d8dc7` — `feat: improve validation diagnostics`
+- `ec26942` — `feat: expand validation diagnostics`
+- `266eaa0` — `feat: validate global initializer expressions`
+- `cb21973` — `feat: parse defined memory section`
+- `9a2fb76` — `feat: enrich index diagnostics`
+
+### Phase 1 note
+The validator stack remains the spec-facing abstract operand/control stack used for proof of
+well-typedness. This is intentionally distinct from the future execution architecture, which still
+flows through decode → validate → lower to register IR → execute.
 
 ### Spec sections to internalize
 - [Types](https://webassembly.github.io/spec/core/syntax/types.html)
