@@ -20,7 +20,8 @@ use crate::binary::instr::{DecodedInstr, Instr, decode_instr_sequence_with_offse
 use crate::binary::module::Module;
 use crate::error::ByteOffset;
 use crate::types::{
-    BlockType, FuncIdx, FuncType, GlobalIdx, ImportDesc, LocalDecl, MemIdx, Mutability, ValType,
+    BlockType, DataIdx, DataMode, FuncIdx, FuncType, GlobalIdx, ImportDesc, LocalDecl, MemIdx,
+    Mutability, ValType,
 };
 use crate::validate::error::{ValidationError, ValidationErrorKind};
 use crate::validate::state::{ControlKind::*, Reachability, ValidationState};
@@ -51,6 +52,8 @@ pub fn validate_module(module: &Module<'_>) -> Result<(), ValidationError> {
     }
 
     validate_globals(module)?;
+    validate_data_segments(module)?;
+    validate_start(module)?;
 
     for (func_idx, (type_idx, code)) in module.functions.iter().zip(module.codes()).enumerate() {
         let ty = &module.types[type_idx.0 as usize];
@@ -148,6 +151,93 @@ fn validate_global_init_expr(
             kind: ValidationErrorKind::GlobalInitTypeMismatch {
                 expected: global.global_type.val_type,
                 found,
+            },
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_data_segments(module: &Module<'_>) -> Result<(), ValidationError> {
+    if let Some(count) = module.data_count()
+        && count as usize != module.data().len()
+    {
+        return Err(ValidationError {
+            offset: ByteOffset(0),
+            function: None,
+            kind: ValidationErrorKind::UnknownDataIdx {
+                idx: DataIdx(count),
+                available: module.data().len() as u32,
+            },
+        });
+    }
+
+    for segment in module.data() {
+        if let DataMode::Active {
+            memory,
+            offset_expr,
+            offset_offset,
+        } = &segment.mode
+        {
+            resolve_memory_type(module, *memory, FuncIdx(0), *offset_offset)?;
+            validate_const_i32_expr(offset_expr, *offset_offset)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_const_i32_expr(expr: &[u8], offset: usize) -> Result<(), ValidationError> {
+    let instrs = decode_instr_sequence_with_offsets(expr, offset).map_err(|e| ValidationError {
+        offset: e.offset,
+        function: None,
+        kind: e.into(),
+    })?;
+
+    if instrs.len() != 2 || !matches!(instrs[1].instr, Instr::End) {
+        return Err(ValidationError {
+            offset: ByteOffset(offset),
+            function: None,
+            kind: ValidationErrorKind::InvalidGlobalInitExpr,
+        });
+    }
+
+    match instrs[0].instr {
+        Instr::I32Const(_) => Ok(()),
+        _ => Err(ValidationError {
+            offset: instrs[0].offset,
+            function: None,
+            kind: ValidationErrorKind::GlobalInitTypeMismatch {
+                expected: ValType::Num(crate::types::NumType::I32),
+                found: match instrs[0].instr {
+                    Instr::I64Const(_) => ValType::Num(crate::types::NumType::I64),
+                    Instr::F32Const(_) => ValType::Num(crate::types::NumType::F32),
+                    Instr::F64Const(_) => ValType::Num(crate::types::NumType::F64),
+                    _ => ValType::Num(crate::types::NumType::I32),
+                },
+            },
+        }),
+    }
+}
+
+fn validate_start(module: &Module<'_>) -> Result<(), ValidationError> {
+    let Some(start) = module.start() else {
+        return Ok(());
+    };
+
+    let offset = module
+        .section(crate::binary::section::SectionId::Start)
+        .map(|section| section.offset)
+        .unwrap_or(0);
+    let ty = resolve_func_type_for_module(module, start, offset)?;
+
+    if !ty.params.is_empty() || !ty.results.is_empty() {
+        return Err(ValidationError {
+            offset: ByteOffset(offset),
+            function: None,
+            kind: ValidationErrorKind::InvalidStartFunctionType {
+                params: ty.params.clone(),
+                results: ty.results.clone(),
             },
         });
     }
@@ -880,6 +970,83 @@ fn validate_instr(
                 stored: ValType::Num(crate::types::NumType::I64),
             },
         )?,
+        Instr::MemoryInit(data_idx, mem_idx) => {
+            resolve_data_segment(module, *data_idx, function, offset)?;
+            resolve_memory_type(module, *mem_idx, function, offset)?;
+            pop_expect(
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I32),
+                offset,
+                "memory.init",
+            )?;
+            pop_expect(
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I32),
+                offset,
+                "memory.init",
+            )?;
+            pop_expect(
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I32),
+                offset,
+                "memory.init",
+            )?;
+        }
+        Instr::DataDrop(data_idx) => {
+            resolve_data_segment(module, *data_idx, function, offset)?;
+        }
+        Instr::MemoryCopy { dst, src } => {
+            resolve_memory_type(module, *dst, function, offset)?;
+            resolve_memory_type(module, *src, function, offset)?;
+            pop_expect(
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I32),
+                offset,
+                "memory.copy",
+            )?;
+            pop_expect(
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I32),
+                offset,
+                "memory.copy",
+            )?;
+            pop_expect(
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I32),
+                offset,
+                "memory.copy",
+            )?;
+        }
+        Instr::MemoryFill(mem_idx) => {
+            resolve_memory_type(module, *mem_idx, function, offset)?;
+            pop_expect(
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I32),
+                offset,
+                "memory.fill",
+            )?;
+            pop_expect(
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I32),
+                offset,
+                "memory.fill",
+            )?;
+            pop_expect(
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I32),
+                offset,
+                "memory.fill",
+            )?;
+        }
         Instr::MemorySize(idx) => {
             resolve_memory_type(module, *idx, function, offset)?;
             state
@@ -1191,6 +1358,23 @@ fn resolve_func_type<'m>(
     function: FuncIdx,
     offset: usize,
 ) -> Result<&'m FuncType, ValidationError> {
+    resolve_func_type_with_context(module, idx, Some(function), offset)
+}
+
+fn resolve_func_type_for_module<'m>(
+    module: &'m Module<'_>,
+    idx: FuncIdx,
+    offset: usize,
+) -> Result<&'m FuncType, ValidationError> {
+    resolve_func_type_with_context(module, idx, None, offset)
+}
+
+fn resolve_func_type_with_context<'m>(
+    module: &'m Module<'_>,
+    idx: FuncIdx,
+    function: Option<FuncIdx>,
+    offset: usize,
+) -> Result<&'m FuncType, ValidationError> {
     let imported_funcs = module
         .imports
         .iter()
@@ -1205,7 +1389,7 @@ fn resolve_func_type<'m>(
         .nth(idx.0 as usize)
         .ok_or(ValidationError {
             offset: ByteOffset(offset),
-            function: Some(function),
+            function,
             kind: ValidationErrorKind::UnknownFuncIdx { idx },
         })?;
 
@@ -1214,7 +1398,7 @@ fn resolve_func_type<'m>(
         .get(type_idx.0 as usize)
         .ok_or(ValidationError {
             offset: ByteOffset(offset),
-            function: Some(function),
+            function,
             kind: ValidationErrorKind::UnknownTypeIdx { idx: type_idx },
         })
 }
@@ -1250,6 +1434,20 @@ fn resolve_global_type(
             function: Some(function),
             kind: ValidationErrorKind::UnknownGlobalIdx { idx, available },
         })
+}
+
+fn resolve_data_segment<'a>(
+    module: &'a Module<'a>,
+    idx: DataIdx,
+    function: FuncIdx,
+    offset: usize,
+) -> Result<&'a crate::types::DataSegment<'a>, ValidationError> {
+    let available = module.data().len() as u32;
+    module.data().get(idx.0 as usize).ok_or(ValidationError {
+        offset: ByteOffset(offset),
+        function: Some(function),
+        kind: ValidationErrorKind::UnknownDataIdx { idx, available },
+    })
 }
 
 fn resolve_memory_type(
@@ -1767,6 +1965,38 @@ mod tests {
     }
 
     #[test]
+    fn validate_data_segments_and_bulk_memory_ops() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x03, 0x02, 0x01, 0x00, 0x05, 0x03, 0x01, 0x00, 0x01, 0x0A, 0x24, 0x01, 0x22, 0x00,
+            0x41, 0x00, 0x41, 0x00, 0x41, 0x02, 0xFC, 0x08, 0x00, 0x00, 0xFC, 0x09, 0x00, 0x41,
+            0x00, 0x41, 0x00, 0x41, 0x02, 0xFC, 0x0A, 0x00, 0x00, 0x41, 0x00, 0x41, 0x7F, 0x41,
+            0x02, 0xFC, 0x0B, 0x00, 0x0B, 0x0B, 0x08, 0x01, 0x00, 0x41, 0x00, 0x0B, 0x02, 0xAA,
+            0xBB, 0x0C, 0x01, 0x01,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn reject_unknown_data_index_in_memory_init() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x03, 0x02, 0x01, 0x00, 0x05, 0x03, 0x01, 0x00, 0x01, 0x0A, 0x0E, 0x01, 0x0C, 0x00,
+            0x41, 0x00, 0x41, 0x00, 0x41, 0x01, 0xFC, 0x08, 0x00, 0x00, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::UnknownDataIdx {
+                idx: crate::types::DataIdx(0),
+                available: 0,
+            }
+        ));
+    }
+
+    #[test]
     fn validate_v128_lane_memory_ops() {
         let bytes = [
             0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
@@ -2085,6 +2315,66 @@ mod tests {
             ValidationErrorKind::InconsistentBranchTypes { expected, found }
                 if expected == vec![ValType::Num(crate::types::NumType::I32)]
                     && found == vec![ValType::Num(crate::types::NumType::I64)]
+        ));
+    }
+
+    #[test]
+    fn validate_start_function_with_empty_signature() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x03, 0x02, 0x01, 0x00, 0x08, 0x01, 0x00, 0x0A, 0x04, 0x01, 0x02, 0x00, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn reject_unknown_start_function_index() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x08, 0x01, 0x00,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(10));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::UnknownFuncIdx {
+                idx: crate::types::FuncIdx(0)
+            }
+        ));
+    }
+
+    #[test]
+    fn reject_start_function_with_params() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x01, 0x7F,
+            0x00, 0x03, 0x02, 0x01, 0x00, 0x08, 0x01, 0x00, 0x0A, 0x04, 0x01, 0x02, 0x00, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(21));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::InvalidStartFunctionType { params, results }
+                if params == vec![ValType::Num(crate::types::NumType::I32)]
+                    && results.is_empty()
+        ));
+    }
+
+    #[test]
+    fn reject_start_function_with_results() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01,
+            0x7F, 0x03, 0x02, 0x01, 0x00, 0x08, 0x01, 0x00, 0x0A, 0x04, 0x01, 0x02, 0x00, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(21));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::InvalidStartFunctionType { params, results }
+                if params.is_empty()
+                    && results == vec![ValType::Num(crate::types::NumType::I32)]
         ));
     }
 }

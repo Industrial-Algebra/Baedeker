@@ -126,6 +126,63 @@ pub struct MemArg {
     pub offset: u32,
 }
 
+/// Mode of a data segment.
+/// See [Spec §2.5.8](https://webassembly.github.io/spec/core/syntax/modules.html#data-segments).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DataMode<'a> {
+    Passive,
+    Active {
+        memory: MemIdx,
+        offset_expr: &'a [u8],
+        offset_offset: usize,
+    },
+}
+
+/// A defined data segment from the data section.
+/// See [Spec §5.5.14](https://webassembly.github.io/spec/core/binary/modules.html#data-section).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataSegment<'a> {
+    pub mode: DataMode<'a>,
+    pub init: &'a [u8],
+    pub init_offset: usize,
+}
+
+/// Mode of an element segment.
+/// See [Spec §2.5.7](https://webassembly.github.io/spec/core/syntax/modules.html#element-segments).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ElementMode<'a> {
+    Passive,
+    Declarative,
+    Active {
+        table: TableIdx,
+        offset_expr: &'a [u8],
+        offset_offset: usize,
+    },
+}
+
+/// A reference-valued initializer expression within an element segment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ElementExpr<'a> {
+    pub expr: &'a [u8],
+    pub offset: usize,
+}
+
+/// Initialization payload for an element segment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ElementInit<'a> {
+    FuncIndices(Vec<FuncIdx>),
+    Expressions(Vec<ElementExpr<'a>>),
+}
+
+/// A defined element segment from the element section.
+/// See [Spec §5.5.12](https://webassembly.github.io/spec/core/binary/modules.html#element-section).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ElementSegment<'a> {
+    pub mode: ElementMode<'a>,
+    pub elem_type: RefType,
+    pub init: ElementInit<'a>,
+}
+
 /// An imported item declaration.
 /// See [Spec §2.5.11](https://webassembly.github.io/spec/core/syntax/modules.html#imports).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,6 +199,23 @@ pub enum ImportDesc {
     Table(TableType),
     Mem(MemType),
     Global(GlobalType),
+}
+
+/// An exported item declaration.
+/// See [Spec §2.5.10](https://webassembly.github.io/spec/core/syntax/modules.html#exports).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Export {
+    pub name: String,
+    pub desc: ExportDesc,
+}
+
+/// Export descriptor specifying what kind of item is exported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExportDesc {
+    Func(FuncIdx),
+    Table(TableIdx),
+    Mem(MemIdx),
+    Global(GlobalIdx),
 }
 
 /// Table types.

@@ -116,6 +116,13 @@ pub enum Instr {
     I64Store8(MemArg),
     I64Store16(MemArg),
     I64Store32(MemArg),
+    MemoryInit(crate::types::DataIdx, MemIdx),
+    DataDrop(crate::types::DataIdx),
+    MemoryCopy {
+        dst: MemIdx,
+        src: MemIdx,
+    },
+    MemoryFill(MemIdx),
     MemorySize(MemIdx),
     MemoryGrow(MemIdx),
     I32Const(i32),
@@ -238,6 +245,7 @@ pub fn decode_instr_with_offset(
         0x22 => Instr::LocalTee(LocalIdx(decode_u32(cursor, base_offset)?)),
         0x23 => Instr::GlobalGet(GlobalIdx(decode_u32(cursor, base_offset)?)),
         0x24 => Instr::GlobalSet(GlobalIdx(decode_u32(cursor, base_offset)?)),
+        0xFC => decode_bulk_memory_instr(cursor, base_offset)?,
         0xFD => decode_simd_instr(cursor, base_offset)?,
         0x28 => Instr::I32Load(parse_memarg(cursor, base_offset)?),
         0x29 => Instr::I64Load(parse_memarg(cursor, base_offset)?),
@@ -294,6 +302,35 @@ pub fn decode_instr_with_offset(
         offset: ByteOffset(base_offset + opcode_offset),
         instr,
     })
+}
+
+fn decode_bulk_memory_instr(
+    cursor: &mut Cursor<'_>,
+    base_offset: usize,
+) -> Result<Instr, DecodeError> {
+    let opcode = decode_u32(cursor, base_offset)?;
+    match opcode {
+        8 => {
+            let data = crate::types::DataIdx(decode_u32(cursor, base_offset)?);
+            let mem = parse_mem_idx(cursor, base_offset)?;
+            Ok(Instr::MemoryInit(data, mem))
+        }
+        9 => Ok(Instr::DataDrop(crate::types::DataIdx(decode_u32(
+            cursor,
+            base_offset,
+        )?))),
+        10 => {
+            let dst = parse_mem_idx(cursor, base_offset)?;
+            let src = parse_mem_idx(cursor, base_offset)?;
+            Ok(Instr::MemoryCopy { dst, src })
+        }
+        11 => Ok(Instr::MemoryFill(parse_mem_idx(cursor, base_offset)?)),
+        _ => Err(DecodeError {
+            offset: ByteOffset(base_offset),
+            context: DecodeContext::CodeSection,
+            kind: DecodeErrorKind::UnknownOpcode { byte: 0xFC },
+        }),
+    }
 }
 
 fn decode_simd_instr(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Instr, DecodeError> {
@@ -688,6 +725,31 @@ mod tests {
         assert!(matches!(instrs[21], Instr::I64Store16(_)));
         assert!(matches!(instrs[22], Instr::I64Store32(_)));
         assert!(matches!(instrs[23], Instr::End));
+    }
+
+    #[test]
+    fn decode_bulk_memory_ops() {
+        let instrs = decode_instr_sequence(
+            &[
+                0xFC, 0x08, 0x00, 0x00, 0xFC, 0x09, 0x00, 0xFC, 0x0A, 0x00, 0x00, 0xFC, 0x0B, 0x00,
+                0x0B,
+            ],
+            315,
+        )
+        .unwrap();
+        assert_eq!(
+            instrs,
+            vec![
+                Instr::MemoryInit(crate::types::DataIdx(0), MemIdx(0)),
+                Instr::DataDrop(crate::types::DataIdx(0)),
+                Instr::MemoryCopy {
+                    dst: MemIdx(0),
+                    src: MemIdx(0)
+                },
+                Instr::MemoryFill(MemIdx(0)),
+                Instr::End,
+            ]
+        );
     }
 
     #[test]

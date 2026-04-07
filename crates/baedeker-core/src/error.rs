@@ -28,10 +28,22 @@ pub enum DecodeContext {
     ImportSection,
     /// Decoding a function section entry.
     FunctionSection,
+    /// Decoding a table section entry.
+    TableSection,
     /// Decoding a global section entry.
     GlobalSection,
     /// Decoding a memory section entry.
     MemorySection,
+    /// Decoding an export section entry.
+    ExportSection,
+    /// Decoding a start section entry.
+    StartSection,
+    /// Decoding an element section entry.
+    ElementSection,
+    /// Decoding a data section entry.
+    DataSection,
+    /// Decoding a data count section entry.
+    DataCountSection,
     /// Decoding a code section entry.
     CodeSection,
 }
@@ -47,8 +59,14 @@ impl fmt::Display for DecodeContext {
             DecodeContext::TypeSection => write!(f, "type section"),
             DecodeContext::ImportSection => write!(f, "import section"),
             DecodeContext::FunctionSection => write!(f, "function section"),
+            DecodeContext::TableSection => write!(f, "table section"),
             DecodeContext::GlobalSection => write!(f, "global section"),
             DecodeContext::MemorySection => write!(f, "memory section"),
+            DecodeContext::ExportSection => write!(f, "export section"),
+            DecodeContext::StartSection => write!(f, "start section"),
+            DecodeContext::ElementSection => write!(f, "element section"),
+            DecodeContext::DataSection => write!(f, "data section"),
+            DecodeContext::DataCountSection => write!(f, "data count section"),
             DecodeContext::CodeSection => write!(f, "code section"),
         }
     }
@@ -92,6 +110,8 @@ pub enum DecodeErrorKind {
     UnknownRefType { byte: u8 },
     /// Unknown import descriptor tag.
     UnknownImportDesc { byte: u8 },
+    /// Unknown export descriptor tag.
+    UnknownExportDesc { byte: u8 },
     /// Invalid global mutability encoding.
     InvalidMutability { byte: u8 },
     /// Invalid UTF-8 in a name string.
@@ -151,6 +171,9 @@ impl fmt::Display for DecodeErrorKind {
             }
             DecodeErrorKind::UnknownImportDesc { byte } => {
                 write!(f, "unknown import descriptor {byte:#04x}")
+            }
+            DecodeErrorKind::UnknownExportDesc { byte } => {
+                write!(f, "unknown export descriptor {byte:#04x}")
             }
             DecodeErrorKind::InvalidMutability { byte } => {
                 write!(f, "invalid mutability {byte:#04x}")

@@ -7,7 +7,9 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use crate::error::{ByteOffset, DecodeContext, DecodeError, DecodeErrorKind};
-use crate::types::{BlockType, FuncIdx, GlobalIdx, LabelIdx, LocalIdx, MemIdx, TypeIdx, ValType};
+use crate::types::{
+    BlockType, DataIdx, FuncIdx, GlobalIdx, LabelIdx, LocalIdx, MemIdx, TypeIdx, ValType,
+};
 
 /// A validation error with byte offset and function context.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +37,10 @@ pub enum ValidationErrorKind {
     },
     UnknownMemIdx {
         idx: MemIdx,
+        available: u32,
+    },
+    UnknownDataIdx {
+        idx: DataIdx,
         available: u32,
     },
     InvalidMemArgAlign {
@@ -110,6 +116,10 @@ pub enum ValidationErrorKind {
         expected: Vec<ValType>,
         found: Vec<ValType>,
     },
+    InvalidStartFunctionType {
+        params: Vec<ValType>,
+        results: Vec<ValType>,
+    },
 }
 
 impl fmt::Display for ValidationError {
@@ -152,6 +162,13 @@ impl fmt::Display for ValidationErrorKind {
                 write!(
                     f,
                     "unknown memory index {} (available memories: {})",
+                    idx.0, available
+                )
+            }
+            ValidationErrorKind::UnknownDataIdx { idx, available } => {
+                write!(
+                    f,
+                    "unknown data index {} (available data segments: {})",
                     idx.0, available
                 )
             }
@@ -284,6 +301,13 @@ impl fmt::Display for ValidationErrorKind {
                     f,
                     "result type mismatch: expected {:?}, found {:?}",
                     expected, found
+                )
+            }
+            ValidationErrorKind::InvalidStartFunctionType { params, results } => {
+                write!(
+                    f,
+                    "start function must have type [] -> [], found {:?} -> {:?}",
+                    params, results
                 )
             }
         }
