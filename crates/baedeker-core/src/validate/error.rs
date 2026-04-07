@@ -8,7 +8,8 @@ use core::fmt;
 
 use crate::error::{ByteOffset, DecodeContext, DecodeError, DecodeErrorKind};
 use crate::types::{
-    BlockType, DataIdx, FuncIdx, GlobalIdx, LabelIdx, LocalIdx, MemIdx, TypeIdx, ValType,
+    BlockType, DataIdx, FuncIdx, GlobalIdx, LabelIdx, LocalIdx, MemIdx, RefType, TableIdx, TypeIdx,
+    ValType,
 };
 
 /// A validation error with byte offset and function context.
@@ -33,6 +34,10 @@ pub enum ValidationErrorKind {
     },
     UnknownGlobalIdx {
         idx: GlobalIdx,
+        available: u32,
+    },
+    UnknownTableIdx {
+        idx: TableIdx,
         available: u32,
     },
     UnknownMemIdx {
@@ -120,6 +125,19 @@ pub enum ValidationErrorKind {
         params: Vec<ValType>,
         results: Vec<ValType>,
     },
+    InvalidElementExpr,
+    NonConstantElementExpr,
+    ElementExprTypeMismatch {
+        expected: ValType,
+        found: ValType,
+    },
+    ElementTableTypeMismatch {
+        expected: RefType,
+        found: RefType,
+    },
+    MissingDataCountSection {
+        op: &'static str,
+    },
 }
 
 impl fmt::Display for ValidationError {
@@ -155,6 +173,13 @@ impl fmt::Display for ValidationErrorKind {
                 write!(
                     f,
                     "unknown global index {} (available globals: {})",
+                    idx.0, available
+                )
+            }
+            ValidationErrorKind::UnknownTableIdx { idx, available } => {
+                write!(
+                    f,
+                    "unknown table index {} (available tables: {})",
                     idx.0, available
                 )
             }
@@ -309,6 +334,29 @@ impl fmt::Display for ValidationErrorKind {
                     "start function must have type [] -> [], found {:?} -> {:?}",
                     params, results
                 )
+            }
+            ValidationErrorKind::InvalidElementExpr => {
+                write!(f, "invalid element initializer expression")
+            }
+            ValidationErrorKind::NonConstantElementExpr => {
+                write!(f, "element initializer must be a constant expression")
+            }
+            ValidationErrorKind::ElementExprTypeMismatch { expected, found } => {
+                write!(
+                    f,
+                    "element initializer type mismatch: expected {:?}, found {:?}",
+                    expected, found
+                )
+            }
+            ValidationErrorKind::ElementTableTypeMismatch { expected, found } => {
+                write!(
+                    f,
+                    "active element segment table type mismatch: expected {:?}, found {:?}",
+                    expected, found
+                )
+            }
+            ValidationErrorKind::MissingDataCountSection { op } => {
+                write!(f, "{} requires a data count section", op)
             }
         }
     }

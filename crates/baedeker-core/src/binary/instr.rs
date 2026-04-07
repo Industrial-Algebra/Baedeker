@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use crate::binary::leb128::{self, Cursor};
 use crate::error::{ByteOffset, DecodeContext, DecodeError, DecodeErrorKind};
 use crate::types::{
-    BlockType, CodeBody, FuncIdx, GlobalIdx, LabelIdx, LocalIdx, MemArg, MemIdx, ValType,
+    BlockType, CodeBody, FuncIdx, GlobalIdx, LabelIdx, LocalIdx, MemArg, MemIdx, RefType, ValType,
 };
 
 /// A decoded instruction paired with its absolute byte offset in the module.
@@ -129,6 +129,8 @@ pub enum Instr {
     I64Const(i64),
     F32Const(f32),
     F64Const(f64),
+    RefNull(RefType),
+    RefFunc(FuncIdx),
     V128Const([u8; 16]),
     I32Eqz,
     I32Eq,
@@ -276,6 +278,8 @@ pub fn decode_instr_with_offset(
         0x42 => Instr::I64Const(decode_i64(cursor, base_offset)?),
         0x43 => Instr::F32Const(decode_f32(cursor, base_offset)?),
         0x44 => Instr::F64Const(decode_f64(cursor, base_offset)?),
+        0xD0 => Instr::RefNull(parse_ref_type(cursor, base_offset)?),
+        0xD2 => Instr::RefFunc(FuncIdx(decode_u32(cursor, base_offset)?)),
         0x45 => Instr::I32Eqz,
         0x46 => Instr::I32Eq,
         0x47 => Instr::I32Ne,
@@ -439,6 +443,25 @@ fn parse_mem_idx(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<MemIdx, 
         });
     }
     Ok(MemIdx(0))
+}
+
+fn parse_ref_type(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<RefType, DecodeError> {
+    let pos = cursor.position();
+    let byte = cursor.read_byte().map_err(|_| DecodeError {
+        offset: ByteOffset(base_offset + pos),
+        context: DecodeContext::CodeSection,
+        kind: DecodeErrorKind::UnexpectedEof,
+    })?;
+
+    match byte {
+        0x70 => Ok(RefType::FuncRef),
+        0x6F => Ok(RefType::ExternRef),
+        _ => Err(DecodeError {
+            offset: ByteOffset(base_offset + pos),
+            context: DecodeContext::CodeSection,
+            kind: DecodeErrorKind::UnknownRefType { byte },
+        }),
+    }
 }
 
 fn parse_result_types(
@@ -725,6 +748,19 @@ mod tests {
         assert!(matches!(instrs[21], Instr::I64Store16(_)));
         assert!(matches!(instrs[22], Instr::I64Store32(_)));
         assert!(matches!(instrs[23], Instr::End));
+    }
+
+    #[test]
+    fn decode_ref_instructions() {
+        let instrs = decode_instr_sequence(&[0xD0, 0x70, 0xD2, 0x00, 0x0B], 90).unwrap();
+        assert_eq!(
+            instrs,
+            vec![
+                Instr::RefNull(RefType::FuncRef),
+                Instr::RefFunc(FuncIdx(0)),
+                Instr::End
+            ]
+        );
     }
 
     #[test]
