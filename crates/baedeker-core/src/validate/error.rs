@@ -138,6 +138,15 @@ pub enum ValidationErrorKind {
     MissingDataCountSection {
         op: &'static str,
     },
+    DuplicateExportName {
+        name: alloc::string::String,
+    },
+    TooManyTables {
+        count: u32,
+    },
+    TooManyMemories {
+        count: u32,
+    },
 }
 
 impl fmt::Display for ValidationError {
@@ -357,6 +366,23 @@ impl fmt::Display for ValidationErrorKind {
             }
             ValidationErrorKind::MissingDataCountSection { op } => {
                 write!(f, "{} requires a data count section", op)
+            }
+            ValidationErrorKind::DuplicateExportName { name } => {
+                write!(f, "duplicate export name {:?}", name)
+            }
+            ValidationErrorKind::TooManyTables { count } => {
+                write!(
+                    f,
+                    "module defines {} tables; at most 1 is currently supported",
+                    count
+                )
+            }
+            ValidationErrorKind::TooManyMemories { count } => {
+                write!(
+                    f,
+                    "module defines {} memories; at most 1 is currently supported",
+                    count
+                )
             }
         }
     }

@@ -6,8 +6,10 @@ fn main() {
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR not set");
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
     let fixtures_dir = Path::new(&manifest_dir).join("fixtures");
+    let spec_dir = Path::new(&manifest_dir).join("spec");
 
     println!("cargo::rerun-if-changed=fixtures/");
+    println!("cargo::rerun-if-changed=spec/");
 
     // Verify the wasm target is installed
     let rustup_output = Command::new("rustup")
@@ -71,5 +73,44 @@ fn main() {
             "cargo:warning=compiled fixture: {stem}.wasm ({} bytes)",
             fs::metadata(&wasm_path).map(|m| m.len()).unwrap_or(0)
         );
+    }
+
+    if spec_dir.exists() {
+        copy_spec_fixtures(&spec_dir, Path::new(&out_dir).join("spec").as_path());
+    }
+}
+
+fn copy_spec_fixtures(src_root: &Path, dst_root: &Path) {
+    fs::create_dir_all(dst_root).unwrap_or_else(|e| {
+        panic!(
+            "failed to create spec output directory {}: {e}",
+            dst_root.display()
+        )
+    });
+
+    for entry in fs::read_dir(src_root)
+        .unwrap_or_else(|e| panic!("failed to read spec directory {}: {e}", src_root.display()))
+    {
+        let entry = entry.unwrap_or_else(|e| panic!("failed to read spec directory entry: {e}"));
+        let path = entry.path();
+        let dst = dst_root.join(entry.file_name());
+        if path.is_dir() {
+            copy_spec_fixtures(&path, &dst);
+        } else if path
+            .extension()
+            .is_some_and(|ext| ext == "wasm" || ext == "meta")
+        {
+            fs::create_dir_all(dst.parent().expect("spec file must have parent")).unwrap_or_else(
+                |e| panic!("failed to create directory for {}: {e}", dst.display()),
+            );
+            fs::copy(&path, &dst).unwrap_or_else(|e| {
+                panic!(
+                    "failed to copy spec fixture {} to {}: {e}",
+                    path.display(),
+                    dst.display()
+                )
+            });
+            println!("cargo:warning=copied spec fixture: {}", dst.display());
+        }
     }
 }

@@ -14,7 +14,7 @@
 pub mod error;
 pub mod state;
 
-use alloc::{vec, vec::Vec};
+use alloc::{collections::BTreeSet, vec, vec::Vec};
 
 use crate::binary::instr::{DecodedInstr, Instr, decode_instr_sequence_with_offsets};
 use crate::binary::module::Module;
@@ -51,6 +51,7 @@ pub fn validate_module(module: &Module<'_>) -> Result<(), ValidationError> {
         }
     }
 
+    validate_table_memory_constraints(module)?;
     validate_globals(module)?;
     validate_data_segments(module)?;
     validate_bulk_memory(module)?;
@@ -67,6 +68,42 @@ pub fn validate_module(module: &Module<'_>) -> Result<(), ValidationError> {
             code.locals.as_slice(),
             code,
         )?;
+    }
+
+    Ok(())
+}
+
+fn validate_table_memory_constraints(module: &Module<'_>) -> Result<(), ValidationError> {
+    let table_count = module
+        .imports()
+        .iter()
+        .filter(|import| matches!(import.desc, ImportDesc::Table(_)))
+        .count()
+        + module.tables().len();
+    if table_count > 1 {
+        return Err(ValidationError {
+            offset: ByteOffset(0),
+            function: None,
+            kind: ValidationErrorKind::TooManyTables {
+                count: table_count as u32,
+            },
+        });
+    }
+
+    let memory_count = module
+        .imports()
+        .iter()
+        .filter(|import| matches!(import.desc, ImportDesc::Mem(_)))
+        .count()
+        + module.memories().len();
+    if memory_count > 1 {
+        return Err(ValidationError {
+            offset: ByteOffset(0),
+            function: None,
+            kind: ValidationErrorKind::TooManyMemories {
+                count: memory_count as u32,
+            },
+        });
     }
 
     Ok(())
@@ -310,8 +347,19 @@ fn validate_exports(module: &Module<'_>) -> Result<(), ValidationError> {
         .section(crate::binary::section::SectionId::Export)
         .map(|section| section.offset)
         .unwrap_or(0);
+    let mut names = BTreeSet::new();
 
     for export in module.exports() {
+        if !names.insert(export.name.as_str()) {
+            return Err(ValidationError {
+                offset: ByteOffset(offset),
+                function: None,
+                kind: ValidationErrorKind::DuplicateExportName {
+                    name: export.name.clone(),
+                },
+            });
+        }
+
         match export.desc {
             ExportDesc::Func(idx) => {
                 let _ = resolve_func_type_for_module(module, idx, offset)?;
@@ -2711,6 +2759,49 @@ mod tests {
         ];
         let module = Module::decode(&bytes).unwrap();
         module.validate().unwrap();
+    }
+
+    #[test]
+    fn reject_multiple_tables_across_imports_and_definitions() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x02, 0x0B, 0x01, 0x03, b'e', b'n',
+            b'v', 0x01, b't', 0x01, 0x70, 0x00, 0x01, 0x04, 0x04, 0x01, 0x70, 0x00, 0x01,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::TooManyTables { count: 2 }
+        ));
+    }
+
+    #[test]
+    fn reject_multiple_memories_across_imports_and_definitions() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x02, 0x0C, 0x01, 0x03, b'e', b'n',
+            b'v', 0x03, b'm', b'e', b'm', 0x02, 0x00, 0x01, 0x05, 0x03, 0x01, 0x00, 0x01,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::TooManyMemories { count: 2 }
+        ));
+    }
+
+    #[test]
+    fn reject_duplicate_export_names() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x03, 0x02, 0x01, 0x00, 0x07, 0x0D, 0x02, 0x03, b'd', b'u', b'p', 0x00, 0x00, 0x03,
+            b'd', b'u', b'p', 0x00, 0x00, 0x0A, 0x04, 0x01, 0x02, 0x00, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::DuplicateExportName { name } if name == "dup"
+        ));
     }
 
     #[test]
