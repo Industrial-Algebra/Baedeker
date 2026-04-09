@@ -15,9 +15,10 @@ Each phase builds expertise in a specific layer before moving upward. Phases are
 produce a working (if incomplete) artifact at each boundary, so the project is always runnable
 and testable — never in a state where three more layers need to exist before anything executes.
 
-The target spec is WebAssembly 2.0 (with an eye toward post-MVP proposals), and the primary
-deployment target is iOS via Rust FFI into Swift. JIT compilation is explicitly out of scope
-for the initial architecture; the engine is interpreter-first with AOT as a future layer.
+The target spec is full WebAssembly 3.0 validation, with execution support growing in phases on
+top of that semantic front-end, and the primary deployment target is iOS via Rust FFI into Swift.
+JIT compilation is explicitly out of scope for the initial architecture; the engine is
+interpreter-first with AOT as a future layer.
 
 ---
 
@@ -82,37 +83,77 @@ for the initial architecture; the engine is interpreter-first with AOT as a futu
   - [x] index-space diagnostics with available-count context for globals and memories
 
 #### In progress / partial
-- [ ] Expand instruction coverage toward a broader WebAssembly 2.0 validation subset.
-- [ ] Enrich module-level validation beyond current globals/memories coverage.
-- [ ] Run the growing validator against a disciplined spec-test subset rather than only crate-local
+- [~] Expand instruction coverage from the current strong subset toward full WebAssembly 3.0
+  validation.
+  - Current support now includes structured control flow, direct calls, locals, globals, scalar
+    memory load/store families, SIMD/vector memory operations and lane checks, bulk-memory
+    operations, typed `select`, `br_table`, and a useful constant/comparison subset.
+  - Major remaining gaps are still broad numeric coverage, conversions/reinterpretations,
+    `call_indirect`, broader table instruction families, and additional reference-type-driven
+    validation paths.
+- [~] Enrich module-level validation toward full spec-shaped coverage.
+  - Type/import/function/code/global/memory/data/data-count/export/table/start/element sections are
+    now parsed and validated in a useful Phase 1 base.
+  - Remaining work is mostly semantic breadth and proposal-era completeness rather than missing the
+    core module skeleton.
+- [~] Run the growing validator against a disciplined external corpus rather than only crate-local
   tests.
+  - Baedeker now has a filesystem-backed spec fixture harness with `valid`, `invalid-decode`, and
+    `invalid-validate` buckets plus optional `.meta` files for exact error `kind`/`offset`
+    assertions.
+  - Remaining work is to integrate official `wast`/spec-suite cases and track support/unsupported
+    areas explicitly.
+
+#### Revised Phase 1 completion definition
+Phase 1 is complete only when Baedeker provides a robust, diagnostics-oriented validation front-end
+for the full intended WebAssembly 3.0 surface, sufficient to serve as the semantic foundation for
+later register-based lowering and execution.
+
+More concretely, Phase 1 is done when all of the following are true:
+1. **Validation coverage**
+   - The decoder and validator cover the intended WebAssembly 3.0 instruction and module surface,
+     or any explicitly excluded areas are documented as out of scope for the current release.
+2. **Semantic reliability**
+   - Control-flow typing, operand stack typing, label/result propagation, const-expression rules,
+     and index-space resolution are stable enough that later lowering does not need to rediscover
+     spec semantics on its own.
+3. **Diagnostics quality**
+   - Validation and malformed-input failures preserve precise byte offsets where feasible and report
+     stable structured error kinds suitable for regression testing.
+4. **Spec-test grounding**
+   - Baedeker is exercised against both its internal fixture corpus and official spec-suite style
+     invalid/malformed validation inputs, with compliance status tracked explicitly.
+5. **Architectural clarity**
+   - The validator remains a spec-facing proof/type layer, clearly separated from the future
+     register-based IR and interpreter core.
 
 #### Still to do before Phase 1 can be called complete
-- [ ] Cover substantially more instruction families, especially memory load/store instructions,
-  conversions, and remaining numeric operators.
-- [ ] Parse and validate additional module sections needed for broader spec compliance,
-  especially tables/exports/elements/data/start as Phase 1 inputs demand.
-- [ ] Strengthen const-expression coverage as instruction support grows.
-- [ ] Integrate official spec tests for `assert_invalid` / `assert_malformed` cases and track
+- [ ] Cover substantially more instruction families, especially `call_indirect`, table
+  instructions, conversions, reinterpretations, and the remaining numeric operators.
+- [ ] Continue broadening reference-type, const-expression, and proposal-era validation coverage in
+  line with the WebAssembly 3.0 target surface.
+- [ ] Integrate official spec-suite `assert_invalid` / `assert_malformed` style coverage and track
   compliance explicitly.
-- [ ] Decide and document the exact “Phase 1 done” bar: either a sharply defined validated subset,
-  or near-complete core validation coverage.
+- [ ] Document any intentionally deferred or partially implemented WebAssembly 3.0 areas so Phase 2
+  builds on a crisp semantic contract rather than assumptions.
 
 ### Recommended next steps
-1. Add validation support for memory load/store instructions with the same diagnostics standard now
-   used for globals, branches, and result mismatches.
-2. Parse the next module sections most likely to unblock broader validation inputs: exports first,
-   then tables/elements/data as needed.
-3. Introduce spec-test harnessing for invalid/malformed modules so Phase 1 progress is measured
-   against external ground truth, not only internal unit tests.
+1. Prioritize the highest-leverage semantic gaps for both full validation and future lowering:
+   `call_indirect`, table instructions, and broader numeric/conversion coverage.
+2. Keep expanding the fixture corpus in lockstep with each new instruction family, including exact
+   `.meta` assertions for representative diagnostics.
+3. Begin wiring in official spec-suite inputs so Phase 1 progress is measured against external
+   ground truth as well as internal fixtures.
 4. Keep the architectural boundary explicit: validation state remains proof/type state; register IR
    design and lowering stay in Phase 2.
 
 ### Current verification snapshot
 - `cargo fmt -- --check`
-- `cargo test -p baedeker-core`
-- `cargo clippy -p baedeker-core --all-targets -- -D warnings`
-- Current crate-local test count: **111 passing**
+- `cargo test -p baedeker-core --test spec`
+- `cargo test`
+- `cargo clippy --all-targets -- -D warnings`
+- Current `baedeker-core` unit test count: **169 passing**
+- Current spec harness integration tests: **3 passing**
 
 ### Current branch snapshot
 Recent Phase 1 commits on `feature/phase1-type-section` include:
@@ -126,6 +167,11 @@ Recent Phase 1 commits on `feature/phase1-type-section` include:
 The validator stack remains the spec-facing abstract operand/control stack used for proof of
 well-typedness. This is intentionally distinct from the future execution architecture, which still
 flows through decode → validate → lower to register IR → execute.
+
+Because Baedeker's long-term goal is full WebAssembly 3.0 validation, Phase 1 should not be read
+as a short-lived subset-only milestone. It is the semantic front-end of the runtime: the layer that
+must eventually make the full intended WASM surface precise, diagnosable, and trustworthy before
+execution and lowering broaden on top of it.
 
 ### Spec sections to internalize
 - [Types](https://webassembly.github.io/spec/core/syntax/types.html)

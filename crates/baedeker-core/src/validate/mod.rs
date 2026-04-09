@@ -20,8 +20,9 @@ use crate::binary::instr::{DecodedInstr, Instr, decode_instr_sequence_with_offse
 use crate::binary::module::Module;
 use crate::error::ByteOffset;
 use crate::types::{
-    BlockType, DataIdx, DataMode, ElementInit, ElementMode, ExportDesc, FuncIdx, FuncType,
-    GlobalIdx, ImportDesc, LocalDecl, MemIdx, Mutability, RefType, TableIdx, ValType,
+    BlockType, DataIdx, DataMode, ElemIdx, ElementInit, ElementMode, ExportDesc, FuncIdx,
+    FuncType, GlobalIdx, ImportDesc, LocalDecl, MemIdx, Mutability, RefType, TableIdx, TypeIdx,
+    ValType,
 };
 use crate::validate::error::{ValidationError, ValidationErrorKind};
 use crate::validate::state::{ControlKind::*, Reachability, ValidationState};
@@ -633,6 +634,34 @@ fn validate_instr(
                 state.operands.push(*result);
             }
         }
+        Instr::CallIndirect {
+            type_idx,
+            table_idx,
+        } => {
+            let table_type = resolve_table_type_with_context(module, *table_idx, Some(function), offset)?;
+            if table_type.elem != RefType::FuncRef {
+                return Err(ValidationError {
+                    offset: ByteOffset(offset),
+                    function: Some(function),
+                    kind: ValidationErrorKind::InvalidCallIndirectTableType {
+                        expected: RefType::FuncRef,
+                        found: table_type.elem,
+                    },
+                });
+            }
+            let ty = resolve_type(module, *type_idx, Some(function), offset)?;
+            pop_expect(
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I32),
+                offset,
+                "call_indirect",
+            )?;
+            pop_exact(function, state, &ty.params, offset)?;
+            for result in &ty.results {
+                state.operands.push(*result);
+            }
+        }
         Instr::Drop => {
             pop_any(function, state, offset, "drop")?;
         }
@@ -720,6 +749,28 @@ fn validate_instr(
         Instr::GlobalSet(idx) => {
             let ty = resolve_global_type(module, *idx, function, offset)?;
             pop_expect(function, state, ty.val_type, offset, "global.set")?;
+        }
+        Instr::TableGet(idx) => {
+            let ty = resolve_table_type_with_context(module, *idx, Some(function), offset)?;
+            pop_expect(
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I32),
+                offset,
+                "table.get",
+            )?;
+            state.operands.push(ValType::Ref(ty.elem));
+        }
+        Instr::TableSet(idx) => {
+            let ty = resolve_table_type_with_context(module, *idx, Some(function), offset)?;
+            pop_expect(function, state, ValType::Ref(ty.elem), offset, "table.set")?;
+            pop_expect(
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I32),
+                offset,
+                "table.set",
+            )?;
         }
         Instr::V128Load(memarg) => validate_load(
             module,
@@ -1250,6 +1301,116 @@ fn validate_instr(
                 "memory.fill",
             )?;
         }
+        Instr::TableInit {
+            elem_idx,
+            table_idx,
+        } => {
+            let elem = resolve_element_segment(module, *elem_idx, function, offset)?;
+            let table = resolve_table_type_with_context(module, *table_idx, Some(function), offset)?;
+            if elem.elem_type != table.elem {
+                return Err(ValidationError {
+                    offset: ByteOffset(offset),
+                    function: Some(function),
+                    kind: ValidationErrorKind::ElementTableTypeMismatch {
+                        expected: table.elem,
+                        found: elem.elem_type,
+                    },
+                });
+            }
+            pop_expect(
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I32),
+                offset,
+                "table.init",
+            )?;
+            pop_expect(
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I32),
+                offset,
+                "table.init",
+            )?;
+            pop_expect(
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I32),
+                offset,
+                "table.init",
+            )?;
+        }
+        Instr::ElemDrop(elem_idx) => {
+            let _ = resolve_element_segment(module, *elem_idx, function, offset)?;
+        }
+        Instr::TableCopy { dst, src } => {
+            let dst_ty = resolve_table_type_with_context(module, *dst, Some(function), offset)?;
+            let src_ty = resolve_table_type_with_context(module, *src, Some(function), offset)?;
+            if dst_ty.elem != src_ty.elem {
+                return Err(ValidationError {
+                    offset: ByteOffset(offset),
+                    function: Some(function),
+                    kind: ValidationErrorKind::ElementTableTypeMismatch {
+                        expected: dst_ty.elem,
+                        found: src_ty.elem,
+                    },
+                });
+            }
+            pop_expect(
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I32),
+                offset,
+                "table.copy",
+            )?;
+            pop_expect(
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I32),
+                offset,
+                "table.copy",
+            )?;
+            pop_expect(
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I32),
+                offset,
+                "table.copy",
+            )?;
+        }
+        Instr::TableGrow(idx) => {
+            let ty = resolve_table_type_with_context(module, *idx, Some(function), offset)?;
+            pop_expect(
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I32),
+                offset,
+                "table.grow",
+            )?;
+            pop_expect(function, state, ValType::Ref(ty.elem), offset, "table.grow")?;
+            state.operands.push(ValType::Num(crate::types::NumType::I32));
+        }
+        Instr::TableSize(idx) => {
+            let _ = resolve_table_type_with_context(module, *idx, Some(function), offset)?;
+            state.operands.push(ValType::Num(crate::types::NumType::I32));
+        }
+        Instr::TableFill(idx) => {
+            let ty = resolve_table_type_with_context(module, *idx, Some(function), offset)?;
+            pop_expect(
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I32),
+                offset,
+                "table.fill",
+            )?;
+            pop_expect(function, state, ValType::Ref(ty.elem), offset, "table.fill")?;
+            pop_expect(
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I32),
+                offset,
+                "table.fill",
+            )?;
+        }
         Instr::MemorySize(idx) => {
             resolve_memory_type(module, *idx, function, offset)?;
             state
@@ -1560,6 +1721,19 @@ fn resolve_block_type(
     }
 }
 
+fn resolve_type<'m>(
+    module: &'m Module<'_>,
+    idx: TypeIdx,
+    function: Option<FuncIdx>,
+    offset: usize,
+) -> Result<&'m FuncType, ValidationError> {
+    module.types.get(idx.0 as usize).ok_or(ValidationError {
+        offset: ByteOffset(offset),
+        function,
+        kind: ValidationErrorKind::UnknownTypeIdx { idx },
+    })
+}
+
 fn resolve_func_type<'m>(
     module: &'m Module<'_>,
     idx: FuncIdx,
@@ -1713,6 +1887,20 @@ fn resolve_data_segment<'a>(
         offset: ByteOffset(offset),
         function: Some(function),
         kind: ValidationErrorKind::UnknownDataIdx { idx, available },
+    })
+}
+
+fn resolve_element_segment<'a>(
+    module: &'a Module<'a>,
+    idx: ElemIdx,
+    function: FuncIdx,
+    offset: usize,
+) -> Result<&'a crate::types::ElementSegment<'a>, ValidationError> {
+    let available = module.elements().len() as u32;
+    module.elements().get(idx.0 as usize).ok_or(ValidationError {
+        offset: ByteOffset(offset),
+        function: Some(function),
+        kind: ValidationErrorKind::UnknownElemIdx { idx, available },
     })
 }
 
@@ -2905,5 +3093,49 @@ mod tests {
                 idx: crate::types::FuncIdx(0)
             }
         ));
+    }
+
+    #[test]
+    fn validate_call_indirect_with_funcref_table() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x09, 0x02, 0x60, 0x01, 0x7F,
+            0x01, 0x7F, 0x60, 0x00, 0x00, 0x02, 0x0D, 0x01, 0x03, b'e', b'n', b'v', 0x03, b't',
+            b'a', b'b', 0x01, 0x70, 0x00, 0x01, 0x03, 0x02, 0x01, 0x00, 0x0A, 0x0B, 0x01, 0x09,
+            0x00, 0x20, 0x00, 0x41, 0x00, 0x11, 0x00, 0x00, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn reject_call_indirect_with_non_funcref_table() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x02, 0x0D, 0x01, 0x03, b'e', b'n', b'v', 0x03, b't', b'a', b'b', 0x01, 0x6F, 0x00,
+            0x01, 0x03, 0x02, 0x01, 0x00, 0x0A, 0x09, 0x01, 0x07, 0x00, 0x41, 0x00, 0x11, 0x00,
+            0x00, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::InvalidCallIndirectTableType {
+                expected: RefType::FuncRef,
+                found: RefType::ExternRef,
+            }
+        ));
+    }
+
+    #[test]
+    fn validate_table_get_set_size_and_grow() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x60, 0x00, 0x01,
+            0x7F, 0x60, 0x00, 0x00, 0x03, 0x03, 0x02, 0x00, 0x01, 0x04, 0x04, 0x01, 0x70, 0x00,
+            0x01, 0x0A, 0x1D, 0x02, 0x0A, 0x00, 0x41, 0x00, 0x25, 0x00, 0x1A, 0xFC, 0x10, 0x00,
+            0x0B, 0x10, 0x00, 0x41, 0x00, 0xD0, 0x70, 0x26, 0x00, 0xD0, 0x70, 0x41, 0x01, 0xFC,
+            0x0F, 0x00, 0x1A, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        module.validate().unwrap();
     }
 }

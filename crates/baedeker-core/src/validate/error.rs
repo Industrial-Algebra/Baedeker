@@ -8,8 +8,8 @@ use core::fmt;
 
 use crate::error::{ByteOffset, DecodeContext, DecodeError, DecodeErrorKind};
 use crate::types::{
-    BlockType, DataIdx, FuncIdx, GlobalIdx, LabelIdx, LocalIdx, MemIdx, RefType, TableIdx, TypeIdx,
-    ValType,
+    BlockType, DataIdx, ElemIdx, FuncIdx, GlobalIdx, LabelIdx, LocalIdx, MemIdx, RefType,
+    TableIdx, TypeIdx, ValType,
 };
 
 /// A validation error with byte offset and function context.
@@ -46,6 +46,10 @@ pub enum ValidationErrorKind {
     },
     UnknownDataIdx {
         idx: DataIdx,
+        available: u32,
+    },
+    UnknownElemIdx {
+        idx: ElemIdx,
         available: u32,
     },
     InvalidMemArgAlign {
@@ -135,6 +139,10 @@ pub enum ValidationErrorKind {
         expected: RefType,
         found: RefType,
     },
+    InvalidCallIndirectTableType {
+        expected: RefType,
+        found: RefType,
+    },
     MissingDataCountSection {
         op: &'static str,
     },
@@ -203,6 +211,13 @@ impl fmt::Display for ValidationErrorKind {
                 write!(
                     f,
                     "unknown data index {} (available data segments: {})",
+                    idx.0, available
+                )
+            }
+            ValidationErrorKind::UnknownElemIdx { idx, available } => {
+                write!(
+                    f,
+                    "unknown element index {} (available element segments: {})",
                     idx.0, available
                 )
             }
@@ -361,6 +376,13 @@ impl fmt::Display for ValidationErrorKind {
                 write!(
                     f,
                     "active element segment table type mismatch: expected {:?}, found {:?}",
+                    expected, found
+                )
+            }
+            ValidationErrorKind::InvalidCallIndirectTableType { expected, found } => {
+                write!(
+                    f,
+                    "call_indirect requires table element type {:?}, found {:?}",
                     expected, found
                 )
             }

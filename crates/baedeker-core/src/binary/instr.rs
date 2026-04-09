@@ -11,7 +11,8 @@ use alloc::vec::Vec;
 use crate::binary::leb128::{self, Cursor};
 use crate::error::{ByteOffset, DecodeContext, DecodeError, DecodeErrorKind};
 use crate::types::{
-    BlockType, CodeBody, FuncIdx, GlobalIdx, LabelIdx, LocalIdx, MemArg, MemIdx, RefType, ValType,
+    BlockType, CodeBody, ElemIdx, FuncIdx, GlobalIdx, LabelIdx, LocalIdx, MemArg, MemIdx,
+    RefType, TableIdx, TypeIdx, ValType,
 };
 
 /// A decoded instruction paired with its absolute byte offset in the module.
@@ -39,6 +40,10 @@ pub enum Instr {
     },
     Return,
     Call(FuncIdx),
+    CallIndirect {
+        type_idx: TypeIdx,
+        table_idx: TableIdx,
+    },
     Drop,
     Select,
     SelectTyped(Vec<ValType>),
@@ -47,6 +52,8 @@ pub enum Instr {
     LocalTee(LocalIdx),
     GlobalGet(GlobalIdx),
     GlobalSet(GlobalIdx),
+    TableGet(TableIdx),
+    TableSet(TableIdx),
     V128Load(MemArg),
     V128Load8x8S(MemArg),
     V128Load8x8U(MemArg),
@@ -123,6 +130,18 @@ pub enum Instr {
         src: MemIdx,
     },
     MemoryFill(MemIdx),
+    TableInit {
+        elem_idx: ElemIdx,
+        table_idx: TableIdx,
+    },
+    ElemDrop(ElemIdx),
+    TableCopy {
+        dst: TableIdx,
+        src: TableIdx,
+    },
+    TableGrow(TableIdx),
+    TableSize(TableIdx),
+    TableFill(TableIdx),
     MemorySize(MemIdx),
     MemoryGrow(MemIdx),
     I32Const(i32),
@@ -239,6 +258,10 @@ pub fn decode_instr_with_offset(
         }
         0x0F => Instr::Return,
         0x10 => Instr::Call(FuncIdx(decode_u32(cursor, base_offset)?)),
+        0x11 => Instr::CallIndirect {
+            type_idx: TypeIdx(decode_u32(cursor, base_offset)?),
+            table_idx: parse_table_idx(cursor, base_offset)?,
+        },
         0x1A => Instr::Drop,
         0x1B => Instr::Select,
         0x1C => Instr::SelectTyped(parse_result_types(cursor, base_offset)?),
@@ -247,6 +270,8 @@ pub fn decode_instr_with_offset(
         0x22 => Instr::LocalTee(LocalIdx(decode_u32(cursor, base_offset)?)),
         0x23 => Instr::GlobalGet(GlobalIdx(decode_u32(cursor, base_offset)?)),
         0x24 => Instr::GlobalSet(GlobalIdx(decode_u32(cursor, base_offset)?)),
+        0x25 => Instr::TableGet(parse_table_idx(cursor, base_offset)?),
+        0x26 => Instr::TableSet(parse_table_idx(cursor, base_offset)?),
         0xFC => decode_bulk_memory_instr(cursor, base_offset)?,
         0xFD => decode_simd_instr(cursor, base_offset)?,
         0x28 => Instr::I32Load(parse_memarg(cursor, base_offset)?),
@@ -329,6 +354,19 @@ fn decode_bulk_memory_instr(
             Ok(Instr::MemoryCopy { dst, src })
         }
         11 => Ok(Instr::MemoryFill(parse_mem_idx(cursor, base_offset)?)),
+        12 => Ok(Instr::TableInit {
+            elem_idx: ElemIdx(decode_u32(cursor, base_offset)?),
+            table_idx: parse_table_idx(cursor, base_offset)?,
+        }),
+        13 => Ok(Instr::ElemDrop(ElemIdx(decode_u32(cursor, base_offset)?))),
+        14 => {
+            let dst = parse_table_idx(cursor, base_offset)?;
+            let src = parse_table_idx(cursor, base_offset)?;
+            Ok(Instr::TableCopy { dst, src })
+        }
+        15 => Ok(Instr::TableGrow(parse_table_idx(cursor, base_offset)?)),
+        16 => Ok(Instr::TableSize(parse_table_idx(cursor, base_offset)?)),
+        17 => Ok(Instr::TableFill(parse_table_idx(cursor, base_offset)?)),
         _ => Err(DecodeError {
             offset: ByteOffset(base_offset),
             context: DecodeContext::CodeSection,
@@ -443,6 +481,10 @@ fn parse_mem_idx(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<MemIdx, 
         });
     }
     Ok(MemIdx(0))
+}
+
+fn parse_table_idx(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<TableIdx, DecodeError> {
+    Ok(TableIdx(decode_u32(cursor, base_offset)?))
 }
 
 fn parse_ref_type(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<RefType, DecodeError> {
@@ -764,11 +806,33 @@ mod tests {
     }
 
     #[test]
+    fn decode_call_indirect_and_table_ops() {
+        let instrs = decode_instr_sequence(
+            &[0x11, 0x01, 0x00, 0x25, 0x00, 0x26, 0x00, 0x0B],
+            95,
+        )
+        .unwrap();
+        assert_eq!(
+            instrs,
+            vec![
+                Instr::CallIndirect {
+                    type_idx: TypeIdx(1),
+                    table_idx: TableIdx(0),
+                },
+                Instr::TableGet(TableIdx(0)),
+                Instr::TableSet(TableIdx(0)),
+                Instr::End,
+            ]
+        );
+    }
+
+    #[test]
     fn decode_bulk_memory_ops() {
         let instrs = decode_instr_sequence(
             &[
                 0xFC, 0x08, 0x00, 0x00, 0xFC, 0x09, 0x00, 0xFC, 0x0A, 0x00, 0x00, 0xFC, 0x0B, 0x00,
-                0x0B,
+                0xFC, 0x0C, 0x00, 0x00, 0xFC, 0x0D, 0x00, 0xFC, 0x0E, 0x00, 0x00, 0xFC, 0x0F, 0x00,
+                0xFC, 0x10, 0x00, 0xFC, 0x11, 0x00, 0x0B,
             ],
             315,
         )
@@ -783,6 +847,18 @@ mod tests {
                     src: MemIdx(0)
                 },
                 Instr::MemoryFill(MemIdx(0)),
+                Instr::TableInit {
+                    elem_idx: ElemIdx(0),
+                    table_idx: TableIdx(0),
+                },
+                Instr::ElemDrop(ElemIdx(0)),
+                Instr::TableCopy {
+                    dst: TableIdx(0),
+                    src: TableIdx(0),
+                },
+                Instr::TableGrow(TableIdx(0)),
+                Instr::TableSize(TableIdx(0)),
+                Instr::TableFill(TableIdx(0)),
                 Instr::End,
             ]
         );
