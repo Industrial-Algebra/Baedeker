@@ -1450,18 +1450,14 @@ fn validate_instr(
         Instr::V128Const(_) => state
             .operands
             .push(ValType::Vec(crate::types::VecType::V128)),
-        Instr::I32Eqz => {
-            pop_expect(
-                function,
-                state,
-                ValType::Num(crate::types::NumType::I32),
-                offset,
-                "i32.eqz",
-            )?;
-            state
-                .operands
-                .push(ValType::Num(crate::types::NumType::I32));
-        }
+        Instr::I32Eqz => validate_numeric_unary(
+            function,
+            state,
+            offset,
+            "i32.eqz",
+            ValType::Num(crate::types::NumType::I32),
+            ValType::Num(crate::types::NumType::I32),
+        )?,
         Instr::I32Eq
         | Instr::I32Ne
         | Instr::I32LtS
@@ -1471,65 +1467,383 @@ fn validate_instr(
         | Instr::I32LeS
         | Instr::I32LeU
         | Instr::I32GeS
-        | Instr::I32GeU => {
-            pop_expect(
-                function,
-                state,
-                ValType::Num(crate::types::NumType::I32),
-                offset,
-                "i32.compare",
-            )?;
-            pop_expect(
-                function,
-                state,
-                ValType::Num(crate::types::NumType::I32),
-                offset,
-                "i32.compare",
-            )?;
-            state
-                .operands
-                .push(ValType::Num(crate::types::NumType::I32));
-        }
-        Instr::I32Add => {
-            pop_expect(
-                function,
-                state,
-                ValType::Num(crate::types::NumType::I32),
-                offset,
-                "i32.add",
-            )?;
-            pop_expect(
-                function,
-                state,
-                ValType::Num(crate::types::NumType::I32),
-                offset,
-                "i32.add",
-            )?;
-            state
-                .operands
-                .push(ValType::Num(crate::types::NumType::I32));
-        }
-        Instr::I64Add => {
-            pop_expect(
-                function,
-                state,
-                ValType::Num(crate::types::NumType::I64),
-                offset,
-                "i64.add",
-            )?;
-            pop_expect(
-                function,
-                state,
-                ValType::Num(crate::types::NumType::I64),
-                offset,
-                "i64.add",
-            )?;
-            state
-                .operands
-                .push(ValType::Num(crate::types::NumType::I64));
-        }
+        | Instr::I32GeU => validate_numeric_binary(
+            function,
+            state,
+            offset,
+            "i32.compare",
+            ValType::Num(crate::types::NumType::I32),
+            ValType::Num(crate::types::NumType::I32),
+        )?,
+        Instr::I64Eqz => validate_numeric_unary(
+            function,
+            state,
+            offset,
+            "i64.eqz",
+            ValType::Num(crate::types::NumType::I64),
+            ValType::Num(crate::types::NumType::I32),
+        )?,
+        Instr::I64Eq
+        | Instr::I64Ne
+        | Instr::I64LtS
+        | Instr::I64LtU
+        | Instr::I64GtS
+        | Instr::I64GtU
+        | Instr::I64LeS
+        | Instr::I64LeU
+        | Instr::I64GeS
+        | Instr::I64GeU => validate_numeric_binary(
+            function,
+            state,
+            offset,
+            "i64.compare",
+            ValType::Num(crate::types::NumType::I64),
+            ValType::Num(crate::types::NumType::I32),
+        )?,
+        Instr::F32Eq
+        | Instr::F32Ne
+        | Instr::F32Lt
+        | Instr::F32Gt
+        | Instr::F32Le
+        | Instr::F32Ge => validate_numeric_binary(
+            function,
+            state,
+            offset,
+            "f32.compare",
+            ValType::Num(crate::types::NumType::F32),
+            ValType::Num(crate::types::NumType::I32),
+        )?,
+        Instr::F64Eq
+        | Instr::F64Ne
+        | Instr::F64Lt
+        | Instr::F64Gt
+        | Instr::F64Le
+        | Instr::F64Ge => validate_numeric_binary(
+            function,
+            state,
+            offset,
+            "f64.compare",
+            ValType::Num(crate::types::NumType::F64),
+            ValType::Num(crate::types::NumType::I32),
+        )?,
+        Instr::I32Clz
+        | Instr::I32Ctz
+        | Instr::I32Popcnt => validate_numeric_unary(
+            function,
+            state,
+            offset,
+            "i32.unary",
+            ValType::Num(crate::types::NumType::I32),
+            ValType::Num(crate::types::NumType::I32),
+        )?,
+        Instr::I32Add
+        | Instr::I32Sub
+        | Instr::I32Mul
+        | Instr::I32DivS
+        | Instr::I32DivU
+        | Instr::I32RemS
+        | Instr::I32RemU
+        | Instr::I32And
+        | Instr::I32Or
+        | Instr::I32Xor
+        | Instr::I32Shl
+        | Instr::I32ShrS
+        | Instr::I32ShrU
+        | Instr::I32Rotl
+        | Instr::I32Rotr => validate_numeric_binary(
+            function,
+            state,
+            offset,
+            "i32.binary",
+            ValType::Num(crate::types::NumType::I32),
+            ValType::Num(crate::types::NumType::I32),
+        )?,
+        Instr::I64Clz
+        | Instr::I64Ctz
+        | Instr::I64Popcnt => validate_numeric_unary(
+            function,
+            state,
+            offset,
+            "i64.unary",
+            ValType::Num(crate::types::NumType::I64),
+            ValType::Num(crate::types::NumType::I64),
+        )?,
+        Instr::I64Add
+        | Instr::I64Sub
+        | Instr::I64Mul
+        | Instr::I64DivS
+        | Instr::I64DivU
+        | Instr::I64RemS
+        | Instr::I64RemU
+        | Instr::I64And
+        | Instr::I64Or
+        | Instr::I64Xor
+        | Instr::I64Shl
+        | Instr::I64ShrS
+        | Instr::I64ShrU
+        | Instr::I64Rotl
+        | Instr::I64Rotr => validate_numeric_binary(
+            function,
+            state,
+            offset,
+            "i64.binary",
+            ValType::Num(crate::types::NumType::I64),
+            ValType::Num(crate::types::NumType::I64),
+        )?,
+        Instr::F32Abs
+        | Instr::F32Neg
+        | Instr::F32Ceil
+        | Instr::F32Floor
+        | Instr::F32Trunc
+        | Instr::F32Nearest
+        | Instr::F32Sqrt => validate_numeric_unary(
+            function,
+            state,
+            offset,
+            "f32.unary",
+            ValType::Num(crate::types::NumType::F32),
+            ValType::Num(crate::types::NumType::F32),
+        )?,
+        Instr::F32Add
+        | Instr::F32Sub
+        | Instr::F32Mul
+        | Instr::F32Div
+        | Instr::F32Min
+        | Instr::F32Max
+        | Instr::F32Copysign => validate_numeric_binary(
+            function,
+            state,
+            offset,
+            "f32.binary",
+            ValType::Num(crate::types::NumType::F32),
+            ValType::Num(crate::types::NumType::F32),
+        )?,
+        Instr::F64Abs
+        | Instr::F64Neg
+        | Instr::F64Ceil
+        | Instr::F64Floor
+        | Instr::F64Trunc
+        | Instr::F64Nearest
+        | Instr::F64Sqrt => validate_numeric_unary(
+            function,
+            state,
+            offset,
+            "f64.unary",
+            ValType::Num(crate::types::NumType::F64),
+            ValType::Num(crate::types::NumType::F64),
+        )?,
+        Instr::F64Add
+        | Instr::F64Sub
+        | Instr::F64Mul
+        | Instr::F64Div
+        | Instr::F64Min
+        | Instr::F64Max
+        | Instr::F64Copysign => validate_numeric_binary(
+            function,
+            state,
+            offset,
+            "f64.binary",
+            ValType::Num(crate::types::NumType::F64),
+            ValType::Num(crate::types::NumType::F64),
+        )?,
+        Instr::I32WrapI64 => validate_numeric_conversion(
+            function,
+            state,
+            offset,
+            "i32.wrap_i64",
+            ValType::Num(crate::types::NumType::I64),
+            ValType::Num(crate::types::NumType::I32),
+        )?,
+        Instr::I32TruncF32S
+        | Instr::I32TruncF32U => validate_numeric_conversion(
+            function,
+            state,
+            offset,
+            "i32.trunc_f32",
+            ValType::Num(crate::types::NumType::F32),
+            ValType::Num(crate::types::NumType::I32),
+        )?,
+        Instr::I32TruncF64S
+        | Instr::I32TruncF64U => validate_numeric_conversion(
+            function,
+            state,
+            offset,
+            "i32.trunc_f64",
+            ValType::Num(crate::types::NumType::F64),
+            ValType::Num(crate::types::NumType::I32),
+        )?,
+        Instr::I64ExtendI32S
+        | Instr::I64ExtendI32U => validate_numeric_conversion(
+            function,
+            state,
+            offset,
+            "i64.extend_i32",
+            ValType::Num(crate::types::NumType::I32),
+            ValType::Num(crate::types::NumType::I64),
+        )?,
+        Instr::I64TruncF32S
+        | Instr::I64TruncF32U => validate_numeric_conversion(
+            function,
+            state,
+            offset,
+            "i64.trunc_f32",
+            ValType::Num(crate::types::NumType::F32),
+            ValType::Num(crate::types::NumType::I64),
+        )?,
+        Instr::I64TruncF64S
+        | Instr::I64TruncF64U => validate_numeric_conversion(
+            function,
+            state,
+            offset,
+            "i64.trunc_f64",
+            ValType::Num(crate::types::NumType::F64),
+            ValType::Num(crate::types::NumType::I64),
+        )?,
+        Instr::F32ConvertI32S
+        | Instr::F32ConvertI32U => validate_numeric_conversion(
+            function,
+            state,
+            offset,
+            "f32.convert_i32",
+            ValType::Num(crate::types::NumType::I32),
+            ValType::Num(crate::types::NumType::F32),
+        )?,
+        Instr::F32ConvertI64S
+        | Instr::F32ConvertI64U => validate_numeric_conversion(
+            function,
+            state,
+            offset,
+            "f32.convert_i64",
+            ValType::Num(crate::types::NumType::I64),
+            ValType::Num(crate::types::NumType::F32),
+        )?,
+        Instr::F32DemoteF64 => validate_numeric_conversion(
+            function,
+            state,
+            offset,
+            "f32.demote_f64",
+            ValType::Num(crate::types::NumType::F64),
+            ValType::Num(crate::types::NumType::F32),
+        )?,
+        Instr::F64ConvertI32S
+        | Instr::F64ConvertI32U => validate_numeric_conversion(
+            function,
+            state,
+            offset,
+            "f64.convert_i32",
+            ValType::Num(crate::types::NumType::I32),
+            ValType::Num(crate::types::NumType::F64),
+        )?,
+        Instr::F64ConvertI64S
+        | Instr::F64ConvertI64U => validate_numeric_conversion(
+            function,
+            state,
+            offset,
+            "f64.convert_i64",
+            ValType::Num(crate::types::NumType::I64),
+            ValType::Num(crate::types::NumType::F64),
+        )?,
+        Instr::F64PromoteF32 => validate_numeric_conversion(
+            function,
+            state,
+            offset,
+            "f64.promote_f32",
+            ValType::Num(crate::types::NumType::F32),
+            ValType::Num(crate::types::NumType::F64),
+        )?,
+        Instr::I32ReinterpretF32 => validate_numeric_conversion(
+            function,
+            state,
+            offset,
+            "i32.reinterpret_f32",
+            ValType::Num(crate::types::NumType::F32),
+            ValType::Num(crate::types::NumType::I32),
+        )?,
+        Instr::I64ReinterpretF64 => validate_numeric_conversion(
+            function,
+            state,
+            offset,
+            "i64.reinterpret_f64",
+            ValType::Num(crate::types::NumType::F64),
+            ValType::Num(crate::types::NumType::I64),
+        )?,
+        Instr::F32ReinterpretI32 => validate_numeric_conversion(
+            function,
+            state,
+            offset,
+            "f32.reinterpret_i32",
+            ValType::Num(crate::types::NumType::I32),
+            ValType::Num(crate::types::NumType::F32),
+        )?,
+        Instr::F64ReinterpretI64 => validate_numeric_conversion(
+            function,
+            state,
+            offset,
+            "f64.reinterpret_i64",
+            ValType::Num(crate::types::NumType::I64),
+            ValType::Num(crate::types::NumType::F64),
+        )?,
+        Instr::I32Extend8S
+        | Instr::I32Extend16S => validate_numeric_conversion(
+            function,
+            state,
+            offset,
+            "i32.sign_extend",
+            ValType::Num(crate::types::NumType::I32),
+            ValType::Num(crate::types::NumType::I32),
+        )?,
+        Instr::I64Extend8S
+        | Instr::I64Extend16S
+        | Instr::I64Extend32S => validate_numeric_conversion(
+            function,
+            state,
+            offset,
+            "i64.sign_extend",
+            ValType::Num(crate::types::NumType::I64),
+            ValType::Num(crate::types::NumType::I64),
+        )?,
     }
 
+    Ok(())
+}
+
+fn validate_numeric_unary(
+    function: FuncIdx,
+    state: &mut ValidationState,
+    offset: usize,
+    op: &'static str,
+    input: ValType,
+    result: ValType,
+) -> Result<(), ValidationError> {
+    pop_expect(function, state, input, offset, op)?;
+    state.operands.push(result);
+    Ok(())
+}
+
+fn validate_numeric_binary(
+    function: FuncIdx,
+    state: &mut ValidationState,
+    offset: usize,
+    op: &'static str,
+    input: ValType,
+    result: ValType,
+) -> Result<(), ValidationError> {
+    pop_expect(function, state, input, offset, op)?;
+    pop_expect(function, state, input, offset, op)?;
+    state.operands.push(result);
+    Ok(())
+}
+
+fn validate_numeric_conversion(
+    function: FuncIdx,
+    state: &mut ValidationState,
+    offset: usize,
+    op: &'static str,
+    input: ValType,
+    result: ValType,
+) -> Result<(), ValidationError> {
+    pop_expect(function, state, input, offset, op)?;
+    state.operands.push(result);
     Ok(())
 }
 
@@ -2192,7 +2506,7 @@ mod tests {
         assert!(matches!(
             err.kind,
             ValidationErrorKind::StackUnderflow { op, expected, available }
-                if op == "i32.add"
+                if op == "i32.binary"
                     && expected == vec![ValType::Num(crate::types::NumType::I32)]
                     && available.is_empty()
         ));
@@ -2211,7 +2525,7 @@ mod tests {
         assert!(matches!(
             err.kind,
             ValidationErrorKind::TypeMismatch { op, expected, found }
-                if op == "i32.add"
+                if op == "i32.binary"
                     && expected == ValType::Num(crate::types::NumType::I32)
                     && found == ValType::Num(crate::types::NumType::I64)
         ));
@@ -3137,5 +3451,72 @@ mod tests {
         ];
         let module = Module::decode(&bytes).unwrap();
         module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_broader_numeric_operators() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x11, 0x04, 0x60, 0x00, 0x01,
+            0x7F, 0x60, 0x00, 0x01, 0x7E, 0x60, 0x00, 0x01, 0x7D, 0x60, 0x00, 0x01, 0x7C, 0x03,
+            0x05, 0x04, 0x00, 0x01, 0x02, 0x03, 0x0A, 0x26, 0x04, 0x08, 0x00, 0x41, 0x03, 0x41,
+            0x01, 0x6B, 0x45, 0x0B, 0x05, 0x00, 0x42, 0x05, 0x79, 0x0B, 0x08, 0x00, 0x43,
+            0x00, 0x00, 0x80, 0x3F, 0x8B, 0x0B, 0x0C, 0x00, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0xF0, 0x3F, 0x99, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn reject_broader_numeric_operator_type_mismatch() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01,
+            0x7F, 0x03, 0x02, 0x01, 0x00, 0x0A, 0x0A, 0x01, 0x08, 0x00, 0x43, 0x00, 0x00, 0x80,
+            0x3F, 0x67, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(29));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::TypeMismatch {
+                op: "i32.unary",
+                expected: ValType::Num(crate::types::NumType::I32),
+                found: ValType::Num(crate::types::NumType::F32),
+            }
+        ));
+    }
+
+    #[test]
+    fn validate_conversions_and_reinterpretations() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x14, 0x05, 0x60, 0x00, 0x01,
+            0x7F, 0x60, 0x00, 0x01, 0x7E, 0x60, 0x00, 0x01, 0x7D, 0x60, 0x00, 0x01, 0x7C, 0x60,
+            0x00, 0x00, 0x03, 0x06, 0x05, 0x00, 0x01, 0x02, 0x03, 0x04, 0x0A, 0x2A, 0x05, 0x05,
+            0x00, 0x42, 0x2A, 0xA7, 0x0B, 0x0C, 0x00, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0xF0, 0x3F, 0xBD, 0x0B, 0x05, 0x00, 0x41, 0x7F, 0xBE, 0x0B, 0x08, 0x00, 0x43,
+            0x00, 0x00, 0x40, 0x40, 0xBB, 0x0B, 0x06, 0x00, 0x42, 0x7F, 0xC4, 0x1A, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn reject_conversion_type_mismatch() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01,
+            0x7F, 0x03, 0x02, 0x01, 0x00, 0x0A, 0x07, 0x01, 0x05, 0x00, 0x41, 0x01, 0xA8, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(26));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::TypeMismatch {
+                op: "i32.trunc_f32",
+                expected: ValType::Num(crate::types::NumType::F32),
+                found: ValType::Num(crate::types::NumType::I32),
+            }
+        ));
     }
 }

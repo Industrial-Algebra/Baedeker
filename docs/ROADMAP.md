@@ -85,12 +85,14 @@ interpreter-first with AOT as a future layer.
 #### In progress / partial
 - [~] Expand instruction coverage from the current strong subset toward full WebAssembly 3.0
   validation.
-  - Current support now includes structured control flow, direct calls, locals, globals, scalar
-    memory load/store families, SIMD/vector memory operations and lane checks, bulk-memory
-    operations, typed `select`, `br_table`, and a useful constant/comparison subset.
-  - Major remaining gaps are still broad numeric coverage, conversions/reinterpretations,
-    `call_indirect`, broader table instruction families, and additional reference-type-driven
-    validation paths.
+  - Current support now includes structured control flow, direct calls and `call_indirect`,
+    locals, globals, scalar memory load/store families, SIMD/vector memory operations and lane
+    checks, bulk-memory and table operations, typed `select`, `br_table`, a substantially
+    broader numeric operator subset across i32/i64/f32/f64 comparisons and arithmetic, and the
+    core conversion / reinterpretation families plus integer sign-extension operators.
+  - Major remaining gaps are now additional numeric backfill, saturating/trap-adjacent numeric
+    variants, broader reference-type-driven validation paths, and proposal-era completeness
+    beyond the currently implemented surface.
 - [~] Enrich module-level validation toward full spec-shaped coverage.
   - Type/import/function/code/global/memory/data/data-count/export/table/start/element sections are
     now parsed and validated in a useful Phase 1 base.
@@ -128,8 +130,9 @@ More concretely, Phase 1 is done when all of the following are true:
      register-based IR and interpreter core.
 
 #### Still to do before Phase 1 can be called complete
-- [ ] Cover substantially more instruction families, especially `call_indirect`, table
-  instructions, conversions, reinterpretations, and the remaining numeric operators.
+- [ ] Cover the remaining major instruction families and backfill gaps, especially remaining
+  numeric operators/variants, additional reference-type/proposal-era validation paths, and any
+  still-missing conversion-adjacent instructions.
 - [ ] Continue broadening reference-type, const-expression, and proposal-era validation coverage in
   line with the WebAssembly 3.0 target surface.
 - [ ] Integrate official spec-suite `assert_invalid` / `assert_malformed` style coverage and track
@@ -138,8 +141,9 @@ More concretely, Phase 1 is done when all of the following are true:
   builds on a crisp semantic contract rather than assumptions.
 
 ### Recommended next steps
-1. Prioritize the highest-leverage semantic gaps for both full validation and future lowering:
-   `call_indirect`, table instructions, and broader numeric/conversion coverage.
+1. Prioritize the highest-leverage remaining semantic gaps for both full validation and future
+   lowering: remaining numeric coverage/variants, broader reference-type/proposal-era
+   validation, and external spec-suite integration.
 2. Keep expanding the fixture corpus in lockstep with each new instruction family, including exact
    `.meta` assertions for representative diagnostics.
 3. Begin wiring in official spec-suite inputs so Phase 1 progress is measured against external
