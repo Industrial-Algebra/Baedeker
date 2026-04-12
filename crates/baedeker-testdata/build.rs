@@ -101,7 +101,7 @@ fn copy_spec_fixtures(src_root: &Path, dst_root: &Path, verbose: bool) {
             copy_spec_fixtures(&path, &dst, verbose);
         } else if path
             .extension()
-            .is_some_and(|ext| ext == "wasm" || ext == "meta")
+            .is_some_and(|ext| ext == "wasm" || ext == "meta" || ext == "wast")
         {
             fs::create_dir_all(dst.parent().expect("spec file must have parent")).unwrap_or_else(
                 |e| panic!("failed to create directory for {}: {e}", dst.display()),

@@ -149,6 +149,7 @@ pub enum Instr {
     F32Const(f32),
     F64Const(f64),
     RefNull(RefType),
+    RefIsNull,
     RefFunc(FuncIdx),
     V128Const([u8; 16]),
     I32Eqz,
@@ -279,6 +280,14 @@ pub enum Instr {
     I64Extend8S,
     I64Extend16S,
     I64Extend32S,
+    I32TruncSatF32S,
+    I32TruncSatF32U,
+    I32TruncSatF64S,
+    I32TruncSatF64U,
+    I64TruncSatF32S,
+    I64TruncSatF32U,
+    I64TruncSatF64S,
+    I64TruncSatF64U,
 }
 
 impl<'a> CodeBody<'a> {
@@ -419,6 +428,7 @@ pub fn decode_instr_with_offset(
         0x43 => Instr::F32Const(decode_f32(cursor, base_offset)?),
         0x44 => Instr::F64Const(decode_f64(cursor, base_offset)?),
         0xD0 => Instr::RefNull(parse_ref_type(cursor, base_offset)?),
+        0xD1 => Instr::RefIsNull,
         0xD2 => Instr::RefFunc(FuncIdx(decode_u32(cursor, base_offset)?)),
         0x45 => Instr::I32Eqz,
         0x46 => Instr::I32Eq,
@@ -569,6 +579,14 @@ fn decode_bulk_memory_instr(
 ) -> Result<Instr, DecodeError> {
     let opcode = decode_u32(cursor, base_offset)?;
     match opcode {
+        0 => Ok(Instr::I32TruncSatF32S),
+        1 => Ok(Instr::I32TruncSatF32U),
+        2 => Ok(Instr::I32TruncSatF64S),
+        3 => Ok(Instr::I32TruncSatF64U),
+        4 => Ok(Instr::I64TruncSatF32S),
+        5 => Ok(Instr::I64TruncSatF32U),
+        6 => Ok(Instr::I64TruncSatF64S),
+        7 => Ok(Instr::I64TruncSatF64U),
         8 => {
             let data = crate::types::DataIdx(decode_u32(cursor, base_offset)?);
             let mem = parse_mem_idx(cursor, base_offset)?;
@@ -1024,11 +1042,12 @@ mod tests {
 
     #[test]
     fn decode_ref_instructions() {
-        let instrs = decode_instr_sequence(&[0xD0, 0x70, 0xD2, 0x00, 0x0B], 90).unwrap();
+        let instrs = decode_instr_sequence(&[0xD0, 0x70, 0xD1, 0xD2, 0x00, 0x0B], 90).unwrap();
         assert_eq!(
             instrs,
             vec![
                 Instr::RefNull(RefType::FuncRef),
+                Instr::RefIsNull,
                 Instr::RefFunc(FuncIdx(0)),
                 Instr::End
             ]
@@ -1095,7 +1114,8 @@ mod tests {
         let instrs = decode_instr_sequence(
             &[
                 0xA7, 0xA8, 0xAB, 0xAC, 0xB1, 0xB2, 0xB5, 0xB6, 0xB7, 0xBA, 0xBB, 0xBC, 0xBD,
-                0xBE, 0xBF, 0xC0, 0xC1, 0xC2, 0xC3, 0xC4, 0x0B,
+                0xBE, 0xBF, 0xC0, 0xC1, 0xC2, 0xC3, 0xC4, 0xFC, 0x00, 0xFC, 0x03, 0xFC, 0x04,
+                0xFC, 0x07, 0x0B,
             ],
             180,
         )
@@ -1123,6 +1143,10 @@ mod tests {
                 Instr::I64Extend8S,
                 Instr::I64Extend16S,
                 Instr::I64Extend32S,
+                Instr::I32TruncSatF32S,
+                Instr::I32TruncSatF64U,
+                Instr::I64TruncSatF32S,
+                Instr::I64TruncSatF64U,
                 Instr::End,
             ]
         );

@@ -88,11 +88,14 @@ interpreter-first with AOT as a future layer.
   - Current support now includes structured control flow, direct calls and `call_indirect`,
     locals, globals, scalar memory load/store families, SIMD/vector memory operations and lane
     checks, bulk-memory and table operations, typed `select`, `br_table`, a substantially
-    broader numeric operator subset across i32/i64/f32/f64 comparisons and arithmetic, and the
-    core conversion / reinterpretation families plus integer sign-extension operators.
-  - Major remaining gaps are now additional numeric backfill, saturating/trap-adjacent numeric
-    variants, broader reference-type-driven validation paths, and proposal-era completeness
-    beyond the currently implemented surface.
+    broader numeric operator subset across i32/i64/f32/f64 comparisons and arithmetic, the
+    core conversion / reinterpretation families, integer sign-extension operators, saturating
+    float-to-int truncation variants, and an expanded reference/const-expression subset
+    including `ref.null`, `ref.func`, `ref.is_null`, and imported immutable `global.get` in
+    more const-expression positions.
+  - Major remaining gaps are now broader reference-type-driven validation paths beyond the
+    current subset, additional proposal-era completeness, and external spec-suite
+    integration/backfill rather than the main scalar numeric families.
 - [~] Enrich module-level validation toward full spec-shaped coverage.
   - Type/import/function/code/global/memory/data/data-count/export/table/start/element sections are
     now parsed and validated in a useful Phase 1 base.
@@ -130,11 +133,12 @@ More concretely, Phase 1 is done when all of the following are true:
      register-based IR and interpreter core.
 
 #### Still to do before Phase 1 can be called complete
-- [ ] Cover the remaining major instruction families and backfill gaps, especially remaining
-  numeric operators/variants, additional reference-type/proposal-era validation paths, and any
-  still-missing conversion-adjacent instructions.
+- [ ] Cover the remaining major instruction families and backfill gaps, especially additional
+  reference-type/proposal-era validation paths, any still-missing niche numeric/proposal
+  variants, and official spec-suite-driven completeness gaps.
 - [ ] Continue broadening reference-type, const-expression, and proposal-era validation coverage in
-  line with the WebAssembly 3.0 target surface.
+  line with the WebAssembly 3.0 target surface, building beyond the current `ref.null` /
+  `ref.func` / `ref.is_null` and imported-const-`global.get` subset.
 - [ ] Integrate official spec-suite `assert_invalid` / `assert_malformed` style coverage and track
   compliance explicitly.
 - [ ] Document any intentionally deferred or partially implemented WebAssembly 3.0 areas so Phase 2
