@@ -68,6 +68,7 @@ fn validation_kind_name(kind: &ValidationErrorKind) -> &'static str {
         ValidationErrorKind::InvalidGlobalInitExpr => "InvalidGlobalInitExpr",
         ValidationErrorKind::NonConstantGlobalInitExpr => "NonConstantGlobalInitExpr",
         ValidationErrorKind::MutableGlobalInInitExpr { .. } => "MutableGlobalInInitExpr",
+        ValidationErrorKind::ImmutableGlobalSet { .. } => "ImmutableGlobalSet",
         ValidationErrorKind::GlobalInitTypeMismatch { .. } => "GlobalInitTypeMismatch",
         ValidationErrorKind::BranchTypeMismatch { .. } => "BranchTypeMismatch",
         ValidationErrorKind::InconsistentBranchTypes { .. } => "InconsistentBranchTypes",

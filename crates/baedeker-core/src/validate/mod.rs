@@ -781,6 +781,13 @@ fn validate_instr(
         }
         Instr::GlobalSet(idx) => {
             let ty = resolve_global_type(module, *idx, function, offset)?;
+            if ty.mutability != Mutability::Var {
+                return Err(ValidationError {
+                    offset: ByteOffset(offset),
+                    function: Some(function),
+                    kind: ValidationErrorKind::ImmutableGlobalSet { idx: *idx },
+                });
+            }
             pop_expect(function, state, ty.val_type, offset, "global.set")?;
         }
         Instr::TableGet(idx) => {
@@ -2696,6 +2703,24 @@ mod tests {
         ];
         let module = Module::decode(&bytes).unwrap();
         module.validate().unwrap();
+    }
+
+    #[test]
+    fn reject_global_set_on_immutable_global() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x03, 0x02, 0x01, 0x00, 0x06, 0x09, 0x01, 0x7D, 0x00, 0x43, 0x00, 0x00, 0x00, 0x00,
+            0x0B, 0x0A, 0x0B, 0x01, 0x09, 0x00, 0x43, 0x00, 0x00, 0x80, 0x3F, 0x24, 0x00, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::ImmutableGlobalSet {
+                idx: GlobalIdx(0)
+            }
+        ));
+        assert_eq!(err.offset.0, 39);
     }
 
     #[test]

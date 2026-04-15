@@ -74,6 +74,9 @@ pub enum ValidationErrorKind {
     MutableGlobalInInitExpr {
         idx: GlobalIdx,
     },
+    ImmutableGlobalSet {
+        idx: GlobalIdx,
+    },
     GlobalInitTypeMismatch {
         expected: ValType,
         found: ValType,
@@ -253,6 +256,9 @@ impl fmt::Display for ValidationErrorKind {
                     "global initializer references mutable imported global {}",
                     idx.0
                 )
+            }
+            ValidationErrorKind::ImmutableGlobalSet { idx } => {
+                write!(f, "cannot assign to immutable global {}", idx.0)
             }
             ValidationErrorKind::GlobalInitTypeMismatch { expected, found } => {
                 write!(
