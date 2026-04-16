@@ -8,8 +8,8 @@ use core::fmt;
 
 use crate::error::{ByteOffset, DecodeContext, DecodeError, DecodeErrorKind};
 use crate::types::{
-    BlockType, DataIdx, ElemIdx, FuncIdx, GlobalIdx, LabelIdx, LocalIdx, MemIdx, RefType,
-    TableIdx, TypeIdx, ValType,
+    BlockType, DataIdx, ElemIdx, FuncIdx, GlobalIdx, LabelIdx, LocalIdx, MemIdx, RefType, TableIdx,
+    TypeIdx, ValType,
 };
 
 /// A validation error with byte offset and function context.

@@ -20,9 +20,8 @@ use crate::binary::instr::{DecodedInstr, Instr, decode_instr_sequence_with_offse
 use crate::binary::module::Module;
 use crate::error::ByteOffset;
 use crate::types::{
-    BlockType, DataIdx, DataMode, ElemIdx, ElementInit, ElementMode, ExportDesc, FuncIdx,
-    FuncType, GlobalIdx, ImportDesc, LocalDecl, MemIdx, Mutability, RefType, TableIdx, TypeIdx,
-    ValType,
+    BlockType, DataIdx, DataMode, ElemIdx, ElementInit, ElementMode, ExportDesc, FuncIdx, FuncType,
+    GlobalIdx, ImportDesc, LocalDecl, MemIdx, Mutability, RefType, TableIdx, TypeIdx, ValType,
 };
 use crate::validate::error::{ValidationError, ValidationErrorKind};
 use crate::validate::state::{ControlKind::*, Reachability, ValidationState};
@@ -151,7 +150,9 @@ fn validate_global_init_expr(
             let _ = resolve_func_type_for_module(module, idx, instrs[0].offset.0)?;
             ValType::Ref(RefType::FuncRef)
         }
-        Instr::GlobalGet(idx) => resolve_imported_const_global_val_type(module, idx, instrs[0].offset.0)?,
+        Instr::GlobalGet(idx) => {
+            resolve_imported_const_global_val_type(module, idx, instrs[0].offset.0)?
+        }
         _ => {
             return Err(ValidationError {
                 offset: instrs[0].offset,
@@ -319,7 +320,9 @@ fn validate_const_ref_expr(
             let _ = resolve_func_type_for_module(module, idx, instrs[0].offset.0)?;
             ValType::Ref(RefType::FuncRef)
         }
-        Instr::GlobalGet(idx) => resolve_imported_const_global_val_type(module, idx, instrs[0].offset.0)?,
+        Instr::GlobalGet(idx) => {
+            resolve_imported_const_global_val_type(module, idx, instrs[0].offset.0)?
+        }
         _ => {
             return Err(ValidationError {
                 offset: instrs[0].offset,
@@ -671,7 +674,8 @@ fn validate_instr(
             type_idx,
             table_idx,
         } => {
-            let table_type = resolve_table_type_with_context(module, *table_idx, Some(function), offset)?;
+            let table_type =
+                resolve_table_type_with_context(module, *table_idx, Some(function), offset)?;
             if table_type.elem != RefType::FuncRef {
                 return Err(ValidationError {
                     offset: ByteOffset(offset),
@@ -1346,7 +1350,8 @@ fn validate_instr(
             table_idx,
         } => {
             let elem = resolve_element_segment(module, *elem_idx, function, offset)?;
-            let table = resolve_table_type_with_context(module, *table_idx, Some(function), offset)?;
+            let table =
+                resolve_table_type_with_context(module, *table_idx, Some(function), offset)?;
             if elem.elem_type != table.elem {
                 return Err(ValidationError {
                     offset: ByteOffset(offset),
@@ -1427,11 +1432,15 @@ fn validate_instr(
                 "table.grow",
             )?;
             pop_expect(function, state, ValType::Ref(ty.elem), offset, "table.grow")?;
-            state.operands.push(ValType::Num(crate::types::NumType::I32));
+            state
+                .operands
+                .push(ValType::Num(crate::types::NumType::I32));
         }
         Instr::TableSize(idx) => {
             let _ = resolve_table_type_with_context(module, *idx, Some(function), offset)?;
-            state.operands.push(ValType::Num(crate::types::NumType::I32));
+            state
+                .operands
+                .push(ValType::Num(crate::types::NumType::I32));
         }
         Instr::TableFill(idx) => {
             let ty = resolve_table_type_with_context(module, *idx, Some(function), offset)?;
@@ -1548,35 +1557,27 @@ fn validate_instr(
             ValType::Num(crate::types::NumType::I64),
             ValType::Num(crate::types::NumType::I32),
         )?,
-        Instr::F32Eq
-        | Instr::F32Ne
-        | Instr::F32Lt
-        | Instr::F32Gt
-        | Instr::F32Le
-        | Instr::F32Ge => validate_numeric_binary(
-            function,
-            state,
-            offset,
-            "f32.compare",
-            ValType::Num(crate::types::NumType::F32),
-            ValType::Num(crate::types::NumType::I32),
-        )?,
-        Instr::F64Eq
-        | Instr::F64Ne
-        | Instr::F64Lt
-        | Instr::F64Gt
-        | Instr::F64Le
-        | Instr::F64Ge => validate_numeric_binary(
-            function,
-            state,
-            offset,
-            "f64.compare",
-            ValType::Num(crate::types::NumType::F64),
-            ValType::Num(crate::types::NumType::I32),
-        )?,
-        Instr::I32Clz
-        | Instr::I32Ctz
-        | Instr::I32Popcnt => validate_numeric_unary(
+        Instr::F32Eq | Instr::F32Ne | Instr::F32Lt | Instr::F32Gt | Instr::F32Le | Instr::F32Ge => {
+            validate_numeric_binary(
+                function,
+                state,
+                offset,
+                "f32.compare",
+                ValType::Num(crate::types::NumType::F32),
+                ValType::Num(crate::types::NumType::I32),
+            )?
+        }
+        Instr::F64Eq | Instr::F64Ne | Instr::F64Lt | Instr::F64Gt | Instr::F64Le | Instr::F64Ge => {
+            validate_numeric_binary(
+                function,
+                state,
+                offset,
+                "f64.compare",
+                ValType::Num(crate::types::NumType::F64),
+                ValType::Num(crate::types::NumType::I32),
+            )?
+        }
+        Instr::I32Clz | Instr::I32Ctz | Instr::I32Popcnt => validate_numeric_unary(
             function,
             state,
             offset,
@@ -1606,9 +1607,7 @@ fn validate_instr(
             ValType::Num(crate::types::NumType::I32),
             ValType::Num(crate::types::NumType::I32),
         )?,
-        Instr::I64Clz
-        | Instr::I64Ctz
-        | Instr::I64Popcnt => validate_numeric_unary(
+        Instr::I64Clz | Instr::I64Ctz | Instr::I64Popcnt => validate_numeric_unary(
             function,
             state,
             offset,
@@ -1702,8 +1701,7 @@ fn validate_instr(
             ValType::Num(crate::types::NumType::I64),
             ValType::Num(crate::types::NumType::I32),
         )?,
-        Instr::I32TruncF32S
-        | Instr::I32TruncF32U => validate_numeric_conversion(
+        Instr::I32TruncF32S | Instr::I32TruncF32U => validate_numeric_conversion(
             function,
             state,
             offset,
@@ -1711,8 +1709,7 @@ fn validate_instr(
             ValType::Num(crate::types::NumType::F32),
             ValType::Num(crate::types::NumType::I32),
         )?,
-        Instr::I32TruncF64S
-        | Instr::I32TruncF64U => validate_numeric_conversion(
+        Instr::I32TruncF64S | Instr::I32TruncF64U => validate_numeric_conversion(
             function,
             state,
             offset,
@@ -1720,8 +1717,7 @@ fn validate_instr(
             ValType::Num(crate::types::NumType::F64),
             ValType::Num(crate::types::NumType::I32),
         )?,
-        Instr::I64ExtendI32S
-        | Instr::I64ExtendI32U => validate_numeric_conversion(
+        Instr::I64ExtendI32S | Instr::I64ExtendI32U => validate_numeric_conversion(
             function,
             state,
             offset,
@@ -1729,8 +1725,7 @@ fn validate_instr(
             ValType::Num(crate::types::NumType::I32),
             ValType::Num(crate::types::NumType::I64),
         )?,
-        Instr::I64TruncF32S
-        | Instr::I64TruncF32U => validate_numeric_conversion(
+        Instr::I64TruncF32S | Instr::I64TruncF32U => validate_numeric_conversion(
             function,
             state,
             offset,
@@ -1738,8 +1733,7 @@ fn validate_instr(
             ValType::Num(crate::types::NumType::F32),
             ValType::Num(crate::types::NumType::I64),
         )?,
-        Instr::I64TruncF64S
-        | Instr::I64TruncF64U => validate_numeric_conversion(
+        Instr::I64TruncF64S | Instr::I64TruncF64U => validate_numeric_conversion(
             function,
             state,
             offset,
@@ -1747,8 +1741,7 @@ fn validate_instr(
             ValType::Num(crate::types::NumType::F64),
             ValType::Num(crate::types::NumType::I64),
         )?,
-        Instr::F32ConvertI32S
-        | Instr::F32ConvertI32U => validate_numeric_conversion(
+        Instr::F32ConvertI32S | Instr::F32ConvertI32U => validate_numeric_conversion(
             function,
             state,
             offset,
@@ -1756,8 +1749,7 @@ fn validate_instr(
             ValType::Num(crate::types::NumType::I32),
             ValType::Num(crate::types::NumType::F32),
         )?,
-        Instr::F32ConvertI64S
-        | Instr::F32ConvertI64U => validate_numeric_conversion(
+        Instr::F32ConvertI64S | Instr::F32ConvertI64U => validate_numeric_conversion(
             function,
             state,
             offset,
@@ -1773,8 +1765,7 @@ fn validate_instr(
             ValType::Num(crate::types::NumType::F64),
             ValType::Num(crate::types::NumType::F32),
         )?,
-        Instr::F64ConvertI32S
-        | Instr::F64ConvertI32U => validate_numeric_conversion(
+        Instr::F64ConvertI32S | Instr::F64ConvertI32U => validate_numeric_conversion(
             function,
             state,
             offset,
@@ -1782,8 +1773,7 @@ fn validate_instr(
             ValType::Num(crate::types::NumType::I32),
             ValType::Num(crate::types::NumType::F64),
         )?,
-        Instr::F64ConvertI64S
-        | Instr::F64ConvertI64U => validate_numeric_conversion(
+        Instr::F64ConvertI64S | Instr::F64ConvertI64U => validate_numeric_conversion(
             function,
             state,
             offset,
@@ -1831,8 +1821,7 @@ fn validate_instr(
             ValType::Num(crate::types::NumType::I64),
             ValType::Num(crate::types::NumType::F64),
         )?,
-        Instr::I32Extend8S
-        | Instr::I32Extend16S => validate_numeric_conversion(
+        Instr::I32Extend8S | Instr::I32Extend16S => validate_numeric_conversion(
             function,
             state,
             offset,
@@ -1840,18 +1829,17 @@ fn validate_instr(
             ValType::Num(crate::types::NumType::I32),
             ValType::Num(crate::types::NumType::I32),
         )?,
-        Instr::I64Extend8S
-        | Instr::I64Extend16S
-        | Instr::I64Extend32S => validate_numeric_conversion(
-            function,
-            state,
-            offset,
-            "i64.sign_extend",
-            ValType::Num(crate::types::NumType::I64),
-            ValType::Num(crate::types::NumType::I64),
-        )?,
-        Instr::I32TruncSatF32S
-        | Instr::I32TruncSatF32U => validate_numeric_conversion(
+        Instr::I64Extend8S | Instr::I64Extend16S | Instr::I64Extend32S => {
+            validate_numeric_conversion(
+                function,
+                state,
+                offset,
+                "i64.sign_extend",
+                ValType::Num(crate::types::NumType::I64),
+                ValType::Num(crate::types::NumType::I64),
+            )?
+        }
+        Instr::I32TruncSatF32S | Instr::I32TruncSatF32U => validate_numeric_conversion(
             function,
             state,
             offset,
@@ -1859,8 +1847,7 @@ fn validate_instr(
             ValType::Num(crate::types::NumType::F32),
             ValType::Num(crate::types::NumType::I32),
         )?,
-        Instr::I32TruncSatF64S
-        | Instr::I32TruncSatF64U => validate_numeric_conversion(
+        Instr::I32TruncSatF64S | Instr::I32TruncSatF64U => validate_numeric_conversion(
             function,
             state,
             offset,
@@ -1868,8 +1855,7 @@ fn validate_instr(
             ValType::Num(crate::types::NumType::F64),
             ValType::Num(crate::types::NumType::I32),
         )?,
-        Instr::I64TruncSatF32S
-        | Instr::I64TruncSatF32U => validate_numeric_conversion(
+        Instr::I64TruncSatF32S | Instr::I64TruncSatF32U => validate_numeric_conversion(
             function,
             state,
             offset,
@@ -1877,8 +1863,7 @@ fn validate_instr(
             ValType::Num(crate::types::NumType::F32),
             ValType::Num(crate::types::NumType::I64),
         )?,
-        Instr::I64TruncSatF64S
-        | Instr::I64TruncSatF64U => validate_numeric_conversion(
+        Instr::I64TruncSatF64S | Instr::I64TruncSatF64U => validate_numeric_conversion(
             function,
             state,
             offset,
@@ -1939,7 +1924,9 @@ fn validate_ref_is_null(
     let found = pop_operand_type(function, state, offset, "ref.is_null")?;
     match found {
         ValType::Ref(_) => {
-            state.operands.push(ValType::Num(crate::types::NumType::I32));
+            state
+                .operands
+                .push(ValType::Num(crate::types::NumType::I32));
             Ok(())
         }
         _ => Err(ValidationError {
@@ -2164,7 +2151,12 @@ fn resolve_func_type<'m>(
     resolve_func_type_with_context(module, idx, Some(function), offset)
 }
 
-fn contains_ref_func_expr(_module: &Module<'_>, expr: &[u8], offset: usize, target: FuncIdx) -> bool {
+fn contains_ref_func_expr(
+    _module: &Module<'_>,
+    expr: &[u8],
+    offset: usize,
+    target: FuncIdx,
+) -> bool {
     decode_instr_sequence_with_offsets(expr, offset)
         .ok()
         .and_then(|instrs| instrs.into_iter().next())
@@ -2180,9 +2172,11 @@ fn is_declared_function_ref(module: &Module<'_>, target: FuncIdx) -> bool {
         return true;
     }
 
-    if module.globals().iter().any(|global| {
-        contains_ref_func_expr(module, global.init_expr, global.init_offset, target)
-    }) {
+    if module
+        .globals()
+        .iter()
+        .any(|global| contains_ref_func_expr(module, global.init_expr, global.init_offset, target))
+    {
         return true;
     }
 
@@ -2348,11 +2342,14 @@ fn resolve_element_segment<'a>(
     offset: usize,
 ) -> Result<&'a crate::types::ElementSegment<'a>, ValidationError> {
     let available = module.elements().len() as u32;
-    module.elements().get(idx.0 as usize).ok_or(ValidationError {
-        offset: ByteOffset(offset),
-        function: Some(function),
-        kind: ValidationErrorKind::UnknownElemIdx { idx, available },
-    })
+    module
+        .elements()
+        .get(idx.0 as usize)
+        .ok_or(ValidationError {
+            offset: ByteOffset(offset),
+            function: Some(function),
+            kind: ValidationErrorKind::UnknownElemIdx { idx, available },
+        })
 }
 
 fn resolve_memory_type(
@@ -2753,9 +2750,7 @@ mod tests {
         let err = module.validate().unwrap_err();
         assert!(matches!(
             err.kind,
-            ValidationErrorKind::ImmutableGlobalSet {
-                idx: GlobalIdx(0)
-            }
+            ValidationErrorKind::ImmutableGlobalSet { idx: GlobalIdx(0) }
         ));
         assert_eq!(err.offset.0, 39);
     }
@@ -3676,9 +3671,9 @@ mod tests {
             0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x11, 0x04, 0x60, 0x00, 0x01,
             0x7F, 0x60, 0x00, 0x01, 0x7E, 0x60, 0x00, 0x01, 0x7D, 0x60, 0x00, 0x01, 0x7C, 0x03,
             0x05, 0x04, 0x00, 0x01, 0x02, 0x03, 0x0A, 0x26, 0x04, 0x08, 0x00, 0x41, 0x03, 0x41,
-            0x01, 0x6B, 0x45, 0x0B, 0x05, 0x00, 0x42, 0x05, 0x79, 0x0B, 0x08, 0x00, 0x43,
-            0x00, 0x00, 0x80, 0x3F, 0x8B, 0x0B, 0x0C, 0x00, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0xF0, 0x3F, 0x99, 0x0B,
+            0x01, 0x6B, 0x45, 0x0B, 0x05, 0x00, 0x42, 0x05, 0x79, 0x0B, 0x08, 0x00, 0x43, 0x00,
+            0x00, 0x80, 0x3F, 0x8B, 0x0B, 0x0C, 0x00, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0xF0, 0x3F, 0x99, 0x0B,
         ];
         let module = Module::decode(&bytes).unwrap();
         module.validate().unwrap();
@@ -3711,8 +3706,8 @@ mod tests {
             0x7F, 0x60, 0x00, 0x01, 0x7E, 0x60, 0x00, 0x01, 0x7D, 0x60, 0x00, 0x01, 0x7C, 0x60,
             0x00, 0x00, 0x03, 0x06, 0x05, 0x00, 0x01, 0x02, 0x03, 0x04, 0x0A, 0x2A, 0x05, 0x05,
             0x00, 0x42, 0x2A, 0xA7, 0x0B, 0x0C, 0x00, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0xF0, 0x3F, 0xBD, 0x0B, 0x05, 0x00, 0x41, 0x7F, 0xBE, 0x0B, 0x08, 0x00, 0x43,
-            0x00, 0x00, 0x40, 0x40, 0xBB, 0x0B, 0x06, 0x00, 0x42, 0x7F, 0xC4, 0x1A, 0x0B,
+            0xF0, 0x3F, 0xBD, 0x0B, 0x05, 0x00, 0x41, 0x7F, 0xBE, 0x0B, 0x08, 0x00, 0x43, 0x00,
+            0x00, 0x40, 0x40, 0xBB, 0x0B, 0x06, 0x00, 0x42, 0x7F, 0xC4, 0x1A, 0x0B,
         ];
         let module = Module::decode(&bytes).unwrap();
         module.validate().unwrap();

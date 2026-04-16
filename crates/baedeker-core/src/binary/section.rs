@@ -201,8 +201,10 @@ pub fn parse_sections<'a>(cursor: &mut Cursor<'a>) -> Result<Vec<RawSection<'a>>
                         kind: DecodeErrorKind::DuplicateSection { id: id_byte },
                     });
                 }
-                if !sections_in_valid_order(SectionId::from_byte(prev_id).expect("known section id"), id)
-                {
+                if !sections_in_valid_order(
+                    SectionId::from_byte(prev_id).expect("known section id"),
+                    id,
+                ) {
                     return Err(DecodeError {
                         offset: ByteOffset(id_offset),
                         context: DecodeContext::SectionHeader,

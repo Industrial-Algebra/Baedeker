@@ -41,7 +41,11 @@ fn read_case_meta(path: &Path) -> Option<CaseMeta> {
             "kind" => meta.kind = Some(value.trim().to_owned()),
             "offset" => {
                 meta.offset = Some(value.trim().parse().unwrap_or_else(|e| {
-                    panic!("{}: invalid offset {:?}: {e}", meta_path.display(), value.trim())
+                    panic!(
+                        "{}: invalid offset {:?}: {e}",
+                        meta_path.display(),
+                        value.trim()
+                    )
                 }))
             }
             other => panic!("{}: unknown metadata key {other:?}", meta_path.display()),
@@ -127,7 +131,8 @@ fn decode_kind_name(kind: &DecodeErrorKind) -> &'static str {
 fn assert_validation_meta(path: &Path, err: &ValidationError, meta: &CaseMeta) {
     if let Some(offset) = meta.offset {
         assert_eq!(
-            err.offset.0, offset as usize,
+            err.offset.0,
+            offset as usize,
             "{}: unexpected validation error offset",
             path.display()
         );
@@ -145,7 +150,8 @@ fn assert_validation_meta(path: &Path, err: &ValidationError, meta: &CaseMeta) {
 fn assert_decode_meta(path: &Path, err: &baedeker_core::error::DecodeError, meta: &CaseMeta) {
     if let Some(offset) = meta.offset {
         assert_eq!(
-            err.offset.0, offset as usize,
+            err.offset.0,
+            offset as usize,
             "{}: unexpected decode error offset",
             path.display()
         );

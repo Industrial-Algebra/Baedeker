@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use baedeker_core::binary::module::Module;
-use wast::parser::{parse, ParseBuffer};
+use wast::parser::{ParseBuffer, parse};
 use wast::{QuoteWat, Wast, WastDirective};
 
 #[derive(Debug, Default, Clone)]
@@ -157,13 +157,22 @@ fn run_wast_case(path: &Path) -> WastCaseOutcome {
             WastDirective::Module(wat) | WastDirective::ModuleDefinition(wat) => {
                 stats.modules += 1;
                 let bytes = encode_wat(wat).unwrap_or_else(|e| {
-                    panic!("{}: failed to encode valid module directive: {e}", path.display())
+                    panic!(
+                        "{}: failed to encode valid module directive: {e}",
+                        path.display()
+                    )
                 });
                 let module = Module::decode(&bytes).unwrap_or_else(|e| {
-                    panic!("{}: expected valid module directive, got decode error: {e}", path.display())
+                    panic!(
+                        "{}: expected valid module directive, got decode error: {e}",
+                        path.display()
+                    )
                 });
                 module.validate().unwrap_or_else(|e| {
-                    panic!("{}: expected valid module directive, got validation error: {e}", path.display())
+                    panic!(
+                        "{}: expected valid module directive, got validation error: {e}",
+                        path.display()
+                    )
                 });
             }
             WastDirective::AssertMalformed { module, .. } => {
@@ -171,19 +180,31 @@ fn run_wast_case(path: &Path) -> WastCaseOutcome {
                 if let Ok(bytes) = encode_wat(module)
                     && Module::decode(&bytes).is_ok()
                 {
-                    panic!("{}: expected malformed module to fail decode", path.display());
+                    panic!(
+                        "{}: expected malformed module to fail decode",
+                        path.display()
+                    );
                 }
             }
             WastDirective::AssertInvalid { module, .. } => {
                 stats.invalid += 1;
                 let bytes = encode_wat(module).unwrap_or_else(|e| {
-                    panic!("{}: failed to encode invalid module directive: {e}", path.display())
+                    panic!(
+                        "{}: failed to encode invalid module directive: {e}",
+                        path.display()
+                    )
                 });
                 let module = Module::decode(&bytes).unwrap_or_else(|e| {
-                    panic!("{}: expected invalid module to decode before validation failure: {e}", path.display())
+                    panic!(
+                        "{}: expected invalid module to decode before validation failure: {e}",
+                        path.display()
+                    )
                 });
                 if module.validate().is_ok() {
-                    panic!("{}: expected invalid module to fail validation", path.display());
+                    panic!(
+                        "{}: expected invalid module to fail validation",
+                        path.display()
+                    );
                 }
             }
             other => stats.record_unsupported(directive_name(&other)),

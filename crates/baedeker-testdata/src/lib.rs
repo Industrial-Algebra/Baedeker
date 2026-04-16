@@ -36,7 +36,9 @@ fn cases_with_extension(subdir: &str, ext: &str) -> Vec<PathBuf> {
         })
         .filter_map(|entry| {
             let path = entry.ok()?.path();
-            path.extension().is_some_and(|found| found == ext).then_some(path)
+            path.extension()
+                .is_some_and(|found| found == ext)
+                .then_some(path)
         })
         .collect();
     cases.sort();

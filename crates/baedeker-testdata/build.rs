@@ -79,7 +79,11 @@ fn main() {
     }
 
     if spec_dir.exists() {
-        copy_spec_fixtures(&spec_dir, Path::new(&out_dir).join("spec").as_path(), verbose);
+        copy_spec_fixtures(
+            &spec_dir,
+            Path::new(&out_dir).join("spec").as_path(),
+            verbose,
+        );
     }
 }
 
