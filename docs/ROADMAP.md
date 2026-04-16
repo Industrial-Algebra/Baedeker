@@ -106,8 +106,21 @@ interpreter-first with AOT as a future layer.
   - Baedeker now has a filesystem-backed spec fixture harness with `valid`, `invalid-decode`, and
     `invalid-validate` buckets plus optional `.meta` files for exact error `kind`/`offset`
     assertions.
-  - Remaining work is to integrate official `wast`/spec-suite cases and track support/unsupported
-    areas explicitly.
+  - Baedeker also now has a separate `wast` integration path with curated local files plus a broad
+    `wast-upstream/` directory of small upstream-derived official-spec subsets.
+  - Upstream-derived `.wast` coverage now uses sibling `.meta` files with `skip=...` to record
+    intentionally deferred or currently mismatched cases explicitly, so the harness acts as both a
+    runner and a lightweight support ledger for spec-suite friction points.
+  - Current explicitly deferred upstream-derived cases are:
+
+    | Upstream area | Representative file | Current status | Reason |
+    | --- | --- | --- | --- |
+    | imports | `imports-unknown-type-skip.wast` | deferred | `wast` canonicalizes the case before Baedeker sees the intended unknown-type validation failure |
+    | labels | `labels-invalid-skip.wast` | deferred | named-label invalids do not yet map cleanly onto Baedeker's current validation/harness boundary |
+    | custom section UTF-8 | `utf8-custom-section-id-skip.wast` | deferred | malformed UTF-8 custom-section-id case does not currently fail along the expected malformed path in the harness |
+
+  - Remaining work is to continue integrating official `wast`/spec-suite cases while tightening the
+    support/defer boundary and tracking unsupported areas explicitly.
 
 #### Revised Phase 1 completion definition
 Phase 1 is complete only when Baedeker provides a robust, diagnostics-oriented validation front-end
@@ -139,10 +152,11 @@ More concretely, Phase 1 is done when all of the following are true:
 - [ ] Continue broadening reference-type, const-expression, and proposal-era validation coverage in
   line with the WebAssembly 3.0 target surface, building beyond the current `ref.null` /
   `ref.func` / `ref.is_null` and imported-const-`global.get` subset.
-- [ ] Integrate official spec-suite `assert_invalid` / `assert_malformed` style coverage and track
-  compliance explicitly.
-- [ ] Document any intentionally deferred or partially implemented WebAssembly 3.0 areas so Phase 2
-  builds on a crisp semantic contract rather than assumptions.
+- [ ] Integrate more official spec-suite `assert_invalid` / `assert_malformed` style coverage and
+  keep compliance/defer status explicit.
+- [ ] Continue converting known upstream friction points into explicit tracked deferred cases
+  (`.meta` `skip=...`) or implemented support, so Phase 2 builds on a crisp semantic contract
+  rather than assumptions.
 
 ### Recommended next steps
 1. Prioritize the highest-leverage remaining semantic gaps for both full validation and future

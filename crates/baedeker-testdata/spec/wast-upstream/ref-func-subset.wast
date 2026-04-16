@@ -5,6 +5,12 @@
   (global funcref (ref.func $f))
 )
 
+(module
+  (func $f)
+  (func (drop (ref.func $f)))
+  (export "f" (func $f))
+)
+
 (assert_invalid
   (module
     (func $f (import "M" "f") (param i32) (result i32))

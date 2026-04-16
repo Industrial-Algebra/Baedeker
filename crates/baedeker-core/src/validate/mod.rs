@@ -1486,6 +1486,13 @@ fn validate_instr(
         Instr::RefIsNull => validate_ref_is_null(function, state, offset)?,
         Instr::RefFunc(idx) => {
             let _ = resolve_func_type(module, *idx, function, offset)?;
+            if !is_declared_function_ref(module, *idx) {
+                return Err(ValidationError {
+                    offset: ByteOffset(offset),
+                    function: Some(function),
+                    kind: ValidationErrorKind::UndeclaredFuncRef { idx: *idx },
+                });
+            }
             state.operands.push(ValType::Ref(RefType::FuncRef));
         }
         Instr::V128Const(_) => state
@@ -2155,6 +2162,36 @@ fn resolve_func_type<'m>(
     offset: usize,
 ) -> Result<&'m FuncType, ValidationError> {
     resolve_func_type_with_context(module, idx, Some(function), offset)
+}
+
+fn contains_ref_func_expr(_module: &Module<'_>, expr: &[u8], offset: usize, target: FuncIdx) -> bool {
+    decode_instr_sequence_with_offsets(expr, offset)
+        .ok()
+        .and_then(|instrs| instrs.into_iter().next())
+        .is_some_and(|instr| matches!(instr.instr, Instr::RefFunc(idx) if idx == target))
+}
+
+fn is_declared_function_ref(module: &Module<'_>, target: FuncIdx) -> bool {
+    if module
+        .exports()
+        .iter()
+        .any(|export| matches!(export.desc, ExportDesc::Func(idx) if idx == target))
+    {
+        return true;
+    }
+
+    if module.globals().iter().any(|global| {
+        contains_ref_func_expr(module, global.init_expr, global.init_offset, target)
+    }) {
+        return true;
+    }
+
+    module.elements().iter().any(|element| match &element.init {
+        ElementInit::FuncIndices(funcs) => funcs.contains(&target),
+        ElementInit::Expressions(exprs) => exprs
+            .iter()
+            .any(|expr| contains_ref_func_expr(module, expr.expr, expr.offset, target)),
+    })
 }
 
 fn resolve_func_type_for_module<'m>(

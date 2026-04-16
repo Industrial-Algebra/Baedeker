@@ -148,3 +148,38 @@ Phase 1 should continue to improve:
 These improvements are not architectural drift toward a stack interpreter.
 They are the semantic groundwork required before a correct stack-to-register lowering pass can
 exist.
+
+## Spec-suite grounding and deferred cases
+
+Baedeker's Phase 1 validation work is now exercised through two `.wast` lanes:
+
+- curated local validation-focused files under `crates/baedeker-testdata/spec/wast/`
+- upstream-derived official-spec subsets under `crates/baedeker-testdata/spec/wast-upstream/`
+
+The upstream-derived lane is intentionally conservative: only cases that currently map cleanly onto
+Baedeker's decode/validate boundary are run directly.
+
+When an upstream case is important but does not yet fit cleanly — for example because:
+
+- `wast` canonicalization changes the failure path before Baedeker sees it,
+- the current validator does not yet implement the relevant spec rule,
+- or the harness boundary does not yet preserve the intended malformed/invalid distinction,
+
+Baedeker now records that explicitly with a sibling `.meta` file using `skip=...`.
+
+This means the spec harness is not just a pass/fail runner. It is also a lightweight ledger of:
+
+- what upstream-derived validation space is already exercised,
+- what cases are intentionally deferred,
+- and why those deferred cases are not yet expected to pass.
+
+### Current deferred upstream-derived support matrix
+
+| Area | Representative upstream-derived file | Current handling | Why deferred | Likely next step |
+| --- | --- | --- | --- | --- |
+| Imports / type-use edge | `crates/baedeker-testdata/spec/wast-upstream/imports-unknown-type-skip.wast` | skipped via `.meta` | `wast` canonicalizes the type-use form before Baedeker sees the intended unknown-type validation failure | improve harness reporting around canonicalization mismatches or add a raw-binary counterpart for the exact failure path |
+| Named labels invalids | `crates/baedeker-testdata/spec/wast-upstream/labels-invalid-skip.wast` | skipped via `.meta` | upstream named-label invalid cases do not yet land cleanly on Baedeker's current validation/harness boundary | broaden label-oriented validation coverage and/or add narrower representative cases that preserve the intended failure |
+| Custom-section UTF-8 malformed path | `crates/baedeker-testdata/spec/wast-upstream/utf8-custom-section-id-skip.wast` | skipped via `.meta` | malformed UTF-8 custom-section-id case does not currently fail along the expected malformed path in the harness pipeline | tighten malformed-path accounting between `wast` encoding and Baedeker decode, or cover the exact malformed bytes with a raw fixture |
+
+That bookkeeping matters for Phase 2 because the register-lowering work should inherit a semantic
+front-end with known boundaries, not an ambiguous notion of "probably enough validation."

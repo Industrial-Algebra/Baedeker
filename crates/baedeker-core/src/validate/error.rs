@@ -29,6 +29,9 @@ pub enum ValidationErrorKind {
     UnknownFuncIdx {
         idx: FuncIdx,
     },
+    UndeclaredFuncRef {
+        idx: FuncIdx,
+    },
     UnknownLocalIdx {
         idx: LocalIdx,
     },
@@ -185,6 +188,9 @@ impl fmt::Display for ValidationErrorKind {
             }
             ValidationErrorKind::UnknownFuncIdx { idx } => {
                 write!(f, "unknown function index {}", idx.0)
+            }
+            ValidationErrorKind::UndeclaredFuncRef { idx } => {
+                write!(f, "undeclared function reference {}", idx.0)
             }
             ValidationErrorKind::UnknownLocalIdx { idx } => {
                 write!(f, "unknown local index {}", idx.0)
