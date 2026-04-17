@@ -125,9 +125,40 @@ pub fn parse_preamble<'a>(cursor: &mut Cursor<'a>) -> Result<(), DecodeError> {
 ///
 /// Returns the sections as raw byte spans. Non-custom sections must appear
 /// in order of their section IDs (custom sections may appear anywhere).
+fn section_order(id: SectionId) -> u8 {
+    match id {
+        SectionId::Custom => 0,
+        SectionId::Type => 1,
+        SectionId::Import => 2,
+        SectionId::Function => 3,
+        SectionId::Table => 4,
+        SectionId::Memory => 5,
+        SectionId::Global => 6,
+        SectionId::Export => 7,
+        SectionId::Start => 8,
+        SectionId::Element => 9,
+        SectionId::Code => 10,
+        SectionId::Data => 11,
+        SectionId::DataCount => 12,
+    }
+}
+
+fn sections_in_valid_order(prev: SectionId, current: SectionId) -> bool {
+    let prev_order = section_order(prev);
+    let current_order = section_order(current);
+
+    current_order >= prev_order
+        || matches!(
+            (prev, current),
+            (SectionId::Element, SectionId::DataCount)
+                | (SectionId::DataCount, SectionId::Code)
+                | (SectionId::Data, SectionId::DataCount)
+        )
+}
+
 pub fn parse_sections<'a>(cursor: &mut Cursor<'a>) -> Result<Vec<RawSection<'a>>, DecodeError> {
     let mut sections = Vec::new();
-    let mut last_non_custom_id: Option<u8> = None;
+    let mut last_non_custom: Option<(u8, u8)> = None;
 
     while !cursor.is_empty() {
         let id_offset = cursor.position();
@@ -158,30 +189,33 @@ pub fn parse_sections<'a>(cursor: &mut Cursor<'a>) -> Result<Vec<RawSection<'a>>
             });
         }
 
-        // Ordering check: non-custom sections must appear in ascending ID order,
-        // and no duplicates.
+        // Ordering check: non-custom sections must appear in spec order,
+        // with special handling for the data count section, and no duplicates.
         if id != SectionId::Custom {
-            if let Some(prev) = last_non_custom_id
-                && id_byte <= prev
-            {
-                return Err(if id_byte == prev {
-                    DecodeError {
+            let current_order = section_order(id);
+            if let Some((prev_id, _prev_order)) = last_non_custom {
+                if id_byte == prev_id {
+                    return Err(DecodeError {
                         offset: ByteOffset(id_offset),
                         context: DecodeContext::SectionHeader,
                         kind: DecodeErrorKind::DuplicateSection { id: id_byte },
-                    }
-                } else {
-                    DecodeError {
+                    });
+                }
+                if !sections_in_valid_order(
+                    SectionId::from_byte(prev_id).expect("known section id"),
+                    id,
+                ) {
+                    return Err(DecodeError {
                         offset: ByteOffset(id_offset),
                         context: DecodeContext::SectionHeader,
                         kind: DecodeErrorKind::SectionOutOfOrder {
-                            prev,
+                            prev: prev_id,
                             current: id_byte,
                         },
-                    }
-                });
+                    });
+                }
             }
-            last_non_custom_id = Some(id_byte);
+            last_non_custom = Some((id_byte, current_order));
         }
 
         let data = cursor.read_bytes(size as usize).map_err(|_| DecodeError {
@@ -317,6 +351,27 @@ mod tests {
                 current: 1
             }
         ));
+    }
+
+    #[test]
+    fn allow_data_count_before_code_and_data() {
+        let data = [
+            0x00, 0x61, 0x73, 0x6D, // magic
+            0x01, 0x00, 0x00, 0x00, // version
+            0x09, 0x01, 0xAA, // element section
+            0x0C, 0x01, 0xBB, // data count section
+            0x0A, 0x01, 0xCC, // code section
+            0x0B, 0x01, 0xDD, // data section
+        ];
+        let mut cursor = Cursor::new(&data);
+        parse_preamble(&mut cursor).unwrap();
+        let sections = parse_sections(&mut cursor).unwrap();
+
+        assert_eq!(sections.len(), 4);
+        assert_eq!(sections[0].id, SectionId::Element);
+        assert_eq!(sections[1].id, SectionId::DataCount);
+        assert_eq!(sections[2].id, SectionId::Code);
+        assert_eq!(sections[3].id, SectionId::Data);
     }
 
     #[test]

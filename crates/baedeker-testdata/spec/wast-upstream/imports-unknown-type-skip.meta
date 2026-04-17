@@ -1,0 +1,1 @@
+skip=wast canonicalizes this type-use case before it reaches Baedeker as the intended unknown-type validation failure

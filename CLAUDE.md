@@ -11,6 +11,11 @@ broader ecosystem of Rust crates (Amari, Cliffy, Minuet, Orlando) focused on geo
 information geometry, and high-performance functional programming. A primary motivation is
 running this ecosystem on iOS hardware without rewriting in Swift.
 
+Baedeker is a language-runtime and systems project. Its binary decoding, malformed-input
+handling, validation, and future robustness testing are strictly in service of standards-compliant
+WebAssembly execution, portability, embedding, and implementation quality. It is not an offensive
+security project.
+
 ## Architecture
 
 ### Workspace layout

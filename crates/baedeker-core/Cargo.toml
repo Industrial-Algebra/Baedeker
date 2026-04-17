@@ -13,3 +13,4 @@ std = []
 
 [dev-dependencies]
 baedeker-testdata = { path = "../baedeker-testdata" }
+wast = "240"

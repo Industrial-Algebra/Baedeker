@@ -5,14 +5,20 @@
 
 ## Philosophy
 
+Baedeker is a language-runtime and systems project: its binary decoding, validation, malformed-input
+handling, and future robustness testing are all in service of standards-compliant WebAssembly
+execution, portability, and implementation quality. This roadmap is therefore framed around spec
+compliance, safe execution, and embedding ergonomics rather than offensive security use cases.
+
 This roadmap is structured as a bottom-up traversal of the WebAssembly abstraction stack.
 Each phase builds expertise in a specific layer before moving upward. Phases are designed to
 produce a working (if incomplete) artifact at each boundary, so the project is always runnable
 and testable — never in a state where three more layers need to exist before anything executes.
 
-The target spec is WebAssembly 2.0 (with an eye toward post-MVP proposals), and the primary
-deployment target is iOS via Rust FFI into Swift. JIT compilation is explicitly out of scope
-for the initial architecture; the engine is interpreter-first with AOT as a future layer.
+The target spec is full WebAssembly 3.0 validation, with execution support growing in phases on
+top of that semantic front-end, and the primary deployment target is iOS via Rust FFI into Swift.
+JIT compilation is explicitly out of scope for the initial architecture; the engine is
+interpreter-first with AOT as a future layer.
 
 ---
 
@@ -40,20 +46,154 @@ for the initial architecture; the engine is interpreter-first with AOT as a futu
 
 **Focus:** The WASM type system, structured control flow, and the validation algorithm.
 
-- Parse the Type section: function signatures (`functype`), with the full numtype/vectype/reftype
-  taxonomy from WASM 2.0.
-- Parse Import and Function sections to build the function index space.
-- Implement the **validation algorithm** for instruction sequences. This is the heart of WASM's
-  safety model: a type-checking pass over the structured operand stack that enforces:
-  - Stack polymorphism after unconditional branches
-  - Block signature matching for `block`, `loop`, `if`
-  - Correct label indexing for `br`, `br_if`, `br_table`
-  - Type-correct `select` with explicit type annotations (2.0)
-- Build a validation error type that produces genuinely useful diagnostics (byte offset,
-  expected vs actual stack state, surrounding instruction context).
-- **Milestone:** Can validate the type-correctness of any WASM 2.0 module and reject malformed ones
-  with clear errors. Run against the official spec test suite's `assert_invalid` and
-  `assert_malformed` cases.
+### Progress checklist
+
+#### Done
+- [x] Parse the Type section: function signatures (`functype`), with the current decoded subset of
+  WASM 2.0 value types used by Baedeker so far.
+- [x] Parse Import and Function sections to build the function index space.
+- [x] Parse the Code section and decode a growing instruction subset on demand.
+- [x] Parse the Global section, including defined globals and raw initializer expressions.
+- [x] Parse the Memory section, including defined memory limits.
+- [x] Implement a first substantial slice of the **validation algorithm** for instruction
+  sequences, including:
+  - [x] stack polymorphism after unconditional branches
+  - [x] block signature matching for `block`, `loop`, `if`
+  - [x] correct label indexing for `br`, `br_if`, `br_table`
+  - [x] type-correct `select` with explicit type annotations (2.0)
+  - [x] function type index resolution
+  - [x] call target resolution across imported and defined functions
+  - [x] local index validation
+  - [x] global index validation across imported and defined globals
+  - [x] memory index validation across imported and defined memories
+  - [x] final function result stack checking
+- [x] Validate a useful current instruction subset including structured control flow, locals,
+  calls, globals, `memory.size`, `memory.grow`, `select`, typed `select`, `i32.add`, `i64.add`,
+  `i32.eqz`, and a small constant/comparison subset.
+- [x] Validate defined global initializer expressions for the current const-expression subset:
+  `i32.const`, `i64.const`, `f32.const`, `f64.const`, and `global.get` of imported immutable
+  globals.
+- [x] Build a validation error type that produces genuinely useful diagnostics, including:
+  - [x] precise byte offsets for failing instructions
+  - [x] decode-preserving validation errors
+  - [x] operation-aware stack underflow diagnostics
+  - [x] operation-aware type mismatch diagnostics
+  - [x] richer branch/control result mismatch diagnostics
+  - [x] final result mismatch diagnostics with full stack context
+  - [x] index-space diagnostics with available-count context for globals and memories
+
+#### In progress / partial
+- [~] Expand instruction coverage from the current strong subset toward full WebAssembly 3.0
+  validation.
+  - Current support now includes structured control flow, direct calls and `call_indirect`,
+    locals, globals, scalar memory load/store families, SIMD/vector memory operations and lane
+    checks, bulk-memory and table operations, typed `select`, `br_table`, a substantially
+    broader numeric operator subset across i32/i64/f32/f64 comparisons and arithmetic, the
+    core conversion / reinterpretation families, integer sign-extension operators, saturating
+    float-to-int truncation variants, and an expanded reference/const-expression subset
+    including `ref.null`, `ref.func`, `ref.is_null`, and imported immutable `global.get` in
+    more const-expression positions.
+  - Major remaining gaps are now broader reference-type-driven validation paths beyond the
+    current subset, additional proposal-era completeness, and external spec-suite
+    integration/backfill rather than the main scalar numeric families.
+- [~] Enrich module-level validation toward full spec-shaped coverage.
+  - Type/import/function/code/global/memory/data/data-count/export/table/start/element sections are
+    now parsed and validated in a useful Phase 1 base.
+  - Remaining work is mostly semantic breadth and proposal-era completeness rather than missing the
+    core module skeleton.
+- [~] Run the growing validator against a disciplined external corpus rather than only crate-local
+  tests.
+  - Baedeker now has a filesystem-backed spec fixture harness with `valid`, `invalid-decode`, and
+    `invalid-validate` buckets plus optional `.meta` files for exact error `kind`/`offset`
+    assertions.
+  - Baedeker also now has a separate `wast` integration path with curated local files plus a broad
+    `wast-upstream/` directory of small upstream-derived official-spec subsets.
+  - Upstream-derived `.wast` coverage now uses sibling `.meta` files with `skip=...` to record
+    intentionally deferred or currently mismatched cases explicitly, so the harness acts as both a
+    runner and a lightweight support ledger for spec-suite friction points.
+  - Current explicitly deferred upstream-derived cases are:
+
+    | Upstream area | Representative file | Current status | Reason |
+    | --- | --- | --- | --- |
+    | imports | `imports-unknown-type-skip.wast` | deferred | `wast` canonicalizes the case before Baedeker sees the intended unknown-type validation failure |
+    | labels | `labels-invalid-skip.wast` | deferred | named-label invalids do not yet map cleanly onto Baedeker's current validation/harness boundary |
+    | custom section UTF-8 | `utf8-custom-section-id-skip.wast` | deferred | malformed UTF-8 custom-section-id case does not currently fail along the expected malformed path in the harness |
+
+  - Remaining work is to continue integrating official `wast`/spec-suite cases while tightening the
+    support/defer boundary and tracking unsupported areas explicitly.
+
+#### Revised Phase 1 completion definition
+Phase 1 is complete only when Baedeker provides a robust, diagnostics-oriented validation front-end
+for the full intended WebAssembly 3.0 surface, sufficient to serve as the semantic foundation for
+later register-based lowering and execution.
+
+More concretely, Phase 1 is done when all of the following are true:
+1. **Validation coverage**
+   - The decoder and validator cover the intended WebAssembly 3.0 instruction and module surface,
+     or any explicitly excluded areas are documented as out of scope for the current release.
+2. **Semantic reliability**
+   - Control-flow typing, operand stack typing, label/result propagation, const-expression rules,
+     and index-space resolution are stable enough that later lowering does not need to rediscover
+     spec semantics on its own.
+3. **Diagnostics quality**
+   - Validation and malformed-input failures preserve precise byte offsets where feasible and report
+     stable structured error kinds suitable for regression testing.
+4. **Spec-test grounding**
+   - Baedeker is exercised against both its internal fixture corpus and official spec-suite style
+     invalid/malformed validation inputs, with compliance status tracked explicitly.
+5. **Architectural clarity**
+   - The validator remains a spec-facing proof/type layer, clearly separated from the future
+     register-based IR and interpreter core.
+
+#### Still to do before Phase 1 can be called complete
+- [ ] Cover the remaining major instruction families and backfill gaps, especially additional
+  reference-type/proposal-era validation paths, any still-missing niche numeric/proposal
+  variants, and official spec-suite-driven completeness gaps.
+- [ ] Continue broadening reference-type, const-expression, and proposal-era validation coverage in
+  line with the WebAssembly 3.0 target surface, building beyond the current `ref.null` /
+  `ref.func` / `ref.is_null` and imported-const-`global.get` subset.
+- [ ] Integrate more official spec-suite `assert_invalid` / `assert_malformed` style coverage and
+  keep compliance/defer status explicit.
+- [ ] Continue converting known upstream friction points into explicit tracked deferred cases
+  (`.meta` `skip=...`) or implemented support, so Phase 2 builds on a crisp semantic contract
+  rather than assumptions.
+
+### Recommended next steps
+1. Prioritize the highest-leverage remaining semantic gaps for both full validation and future
+   lowering: remaining numeric coverage/variants, broader reference-type/proposal-era
+   validation, and external spec-suite integration.
+2. Keep expanding the fixture corpus in lockstep with each new instruction family, including exact
+   `.meta` assertions for representative diagnostics.
+3. Begin wiring in official spec-suite inputs so Phase 1 progress is measured against external
+   ground truth as well as internal fixtures.
+4. Keep the architectural boundary explicit: validation state remains proof/type state; register IR
+   design and lowering stay in Phase 2.
+
+### Current verification snapshot
+- `cargo fmt -- --check`
+- `cargo test -p baedeker-core --test spec`
+- `cargo test`
+- `cargo clippy --all-targets -- -D warnings`
+- Current `baedeker-core` unit test count: **169 passing**
+- Current spec harness integration tests: **3 passing**
+
+### Current branch snapshot
+Recent Phase 1 commits on `feature/phase1-type-section` include:
+- `c6d8dc7` — `feat: improve validation diagnostics`
+- `ec26942` — `feat: expand validation diagnostics`
+- `266eaa0` — `feat: validate global initializer expressions`
+- `cb21973` — `feat: parse defined memory section`
+- `9a2fb76` — `feat: enrich index diagnostics`
+
+### Phase 1 note
+The validator stack remains the spec-facing abstract operand/control stack used for proof of
+well-typedness. This is intentionally distinct from the future execution architecture, which still
+flows through decode → validate → lower to register IR → execute.
+
+Because Baedeker's long-term goal is full WebAssembly 3.0 validation, Phase 1 should not be read
+as a short-lived subset-only milestone. It is the semantic front-end of the runtime: the layer that
+must eventually make the full intended WASM surface precise, diagnosable, and trustworthy before
+execution and lowering broaden on top of it.
 
 ### Spec sections to internalize
 - [Types](https://webassembly.github.io/spec/core/syntax/types.html)
@@ -199,6 +339,12 @@ WASM 2.0 core before moving to proposals.
 Once the interpreter is functional, set up differential testing against Wasmtime or Wasmer:
 feed the same modules to both runtimes and compare outputs. This catches spec misunderstandings
 that the official test suite might not cover.
+
+## Ongoing: Robustness Testing
+
+As parser and validator coverage grows, add fuzzing and malformed-input testing specifically to
+harden decoding, validation, and error reporting against truncated or invalid WebAssembly modules.
+This work is strictly for standards compliance, runtime robustness, and implementation quality.
 
 ## Ongoing: Creusot Contracts
 

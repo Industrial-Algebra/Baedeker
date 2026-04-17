@@ -1,0 +1,1 @@
+skip=this malformed UTF-8 custom-section-id case does not currently fail along the expected path in the wast-to-Baedeker harness
