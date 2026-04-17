@@ -15,6 +15,8 @@ enum Expectation {
 struct CaseMeta {
     kind: Option<String>,
     offset: Option<u32>,
+    context: Option<String>,
+    decode_kind: Option<String>,
 }
 
 fn read_case_meta(path: &Path) -> Option<CaseMeta> {
@@ -48,6 +50,8 @@ fn read_case_meta(path: &Path) -> Option<CaseMeta> {
                     )
                 }))
             }
+            "context" => meta.context = Some(value.trim().to_owned()),
+            "decode_kind" => meta.decode_kind = Some(value.trim().to_owned()),
             other => panic!("{}: unknown metadata key {other:?}", meta_path.display()),
         }
     }
@@ -126,6 +130,28 @@ fn decode_kind_name(kind: &DecodeErrorKind) -> &'static str {
     }
 }
 
+fn decode_context_name(context: &baedeker_core::error::DecodeContext) -> String {
+    match context {
+        baedeker_core::error::DecodeContext::Magic => "Magic".to_owned(),
+        baedeker_core::error::DecodeContext::Version => "Version".to_owned(),
+        baedeker_core::error::DecodeContext::SectionHeader => "SectionHeader".to_owned(),
+        baedeker_core::error::DecodeContext::SectionBody { id } => format!("SectionBody({id})"),
+        baedeker_core::error::DecodeContext::Leb128 => "Leb128".to_owned(),
+        baedeker_core::error::DecodeContext::TypeSection => "TypeSection".to_owned(),
+        baedeker_core::error::DecodeContext::ImportSection => "ImportSection".to_owned(),
+        baedeker_core::error::DecodeContext::FunctionSection => "FunctionSection".to_owned(),
+        baedeker_core::error::DecodeContext::TableSection => "TableSection".to_owned(),
+        baedeker_core::error::DecodeContext::GlobalSection => "GlobalSection".to_owned(),
+        baedeker_core::error::DecodeContext::MemorySection => "MemorySection".to_owned(),
+        baedeker_core::error::DecodeContext::ExportSection => "ExportSection".to_owned(),
+        baedeker_core::error::DecodeContext::StartSection => "StartSection".to_owned(),
+        baedeker_core::error::DecodeContext::ElementSection => "ElementSection".to_owned(),
+        baedeker_core::error::DecodeContext::DataSection => "DataSection".to_owned(),
+        baedeker_core::error::DecodeContext::DataCountSection => "DataCountSection".to_owned(),
+        baedeker_core::error::DecodeContext::CodeSection => "CodeSection".to_owned(),
+    }
+}
+
 fn assert_validation_meta(path: &Path, err: &ValidationError, meta: &CaseMeta) {
     if let Some(offset) = meta.offset {
         assert_eq!(
@@ -143,6 +169,31 @@ fn assert_validation_meta(path: &Path, err: &ValidationError, meta: &CaseMeta) {
             path.display()
         );
     }
+    if meta.context.is_some() || meta.decode_kind.is_some() {
+        let ValidationErrorKind::Decode { context, kind } = &err.kind else {
+            panic!(
+                "{}: decode metadata requires ValidationErrorKind::Decode, found {}",
+                path.display(),
+                validation_kind_name(&err.kind)
+            );
+        };
+        if let Some(expected_context) = &meta.context {
+            assert_eq!(
+                decode_context_name(context),
+                *expected_context,
+                "{}: unexpected wrapped decode context",
+                path.display()
+            );
+        }
+        if let Some(expected_kind) = &meta.decode_kind {
+            assert_eq!(
+                decode_kind_name(kind),
+                expected_kind,
+                "{}: unexpected wrapped decode error kind",
+                path.display()
+            );
+        }
+    }
 }
 
 fn assert_decode_meta(path: &Path, err: &baedeker_core::error::DecodeError, meta: &CaseMeta) {
@@ -155,6 +206,22 @@ fn assert_decode_meta(path: &Path, err: &baedeker_core::error::DecodeError, meta
         );
     }
     if let Some(kind) = &meta.kind {
+        assert_eq!(
+            decode_kind_name(&err.kind),
+            kind,
+            "{}: unexpected decode error kind",
+            path.display()
+        );
+    }
+    if let Some(context) = &meta.context {
+        assert_eq!(
+            decode_context_name(&err.context),
+            *context,
+            "{}: unexpected decode error context",
+            path.display()
+        );
+    }
+    if let Some(kind) = &meta.decode_kind {
         assert_eq!(
             decode_kind_name(&err.kind),
             kind,

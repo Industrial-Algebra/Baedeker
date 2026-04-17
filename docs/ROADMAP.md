@@ -93,8 +93,10 @@ interpreter-first with AOT as a future layer.
     operator subset across i32/i64/f32/f64 comparisons and arithmetic, the core conversion /
     reinterpretation families, integer sign-extension operators, saturating float-to-int
     truncation variants, and an expanded reference/const-expression subset including `ref.null`,
-    `ref.func`, `ref.is_null`, and imported immutable `global.get` in more const-expression
-    positions.
+    `ref.func`, `ref.is_null`, imported immutable `global.get` in more const-expression
+    positions, and declared-function-reference checking for `ref.func` in function bodies with
+    declaration sources currently grounded in exports, global initializer `ref.func`, and
+    element segments.
   - Major remaining gaps are now broader reference-type-driven validation paths beyond the
     current subset, additional proposal-era completeness, and external spec-suite
     integration/backfill rather than the main scalar numeric families.
@@ -107,22 +109,34 @@ interpreter-first with AOT as a future layer.
   tests.
   - Baedeker now has a filesystem-backed spec fixture harness with `valid`, `invalid-decode`, and
     `invalid-validate` buckets plus optional `.meta` files for exact error `kind`/`offset`
-    assertions.
+    assertions, plus `context=` and `decode_kind=` for cases where validation intentionally
+    preserves an underlying body-decode failure as `ValidationErrorKind::Decode`.
   - Baedeker also now has a separate `wast` integration path with curated local files plus a broad
     `wast-upstream/` directory of small upstream-derived official-spec subsets.
   - Upstream-derived `.wast` coverage now uses sibling `.meta` files with `skip=...` to record
     intentionally deferred or currently mismatched cases explicitly, so the harness acts as both a
     runner and a lightweight support ledger for spec-suite friction points.
-  - Current explicitly deferred upstream-derived cases are:
+  - There are currently no explicitly deferred upstream-derived cases in the support matrix.
 
-    | Upstream area | Representative file | Current status | Reason |
-    | --- | --- | --- | --- |
-    | imports | `imports-unknown-type-skip.wast` | deferred | `wast` canonicalizes the case before Baedeker sees the intended unknown-type validation failure |
-    | labels | `labels-invalid-skip.wast` | deferred | named-label invalids do not yet map cleanly onto Baedeker's current validation/harness boundary |
-    | custom section UTF-8 | `utf8-custom-section-id-skip.wast` | deferred | malformed UTF-8 custom-section-id case does not currently fail along the expected malformed path in the harness |
+  - Active upstream-derived subsets now include:
+    - `wast-upstream/labels-invalid-subset.wast`
+    - `wast-upstream/labels-invalid-folded-syntax-subset.wast`
+    - `wast-upstream/ref-func-undeclared-reference-subset.wast`
+    - `wast-upstream/imports-unknown-type-subset.wast`
+    - `wast-upstream/utf8-custom-section-id-subset.wast`
+
+  - Historical active upstream files have been normalized to `-subset.wast` names; no active
+    upstream-derived coverage currently retains the old `-skip` suffix.
 
   - Remaining work is to continue integrating official `wast`/spec-suite cases while tightening the
     support/defer boundary and tracking unsupported areas explicitly.
+
+  - Current decode-vs-validate boundary in the raw fixture harness is:
+    - `invalid-decode`: `Module::decode(...)` itself must fail.
+    - `invalid-validate`: module decoding succeeds, then validation fails.
+    - malformed function-body instruction streams that are only decoded during validation belong in
+      `invalid-validate` and should assert `kind=Decode` plus nested `context=` / `decode_kind=`
+      metadata where useful.
 
 #### Revised Phase 1 completion definition
 Phase 1 is complete only when Baedeker provides a robust, diagnostics-oriented validation front-end
@@ -156,9 +170,9 @@ More concretely, Phase 1 is done when all of the following are true:
   `ref.func` / `ref.is_null` and imported-const-`global.get` subset.
 - [ ] Integrate more official spec-suite `assert_invalid` / `assert_malformed` style coverage and
   keep compliance/defer status explicit.
-- [ ] Continue converting known upstream friction points into explicit tracked deferred cases
-  (`.meta` `skip=...`) or implemented support, so Phase 2 builds on a crisp semantic contract
-  rather than assumptions.
+- [ ] Continue converting any newly discovered upstream friction points into either explicit tracked
+  deferred cases (`.meta` `skip=...`) or implemented support, so Phase 2 builds on a crisp
+  semantic contract rather than assumptions.
 
 ### Recommended next steps
 1. Prioritize the highest-leverage remaining semantic gaps for both full validation and future
@@ -174,18 +188,15 @@ More concretely, Phase 1 is done when all of the following are true:
 ### Current verification snapshot
 - `cargo fmt -- --check`
 - `cargo test -p baedeker-core --test spec`
-- `cargo test`
-- `cargo clippy --all-targets -- -D warnings`
-- Current `baedeker-core` unit test count: **169 passing**
-- Current spec harness integration tests: **3 passing**
+- `cargo test -p baedeker-core --test spec_wast`
+- `cargo test -p baedeker-core`
+- `cargo clippy -p baedeker-core --all-targets -- -D warnings`
+- Current `baedeker-core` unit test count: **202 passing**
+- Current spec-harness integration tests: **5 passing** (`spec`: 3, `spec_wast`: 2)
 
 ### Current branch snapshot
-Recent Phase 1 commits on `feature/phase1-type-section` include:
-- `c6d8dc7` — `feat: improve validation diagnostics`
-- `ec26942` — `feat: expand validation diagnostics`
-- `266eaa0` — `feat: validate global initializer expressions`
-- `cb21973` — `feat: parse defined memory section`
-- `9a2fb76` — `feat: enrich index diagnostics`
+Current Phase 1 closure work continues on `feat/phase-1-part-2-closures`, with the validator and
+fixture/docs support matrix kept in sync as upstream-derived skips are narrowed or retired.
 
 ### Phase 1 note
 The validator stack remains the spec-facing abstract operand/control stack used for proof of

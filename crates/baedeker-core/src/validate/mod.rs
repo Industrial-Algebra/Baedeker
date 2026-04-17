@@ -51,6 +51,7 @@ pub fn validate_module(module: &Module<'_>) -> Result<(), ValidationError> {
         }
     }
 
+    validate_imports(module)?;
     validate_globals(module)?;
     validate_data_segments(module)?;
     validate_bulk_memory(module)?;
@@ -67,6 +68,27 @@ pub fn validate_module(module: &Module<'_>) -> Result<(), ValidationError> {
             code.locals.as_slice(),
             code,
         )?;
+    }
+
+    Ok(())
+}
+
+fn validate_imports(module: &Module<'_>) -> Result<(), ValidationError> {
+    let offset = module
+        .section(crate::binary::section::SectionId::Import)
+        .map(|section| section.offset)
+        .unwrap_or(0);
+
+    for import in module.imports() {
+        if let ImportDesc::Func(type_idx) = import.desc
+            && module.types.get(type_idx.0 as usize).is_none()
+        {
+            return Err(ValidationError {
+                offset: ByteOffset(offset),
+                function: None,
+                kind: ValidationErrorKind::UnknownTypeIdx { idx: type_idx },
+            });
+        }
     }
 
     Ok(())
@@ -2162,8 +2184,11 @@ fn contains_ref_func_expr(
 ) -> bool {
     decode_instr_sequence_with_offsets(expr, offset)
         .ok()
-        .and_then(|instrs| instrs.into_iter().next())
-        .is_some_and(|instr| matches!(instr.instr, Instr::RefFunc(idx) if idx == target))
+        .is_some_and(|instrs| {
+            instrs
+                .into_iter()
+                .any(|instr| matches!(instr.instr, Instr::RefFunc(idx) if idx == target))
+        })
 }
 
 fn is_declared_function_ref(module: &Module<'_>, target: FuncIdx) -> bool {
@@ -2437,6 +2462,20 @@ fn finish_frame(
         });
     }
 
+    if state.reachability == Reachability::Reachable {
+        let found = state.operands.as_slice()[frame.outer_height..].to_vec();
+        if found != frame.end_types {
+            return Err(ValidationError {
+                offset: ByteOffset(offset),
+                function: Some(function),
+                kind: ValidationErrorKind::ControlResultTypeMismatch {
+                    expected: frame.end_types.clone(),
+                    found,
+                },
+            });
+        }
+    }
+
     pop_control_result_types(function, state, &frame.end_types, offset)?;
     state.operands.truncate(frame.outer_height);
     for ty in frame.end_types {
@@ -2699,6 +2738,23 @@ mod tests {
     }
 
     #[test]
+    fn reject_import_with_unknown_type_index() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01,
+            0x7F, 0x02, 0x0D, 0x01, 0x04, b't', b'e', b's', b't', 0x04, b'f', b'u', b'n', b'c',
+            0x00, 0x01,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::UnknownTypeIdx {
+                idx: crate::types::TypeIdx(1)
+            }
+        ));
+    }
+
+    #[test]
     fn report_function_result_stack_suffix() {
         let bytes = [
             0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01,
@@ -2817,6 +2873,62 @@ mod tests {
         ];
         let module = Module::decode(&bytes).unwrap();
         module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_ref_func_declared_by_exported_import() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x02, 0x09, 0x01, 0x03, b'e', b'n', b'v', 0x01, b'f', 0x00, 0x00, 0x03, 0x02, 0x01,
+            0x00, 0x07, 0x05, 0x01, 0x01, b'f', 0x00, 0x00, 0x0A, 0x07, 0x01, 0x05, 0x00, 0xD2,
+            0x00, 0x1A, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_ref_func_declared_by_declarative_element() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x03, 0x03, 0x02, 0x00, 0x00, 0x09, 0x05, 0x01, 0x03, 0x00, 0x01, 0x00, 0x0A, 0x0A,
+            0x02, 0x02, 0x00, 0x0B, 0x05, 0x00, 0xD2, 0x00, 0x1A, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn reject_undeclared_ref_func_self_reference() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x03, 0x02, 0x01, 0x00, 0x0A, 0x07, 0x01, 0x05, 0x00, 0xD2, 0x00, 0x1A, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::UndeclaredFuncRef {
+                idx: crate::types::FuncIdx(0)
+            }
+        ));
+    }
+
+    #[test]
+    fn reject_ref_func_when_start_is_only_declaration_source() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x03, 0x02, 0x01, 0x00, 0x08, 0x01, 0x00, 0x0A, 0x07, 0x01, 0x05, 0x00, 0xD2, 0x00,
+            0x1A, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::UndeclaredFuncRef {
+                idx: crate::types::FuncIdx(0)
+            }
+        ));
     }
 
     #[test]
@@ -3276,6 +3388,42 @@ mod tests {
             ValidationErrorKind::ControlResultTypeMismatch { expected, found }
                 if expected == vec![ValType::Num(crate::types::NumType::I32)]
                     && found == vec![ValType::Num(crate::types::NumType::I64)]
+        ));
+    }
+
+    #[test]
+    fn reject_block_end_with_extra_operand() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x03, 0x02, 0x01, 0x00, 0x0A, 0x10, 0x01, 0x0E, 0x00, 0x02, 0x40, 0x43, 0x00, 0x00,
+            0x00, 0x00, 0x41, 0x01, 0x0D, 0x00, 0x0B, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(34));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::ControlResultTypeMismatch { expected, found }
+                if expected.is_empty()
+                    && found == vec![ValType::Num(crate::types::NumType::F32)]
+        ));
+    }
+
+    #[test]
+    fn reject_folded_syntax_equivalent_br_if_operand_use() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x03, 0x02, 0x01, 0x00, 0x0A, 0x0D, 0x01, 0x0B, 0x00, 0x02, 0x40, 0x41, 0x01, 0x0D,
+            0x00, 0x8C, 0x01, 0x0B, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(29));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::StackUnderflow { op, expected, .. }
+                if op == "f32.unary"
+                    && expected == vec![ValType::Num(crate::types::NumType::F32)]
         ));
     }
 

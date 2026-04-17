@@ -214,7 +214,7 @@ fn run_wast_case(path: &Path) -> WastCaseOutcome {
     WastCaseOutcome::Ran(stats)
 }
 
-fn run_wast_dir(subdir: &str) {
+fn run_wast_dir(subdir: &str) -> WastDirStats {
     let mut total = WastDirStats::default();
 
     for path in baedeker_testdata::spec_wast_cases(subdir) {
@@ -262,14 +262,20 @@ fn run_wast_dir(subdir: &str) {
             eprintln!("  {} => {}", path.display(), reason);
         }
     }
+
+    total
 }
 
 #[test]
 fn spec_wast_validation_cases() {
-    run_wast_dir("wast");
+    let _ = run_wast_dir("wast");
 }
 
 #[test]
 fn spec_wast_upstream_subset_cases() {
-    run_wast_dir("wast-upstream");
+    let stats = run_wast_dir("wast-upstream");
+    assert_eq!(
+        stats.files_skipped, 0,
+        "wast-upstream should currently have no deferred/skip cases"
+    );
 }
