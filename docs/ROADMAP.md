@@ -86,13 +86,15 @@ interpreter-first with AOT as a future layer.
 - [~] Expand instruction coverage from the current strong subset toward full WebAssembly 3.0
   validation.
   - Current support now includes structured control flow, direct calls and `call_indirect`,
-    locals, globals, scalar memory load/store families, SIMD/vector memory operations and lane
-    checks, bulk-memory and table operations, typed `select`, `br_table`, a substantially
-    broader numeric operator subset across i32/i64/f32/f64 comparisons and arithmetic, the
-    core conversion / reinterpretation families, integer sign-extension operators, saturating
-    float-to-int truncation variants, and an expanded reference/const-expression subset
-    including `ref.null`, `ref.func`, `ref.is_null`, and imported immutable `global.get` in
-    more const-expression positions.
+    locals, globals, multi-memory / multi-table module validation, scalar memory load/store
+    families, SIMD/vector memory operations and lane checks, explicit nonzero memory-index
+    validation across `memory.size` / `memory.grow`, bulk-memory instructions, scalar memory
+    ops, and SIMD memory ops, typed `select`, `br_table`, a substantially broader numeric
+    operator subset across i32/i64/f32/f64 comparisons and arithmetic, the core conversion /
+    reinterpretation families, integer sign-extension operators, saturating float-to-int
+    truncation variants, and an expanded reference/const-expression subset including `ref.null`,
+    `ref.func`, `ref.is_null`, and imported immutable `global.get` in more const-expression
+    positions.
   - Major remaining gaps are now broader reference-type-driven validation paths beyond the
     current subset, additional proposal-era completeness, and external spec-suite
     integration/backfill rather than the main scalar numeric families.

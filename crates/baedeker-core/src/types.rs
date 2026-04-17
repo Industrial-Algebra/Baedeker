@@ -124,6 +124,7 @@ pub struct MemType {
 pub struct MemArg {
     pub align: u32,
     pub offset: u32,
+    pub memory: MemIdx,
 }
 
 /// Mode of a data segment.

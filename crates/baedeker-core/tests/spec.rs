@@ -98,8 +98,6 @@ fn validation_kind_name(kind: &ValidationErrorKind) -> &'static str {
         ValidationErrorKind::InvalidCallIndirectTableType { .. } => "InvalidCallIndirectTableType",
         ValidationErrorKind::MissingDataCountSection { .. } => "MissingDataCountSection",
         ValidationErrorKind::DuplicateExportName { .. } => "DuplicateExportName",
-        ValidationErrorKind::TooManyTables { .. } => "TooManyTables",
-        ValidationErrorKind::TooManyMemories { .. } => "TooManyMemories",
     }
 }
 

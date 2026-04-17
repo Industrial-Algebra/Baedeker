@@ -16,6 +16,25 @@
     v128.const i32x4 0 0 0 0
     v128.store32_lane 3))
 
+(module
+  (memory 1)
+  (memory 1)
+  (func (result v128)
+    i32.const 0
+    v128.load 1)
+  (func
+    i32.const 0
+    v128.const i32x4 0 0 0 0
+    v128.store 1)
+  (func (result v128)
+    i32.const 0
+    v128.const i32x4 0 0 0 0
+    v128.load16_lane 1 7)
+  (func
+    i32.const 0
+    v128.const i32x4 0 0 0 0
+    v128.store32_lane 1 3))
+
 (assert_invalid
   (module
     (memory 1)
@@ -50,3 +69,11 @@
       i32.const 0
       v128.load16_lane 0))
   "type mismatch")
+
+(assert_invalid
+  (module
+    (memory 1)
+    (func (result v128)
+      i32.const 0
+      v128.load 1))
+  "unknown memory")

@@ -51,7 +51,6 @@ pub fn validate_module(module: &Module<'_>) -> Result<(), ValidationError> {
         }
     }
 
-    validate_table_memory_constraints(module)?;
     validate_globals(module)?;
     validate_data_segments(module)?;
     validate_bulk_memory(module)?;
@@ -68,42 +67,6 @@ pub fn validate_module(module: &Module<'_>) -> Result<(), ValidationError> {
             code.locals.as_slice(),
             code,
         )?;
-    }
-
-    Ok(())
-}
-
-fn validate_table_memory_constraints(module: &Module<'_>) -> Result<(), ValidationError> {
-    let table_count = module
-        .imports()
-        .iter()
-        .filter(|import| matches!(import.desc, ImportDesc::Table(_)))
-        .count()
-        + module.tables().len();
-    if table_count > 1 {
-        return Err(ValidationError {
-            offset: ByteOffset(0),
-            function: None,
-            kind: ValidationErrorKind::TooManyTables {
-                count: table_count as u32,
-            },
-        });
-    }
-
-    let memory_count = module
-        .imports()
-        .iter()
-        .filter(|import| matches!(import.desc, ImportDesc::Mem(_)))
-        .count()
-        + module.memories().len();
-    if memory_count > 1 {
-        return Err(ValidationError {
-            offset: ByteOffset(0),
-            function: None,
-            kind: ValidationErrorKind::TooManyMemories {
-                count: memory_count as u32,
-            },
-        });
     }
 
     Ok(())
@@ -823,6 +786,7 @@ fn validate_instr(
             offset,
             MemLoadValidation {
                 op: "v128.load",
+                memory: memarg.memory,
                 found_align: memarg.align,
                 max_align: 4,
                 result: ValType::Vec(crate::types::VecType::V128),
@@ -835,6 +799,7 @@ fn validate_instr(
             offset,
             MemLoadValidation {
                 op: "v128.load8x8",
+                memory: memarg.memory,
                 found_align: memarg.align,
                 max_align: 3,
                 result: ValType::Vec(crate::types::VecType::V128),
@@ -847,6 +812,7 @@ fn validate_instr(
             offset,
             MemLoadValidation {
                 op: "v128.load16x4",
+                memory: memarg.memory,
                 found_align: memarg.align,
                 max_align: 3,
                 result: ValType::Vec(crate::types::VecType::V128),
@@ -859,6 +825,7 @@ fn validate_instr(
             offset,
             MemLoadValidation {
                 op: "v128.load32x2",
+                memory: memarg.memory,
                 found_align: memarg.align,
                 max_align: 3,
                 result: ValType::Vec(crate::types::VecType::V128),
@@ -871,6 +838,7 @@ fn validate_instr(
             offset,
             MemLoadValidation {
                 op: "v128.load8_splat",
+                memory: memarg.memory,
                 found_align: memarg.align,
                 max_align: 0,
                 result: ValType::Vec(crate::types::VecType::V128),
@@ -883,6 +851,7 @@ fn validate_instr(
             offset,
             MemLoadValidation {
                 op: "v128.load16_splat",
+                memory: memarg.memory,
                 found_align: memarg.align,
                 max_align: 1,
                 result: ValType::Vec(crate::types::VecType::V128),
@@ -895,6 +864,7 @@ fn validate_instr(
             offset,
             MemLoadValidation {
                 op: "v128.load32_splat",
+                memory: memarg.memory,
                 found_align: memarg.align,
                 max_align: 2,
                 result: ValType::Vec(crate::types::VecType::V128),
@@ -907,6 +877,7 @@ fn validate_instr(
             offset,
             MemLoadValidation {
                 op: "v128.load64_splat",
+                memory: memarg.memory,
                 found_align: memarg.align,
                 max_align: 3,
                 result: ValType::Vec(crate::types::VecType::V128),
@@ -919,6 +890,7 @@ fn validate_instr(
             offset,
             MemLoadValidation {
                 op: "v128.load32_zero",
+                memory: memarg.memory,
                 found_align: memarg.align,
                 max_align: 2,
                 result: ValType::Vec(crate::types::VecType::V128),
@@ -931,6 +903,7 @@ fn validate_instr(
             offset,
             MemLoadValidation {
                 op: "v128.load64_zero",
+                memory: memarg.memory,
                 found_align: memarg.align,
                 max_align: 3,
                 result: ValType::Vec(crate::types::VecType::V128),
@@ -943,6 +916,7 @@ fn validate_instr(
             offset,
             MemStoreValidation {
                 op: "v128.store",
+                memory: memarg.memory,
                 found_align: memarg.align,
                 max_align: 4,
                 stored: ValType::Vec(crate::types::VecType::V128),
@@ -955,6 +929,7 @@ fn validate_instr(
             offset,
             SimdLaneValidation {
                 op: "v128.load8_lane",
+                memory: memarg.memory,
                 found_align: memarg.align,
                 max_align: 0,
                 lane: *lane,
@@ -968,6 +943,7 @@ fn validate_instr(
             offset,
             SimdLaneValidation {
                 op: "v128.load16_lane",
+                memory: memarg.memory,
                 found_align: memarg.align,
                 max_align: 1,
                 lane: *lane,
@@ -981,6 +957,7 @@ fn validate_instr(
             offset,
             SimdLaneValidation {
                 op: "v128.load32_lane",
+                memory: memarg.memory,
                 found_align: memarg.align,
                 max_align: 2,
                 lane: *lane,
@@ -994,6 +971,7 @@ fn validate_instr(
             offset,
             SimdLaneValidation {
                 op: "v128.load64_lane",
+                memory: memarg.memory,
                 found_align: memarg.align,
                 max_align: 3,
                 lane: *lane,
@@ -1007,6 +985,7 @@ fn validate_instr(
             offset,
             SimdLaneValidation {
                 op: "v128.store8_lane",
+                memory: memarg.memory,
                 found_align: memarg.align,
                 max_align: 0,
                 lane: *lane,
@@ -1020,6 +999,7 @@ fn validate_instr(
             offset,
             SimdLaneValidation {
                 op: "v128.store16_lane",
+                memory: memarg.memory,
                 found_align: memarg.align,
                 max_align: 1,
                 lane: *lane,
@@ -1033,6 +1013,7 @@ fn validate_instr(
             offset,
             SimdLaneValidation {
                 op: "v128.store32_lane",
+                memory: memarg.memory,
                 found_align: memarg.align,
                 max_align: 2,
                 lane: *lane,
@@ -1046,6 +1027,7 @@ fn validate_instr(
             offset,
             SimdLaneValidation {
                 op: "v128.store64_lane",
+                memory: memarg.memory,
                 found_align: memarg.align,
                 max_align: 3,
                 lane: *lane,
@@ -1059,6 +1041,7 @@ fn validate_instr(
             offset,
             MemLoadValidation {
                 op: "i32.load",
+                memory: memarg.memory,
                 found_align: memarg.align,
                 max_align: 2,
                 result: ValType::Num(crate::types::NumType::I32),
@@ -1071,6 +1054,7 @@ fn validate_instr(
             offset,
             MemLoadValidation {
                 op: "i64.load",
+                memory: memarg.memory,
                 found_align: memarg.align,
                 max_align: 3,
                 result: ValType::Num(crate::types::NumType::I64),
@@ -1083,6 +1067,7 @@ fn validate_instr(
             offset,
             MemLoadValidation {
                 op: "f32.load",
+                memory: memarg.memory,
                 found_align: memarg.align,
                 max_align: 2,
                 result: ValType::Num(crate::types::NumType::F32),
@@ -1095,6 +1080,7 @@ fn validate_instr(
             offset,
             MemLoadValidation {
                 op: "f64.load",
+                memory: memarg.memory,
                 found_align: memarg.align,
                 max_align: 3,
                 result: ValType::Num(crate::types::NumType::F64),
@@ -1107,6 +1093,7 @@ fn validate_instr(
             offset,
             MemLoadValidation {
                 op: "i32.load8",
+                memory: memarg.memory,
                 found_align: memarg.align,
                 max_align: 0,
                 result: ValType::Num(crate::types::NumType::I32),
@@ -1119,6 +1106,7 @@ fn validate_instr(
             offset,
             MemLoadValidation {
                 op: "i32.load16",
+                memory: memarg.memory,
                 found_align: memarg.align,
                 max_align: 1,
                 result: ValType::Num(crate::types::NumType::I32),
@@ -1131,6 +1119,7 @@ fn validate_instr(
             offset,
             MemLoadValidation {
                 op: "i64.load8",
+                memory: memarg.memory,
                 found_align: memarg.align,
                 max_align: 0,
                 result: ValType::Num(crate::types::NumType::I64),
@@ -1143,6 +1132,7 @@ fn validate_instr(
             offset,
             MemLoadValidation {
                 op: "i64.load16",
+                memory: memarg.memory,
                 found_align: memarg.align,
                 max_align: 1,
                 result: ValType::Num(crate::types::NumType::I64),
@@ -1155,6 +1145,7 @@ fn validate_instr(
             offset,
             MemLoadValidation {
                 op: "i64.load32",
+                memory: memarg.memory,
                 found_align: memarg.align,
                 max_align: 2,
                 result: ValType::Num(crate::types::NumType::I64),
@@ -1167,6 +1158,7 @@ fn validate_instr(
             offset,
             MemStoreValidation {
                 op: "i32.store",
+                memory: memarg.memory,
                 found_align: memarg.align,
                 max_align: 2,
                 stored: ValType::Num(crate::types::NumType::I32),
@@ -1179,6 +1171,7 @@ fn validate_instr(
             offset,
             MemStoreValidation {
                 op: "i64.store",
+                memory: memarg.memory,
                 found_align: memarg.align,
                 max_align: 3,
                 stored: ValType::Num(crate::types::NumType::I64),
@@ -1191,6 +1184,7 @@ fn validate_instr(
             offset,
             MemStoreValidation {
                 op: "f32.store",
+                memory: memarg.memory,
                 found_align: memarg.align,
                 max_align: 2,
                 stored: ValType::Num(crate::types::NumType::F32),
@@ -1203,6 +1197,7 @@ fn validate_instr(
             offset,
             MemStoreValidation {
                 op: "f64.store",
+                memory: memarg.memory,
                 found_align: memarg.align,
                 max_align: 3,
                 stored: ValType::Num(crate::types::NumType::F64),
@@ -1215,6 +1210,7 @@ fn validate_instr(
             offset,
             MemStoreValidation {
                 op: "i32.store8",
+                memory: memarg.memory,
                 found_align: memarg.align,
                 max_align: 0,
                 stored: ValType::Num(crate::types::NumType::I32),
@@ -1227,6 +1223,7 @@ fn validate_instr(
             offset,
             MemStoreValidation {
                 op: "i32.store16",
+                memory: memarg.memory,
                 found_align: memarg.align,
                 max_align: 1,
                 stored: ValType::Num(crate::types::NumType::I32),
@@ -1239,6 +1236,7 @@ fn validate_instr(
             offset,
             MemStoreValidation {
                 op: "i64.store8",
+                memory: memarg.memory,
                 found_align: memarg.align,
                 max_align: 0,
                 stored: ValType::Num(crate::types::NumType::I64),
@@ -1251,6 +1249,7 @@ fn validate_instr(
             offset,
             MemStoreValidation {
                 op: "i64.store16",
+                memory: memarg.memory,
                 found_align: memarg.align,
                 max_align: 1,
                 stored: ValType::Num(crate::types::NumType::I64),
@@ -1263,6 +1262,7 @@ fn validate_instr(
             offset,
             MemStoreValidation {
                 op: "i64.store32",
+                memory: memarg.memory,
                 found_align: memarg.align,
                 max_align: 2,
                 stored: ValType::Num(crate::types::NumType::I64),
@@ -1943,6 +1943,7 @@ fn validate_ref_is_null(
 
 struct MemLoadValidation {
     op: &'static str,
+    memory: MemIdx,
     found_align: u32,
     max_align: u32,
     result: ValType,
@@ -1950,6 +1951,7 @@ struct MemLoadValidation {
 
 struct MemStoreValidation {
     op: &'static str,
+    memory: MemIdx,
     found_align: u32,
     max_align: u32,
     stored: ValType,
@@ -1957,6 +1959,7 @@ struct MemStoreValidation {
 
 struct SimdLaneValidation {
     op: &'static str,
+    memory: MemIdx,
     found_align: u32,
     max_align: u32,
     lane: u8,
@@ -1971,7 +1974,7 @@ fn validate_load(
     load: MemLoadValidation,
 ) -> Result<(), ValidationError> {
     validate_memarg_align(function, offset, load.op, load.found_align, load.max_align)?;
-    resolve_memory_type(module, MemIdx(0), function, offset)?;
+    resolve_memory_type(module, load.memory, function, offset)?;
     pop_expect(
         function,
         state,
@@ -1997,7 +2000,7 @@ fn validate_store(
         store.found_align,
         store.max_align,
     )?;
-    resolve_memory_type(module, MemIdx(0), function, offset)?;
+    resolve_memory_type(module, store.memory, function, offset)?;
     pop_expect(function, state, store.stored, offset, store.op)?;
     pop_expect(
         function,
@@ -2018,7 +2021,7 @@ fn validate_simd_load_lane(
 ) -> Result<(), ValidationError> {
     validate_memarg_align(function, offset, lane.op, lane.found_align, lane.max_align)?;
     validate_simd_lane_idx(function, offset, lane.op, lane.lane, lane.max_lane)?;
-    resolve_memory_type(module, MemIdx(0), function, offset)?;
+    resolve_memory_type(module, lane.memory, function, offset)?;
     pop_expect(
         function,
         state,
@@ -2048,7 +2051,7 @@ fn validate_simd_store_lane(
 ) -> Result<(), ValidationError> {
     validate_memarg_align(function, offset, lane.op, lane.found_align, lane.max_align)?;
     validate_simd_lane_idx(function, offset, lane.op, lane.lane, lane.max_lane)?;
-    resolve_memory_type(module, MemIdx(0), function, offset)?;
+    resolve_memory_type(module, lane.memory, function, offset)?;
     pop_expect(
         function,
         state,
@@ -2912,11 +2915,35 @@ mod tests {
     }
 
     #[test]
+    fn validate_memory_size_and_grow_for_nonzero_memory_index() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01,
+            0x7F, 0x02, 0x0C, 0x01, 0x03, b'e', b'n', b'v', 0x03, b'm', b'e', b'm', 0x02, 0x00,
+            0x01, 0x03, 0x02, 0x01, 0x00, 0x05, 0x03, 0x01, 0x00, 0x01, 0x0A, 0x0B, 0x01, 0x09,
+            0x00, 0x41, 0x01, 0x40, 0x01, 0x1A, 0x3F, 0x01, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
     fn validate_i32_load_and_store_for_defined_memory() {
         let bytes = [
             0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01,
             0x7F, 0x03, 0x02, 0x01, 0x00, 0x05, 0x03, 0x01, 0x00, 0x01, 0x0A, 0x10, 0x01, 0x0E,
             0x00, 0x41, 0x00, 0x41, 0x2A, 0x36, 0x02, 0x00, 0x41, 0x00, 0x28, 0x02, 0x00, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_i32_load_and_store_for_nonzero_memory_index() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x60, 0x00, 0x01,
+            0x7F, 0x60, 0x00, 0x00, 0x03, 0x03, 0x02, 0x00, 0x01, 0x05, 0x05, 0x02, 0x00, 0x01,
+            0x00, 0x01, 0x0A, 0x15, 0x02, 0x08, 0x00, 0x41, 0x00, 0x28, 0x42, 0x01, 0x00, 0x0B,
+            0x0A, 0x00, 0x41, 0x00, 0x41, 0x01, 0x36, 0x42, 0x01, 0x00, 0x0B,
         ];
         let module = Module::decode(&bytes).unwrap();
         module.validate().unwrap();
@@ -2956,6 +2983,20 @@ mod tests {
             0x0A, 0x25, 0x02, 0x08, 0x00, 0x41, 0x00, 0xFD, 0x00, 0x04, 0x00, 0x0B, 0x1A, 0x00,
             0x41, 0x00, 0xFD, 0x0C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFD, 0x0B, 0x04, 0x00, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_v128_load_and_store_for_nonzero_memory_index() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x60, 0x00, 0x01,
+            0x7B, 0x60, 0x00, 0x00, 0x03, 0x03, 0x02, 0x00, 0x01, 0x05, 0x05, 0x02, 0x00, 0x01,
+            0x00, 0x01, 0x0A, 0x27, 0x02, 0x09, 0x00, 0x41, 0x00, 0xFD, 0x00, 0x44, 0x01, 0x00,
+            0x0B, 0x1B, 0x00, 0x41, 0x00, 0xFD, 0x0C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFD, 0x0B, 0x44, 0x01, 0x00,
+            0x0B,
         ];
         let module = Module::decode(&bytes).unwrap();
         module.validate().unwrap();
@@ -3476,31 +3517,23 @@ mod tests {
     }
 
     #[test]
-    fn reject_multiple_tables_across_imports_and_definitions() {
+    fn validate_multiple_tables_across_imports_and_definitions() {
         let bytes = [
             0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x02, 0x0B, 0x01, 0x03, b'e', b'n',
             b'v', 0x01, b't', 0x01, 0x70, 0x00, 0x01, 0x04, 0x04, 0x01, 0x70, 0x00, 0x01,
         ];
         let module = Module::decode(&bytes).unwrap();
-        let err = module.validate().unwrap_err();
-        assert!(matches!(
-            err.kind,
-            ValidationErrorKind::TooManyTables { count: 2 }
-        ));
+        module.validate().unwrap();
     }
 
     #[test]
-    fn reject_multiple_memories_across_imports_and_definitions() {
+    fn validate_multiple_memories_across_imports_and_definitions() {
         let bytes = [
             0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x02, 0x0C, 0x01, 0x03, b'e', b'n',
             b'v', 0x03, b'm', b'e', b'm', 0x02, 0x00, 0x01, 0x05, 0x03, 0x01, 0x00, 0x01,
         ];
         let module = Module::decode(&bytes).unwrap();
-        let err = module.validate().unwrap_err();
-        assert!(matches!(
-            err.kind,
-            ValidationErrorKind::TooManyMemories { count: 2 }
-        ));
+        module.validate().unwrap();
     }
 
     #[test]
@@ -3660,6 +3693,19 @@ mod tests {
             0x01, 0x0A, 0x1D, 0x02, 0x0A, 0x00, 0x41, 0x00, 0x25, 0x00, 0x1A, 0xFC, 0x10, 0x00,
             0x0B, 0x10, 0x00, 0x41, 0x00, 0xD0, 0x70, 0x26, 0x00, 0xD0, 0x70, 0x41, 0x01, 0xFC,
             0x0F, 0x00, 0x1A, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_table_get_set_size_and_grow_on_nonzero_table() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x60, 0x00, 0x01,
+            0x7F, 0x60, 0x00, 0x00, 0x03, 0x03, 0x02, 0x00, 0x01, 0x04, 0x07, 0x02, 0x70, 0x00,
+            0x01, 0x70, 0x00, 0x01, 0x0A, 0x1D, 0x02, 0x0A, 0x00, 0x41, 0x00, 0x25, 0x01, 0x1A,
+            0xFC, 0x10, 0x01, 0x0B, 0x10, 0x00, 0x41, 0x00, 0xD0, 0x70, 0x26, 0x01, 0xD0, 0x70,
+            0x41, 0x01, 0xFC, 0x0F, 0x01, 0x1A, 0x0B,
         ];
         let module = Module::decode(&bytes).unwrap();
         module.validate().unwrap();
