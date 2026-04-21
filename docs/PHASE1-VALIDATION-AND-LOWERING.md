@@ -202,6 +202,23 @@ Named-label invalid coverage now includes both:
 - `crates/baedeker-testdata/spec/wast-upstream/labels-invalid-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/labels-invalid-folded-syntax-subset.wast`
 
+Recent upstream-derived grounding also now covers foundational global/const-expression,
+reference-type / table-const-expression, local-variable, scalar memory, and call argument-flow
+validation via:
+
+- `crates/baedeker-testdata/spec/wast-upstream/global-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/data-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/elem-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/table-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/local-get-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/local-set-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/local-tee-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/load-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/store-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/align-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/call-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/call-indirect-subset.wast`
+
 Historical active upstream files have also been normalized to `-subset.wast` names; for example,
 `ref-func-undeclared-reference-subset.wast` is active coverage rather than a deferred skip.
 

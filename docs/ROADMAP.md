@@ -123,6 +123,17 @@ interpreter-first with AOT as a future layer.
     - `wast-upstream/labels-invalid-folded-syntax-subset.wast`
     - `wast-upstream/ref-func-undeclared-reference-subset.wast`
     - `wast-upstream/imports-unknown-type-subset.wast`
+    - `wast-upstream/global-subset.wast`
+    - `wast-upstream/data-subset.wast`
+    - `wast-upstream/elem-subset.wast`
+    - `wast-upstream/local-get-subset.wast`
+    - `wast-upstream/local-set-subset.wast`
+    - `wast-upstream/local-tee-subset.wast`
+    - `wast-upstream/load-subset.wast`
+    - `wast-upstream/store-subset.wast`
+    - `wast-upstream/align-subset.wast`
+    - `wast-upstream/call-subset.wast`
+    - `wast-upstream/call-indirect-subset.wast`
     - `wast-upstream/utf8-custom-section-id-subset.wast`
 
   - Historical active upstream files have been normalized to `-subset.wast` names; no active
@@ -130,6 +141,19 @@ interpreter-first with AOT as a future layer.
 
   - Remaining work is to continue integrating official `wast`/spec-suite cases while tightening the
     support/defer boundary and tracking unsupported areas explicitly.
+  - Recent upstream grounding has strengthened scalar memory structure/alignment coverage across
+    `memory-subset`, `load-subset`, `store-subset`, and `align-subset`.
+  - Recent upstream grounding has also broadened direct/indirect call argument-flow coverage via
+    `call-subset` and an expanded `call-indirect-subset`.
+  - Recent upstream grounding has also broadened global / const-expression coverage via expanded
+    `global-subset`, `data-subset`, and `elem-subset` files, including imported-const-global
+    offsets, reference-valued constant initializers, immutable-global writes, and representative
+    invalid constant-expression forms.
+  - Recent upstream grounding has also broadened reference-type / table-const-expression coverage
+    via expanded `table-subset` and `elem-subset` cases, including inline table element syntax,
+    `ref.func` / `ref.null` table initializers in supported sugar forms, imported `externref` /
+    `funcref` globals as constant element expressions, and corresponding mismatch / non-constant
+    invalid cases.
 
   - Current decode-vs-validate boundary in the raw fixture harness is:
     - `invalid-decode`: `Module::decode(...)` itself must fail.
@@ -191,7 +215,7 @@ More concretely, Phase 1 is done when all of the following are true:
 - `cargo test -p baedeker-core --test spec_wast`
 - `cargo test -p baedeker-core`
 - `cargo clippy -p baedeker-core --all-targets -- -D warnings`
-- Current `baedeker-core` unit test count: **202 passing**
+- Current `baedeker-core` unit test count: **203 passing**
 - Current spec-harness integration tests: **5 passing** (`spec`: 3, `spec_wast`: 2)
 
 ### Current branch snapshot

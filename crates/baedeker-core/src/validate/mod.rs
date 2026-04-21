@@ -2463,8 +2463,13 @@ fn finish_frame(
     }
 
     if state.reachability == Reachability::Reachable {
-        let found = state.operands.as_slice()[frame.outer_height..].to_vec();
-        if found != frame.end_types {
+        let operands = state.operands.as_slice();
+        let found = if operands.len() >= frame.outer_height {
+            operands[frame.outer_height..].to_vec()
+        } else {
+            Vec::new()
+        };
+        if operands.len() < frame.outer_height || found != frame.end_types {
             return Err(ValidationError {
                 offset: ByteOffset(offset),
                 function: Some(function),
@@ -3406,6 +3411,23 @@ mod tests {
             ValidationErrorKind::ControlResultTypeMismatch { expected, found }
                 if expected.is_empty()
                     && found == vec![ValType::Num(crate::types::NumType::F32)]
+        ));
+    }
+
+    #[test]
+    fn reject_block_end_after_consuming_outer_operand() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x03, 0x02, 0x01, 0x00, 0x05, 0x03, 0x01, 0x00, 0x00, 0x0A, 0x0D, 0x01, 0x0B, 0x00,
+            0x41, 0x00, 0x02, 0x40, 0x28, 0x00, 0x00, 0x1A, 0x0B, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(36));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::ControlResultTypeMismatch { expected, found }
+                if expected.is_empty() && found.is_empty()
         ));
     }
 
