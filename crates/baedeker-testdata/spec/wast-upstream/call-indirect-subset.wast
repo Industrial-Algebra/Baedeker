@@ -14,6 +14,36 @@
   (func (export "type-all-i32-i64") (result i64 i32)
     (call_indirect (type $swap-i32-i64) (i32.const 1) (i64.const 2) (i32.const 1))))
 
+(module
+  (type $ii-i (func (param i32 i32) (result i32)))
+
+  (table $t1 funcref (elem $f $g))
+  (table $t2 funcref (elem $h $i $j))
+  (table $t3 4 funcref)
+  (elem (table $t3) (i32.const 0) func $g $h)
+  (elem (table $t3) (i32.const 3) func $z)
+
+  (func $f (type $ii-i) (i32.add (local.get 0) (local.get 1)))
+  (func $g (type $ii-i) (i32.sub (local.get 0) (local.get 1)))
+  (func $h (type $ii-i) (i32.mul (local.get 0) (local.get 1)))
+  (func $i (type $ii-i) (i32.div_u (local.get 0) (local.get 1)))
+  (func $j (type $ii-i) (i32.rem_u (local.get 0) (local.get 1)))
+  (func $z)
+
+  (func (export "call-1") (param i32 i32 i32) (result i32)
+    (call_indirect $t1 (type $ii-i) (local.get 0) (local.get 1) (local.get 2)))
+  (func (export "call-2") (param i32 i32 i32) (result i32)
+    (call_indirect $t2 (type $ii-i) (local.get 0) (local.get 1) (local.get 2)))
+  (func (export "call-3") (param i32 i32 i32) (result i32)
+    (call_indirect $t3 (type $ii-i) (local.get 0) (local.get 1) (local.get 2))))
+
+(assert_invalid
+  (module
+    (type (func))
+    (func $no-table (call_indirect (type 0) (i32.const 0))))
+  "unknown table"
+)
+
 (assert_invalid
   (module
     (type $sig (func (param i32) (result i32)))
@@ -22,6 +52,14 @@
       i32.const 0
       i32.const 0
       call_indirect (type $sig)))
+  "type mismatch"
+)
+
+(assert_invalid
+  (module
+    (type (func))
+    (table 0 funcref)
+    (func $type-void-vs-num (i32.eqz (call_indirect (type 0) (i32.const 0)))))
   "type mismatch"
 )
 

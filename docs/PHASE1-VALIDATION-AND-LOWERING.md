@@ -186,6 +186,10 @@ For the raw `.wasm` fixture lane under `crates/baedeker-testdata/spec/`:
 
 Sibling raw-fixture `.meta` files can therefore pin not just `kind=` and `offset=`, but also:
 
+- current wrapped body-decode fixtures now use exact `offset=` together with `context=` and
+  `decode_kind=` for truncated bulk-memory, truncated memarg, unknown SIMD opcode, and unknown
+  opcode cases
+
 - `context=` — the underlying `DecodeContext`
 - `decode_kind=` — the underlying `DecodeErrorKind` when validation preserves a decode failure
 
@@ -203,13 +207,27 @@ Named-label invalid coverage now includes both:
 - `crates/baedeker-testdata/spec/wast-upstream/labels-invalid-folded-syntax-subset.wast`
 
 Recent upstream-derived grounding also now covers foundational global/const-expression,
-reference-type / table-const-expression, local-variable, scalar memory, and call argument-flow
-validation via:
+reference-type / table-const-expression, direct table instructions, bulk table ops,
+return/block/if result-flow, select/br_if/br_table expression positions, local-variable,
+scalar memory, and call argument-flow validation via:
 
 - `crates/baedeker-testdata/spec/wast-upstream/global-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/data-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/elem-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/table-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/return-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/block-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/if-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/select-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/br-if-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/br-table-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/table-get-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/table-set-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/table-grow-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/table-size-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/table-init-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/table-copy-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/table-fill-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/local-get-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/local-set-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/local-tee-subset.wast`
@@ -218,6 +236,9 @@ validation via:
 - `crates/baedeker-testdata/spec/wast-upstream/align-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/call-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/call-indirect-subset.wast`
+
+The `call-indirect-subset` lane now also includes broader multi-table / explicit-table-index
+interaction coverage rather than only a narrow single-table argument-flow slice.
 
 Historical active upstream files have also been normalized to `-subset.wast` names; for example,
 `ref-func-undeclared-reference-subset.wast` is active coverage rather than a deferred skip.

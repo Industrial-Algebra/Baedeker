@@ -134,6 +134,19 @@ interpreter-first with AOT as a future layer.
     - `wast-upstream/align-subset.wast`
     - `wast-upstream/call-subset.wast`
     - `wast-upstream/call-indirect-subset.wast`
+    - `wast-upstream/return-subset.wast`
+    - `wast-upstream/block-subset.wast`
+    - `wast-upstream/if-subset.wast`
+    - `wast-upstream/select-subset.wast`
+    - `wast-upstream/br-if-subset.wast`
+    - `wast-upstream/br-table-subset.wast`
+    - `wast-upstream/table-get-subset.wast`
+    - `wast-upstream/table-set-subset.wast`
+    - `wast-upstream/table-grow-subset.wast`
+    - `wast-upstream/table-size-subset.wast`
+    - `wast-upstream/table-init-subset.wast`
+    - `wast-upstream/table-copy-subset.wast`
+    - `wast-upstream/table-fill-subset.wast`
     - `wast-upstream/utf8-custom-section-id-subset.wast`
 
   - Historical active upstream files have been normalized to `-subset.wast` names; no active
@@ -154,6 +167,29 @@ interpreter-first with AOT as a future layer.
     `ref.func` / `ref.null` table initializers in supported sugar forms, imported `externref` /
     `funcref` globals as constant element expressions, and corresponding mismatch / non-constant
     invalid cases.
+  - Recent upstream grounding has also broadened direct table-instruction coverage via expanded
+    `table-get-subset`, `table-set-subset`, and `table-grow-subset` files plus new
+    `table-size-subset` coverage, including multi-table index selection, ref-typed operand/result
+    flow, and representative wrong-arity / wrong-type / wrong-result invalid cases.
+  - Recent upstream grounding has also broadened return / block / if result-flow coverage via
+    expanded `return-subset`, `block-subset`, and `if-subset` files, including nested result
+    propagation through structured control, `return` flowing through block/loop/if/call contexts,
+    and representative empty-vs-valued / void-vs-valued / malformed inline-type invalid cases.
+  - Recent upstream grounding has also broadened select / `br_if` / `br_table` expression-position
+    coverage via expanded `select-subset`, `br-if-subset`, and `br-table-subset` files, including
+    use inside loop/if/branch contexts and representative arity / operand-type / label-result
+    mismatch invalid cases.
+  - Recent upstream grounding has also broadened bulk table-op coverage via new
+    `table-init-subset`, `table-copy-subset`, and `table-fill-subset` files, including nonzero
+    table/element indices, `elem.drop`, same-table and cross-table copies, and representative
+    unknown-index / operand-type / result-shape invalid cases.
+  - Recent upstream grounding has also broadened `call_indirect` / table interaction coverage via
+    an expanded `call-indirect-subset` with multi-table valid modules, explicit nonzero table
+    selection, and representative no-table / wrong-result / wrong-argument invalid cases.
+  - Raw invalid body-fixture metadata is now tighter for decode-preserving validation failures:
+    the current wrapped `ValidationErrorKind::Decode` cases for truncated bulk-memory, truncated
+    memarg, and unknown SIMD opcode bodies now pin exact `offset=` alongside `context=` and
+    `decode_kind=`.
 
   - Current decode-vs-validate boundary in the raw fixture harness is:
     - `invalid-decode`: `Module::decode(...)` itself must fail.

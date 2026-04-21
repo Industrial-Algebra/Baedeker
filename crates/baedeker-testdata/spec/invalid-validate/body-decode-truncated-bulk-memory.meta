@@ -1,3 +1,4 @@
 kind=Decode
+offset=31
 context=CodeSection
 decode_kind=UnexpectedEof
