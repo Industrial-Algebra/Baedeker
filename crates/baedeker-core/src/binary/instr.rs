@@ -682,9 +682,18 @@ fn decode_simd_instr(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Inst
 }
 
 fn parse_memarg(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<MemArg, DecodeError> {
-    let align = decode_u32(cursor, base_offset)?;
+    let flags = decode_u32(cursor, base_offset)?;
+    let (align, memory) = if flags & (1 << 6) != 0 {
+        (flags ^ (1 << 6), MemIdx(decode_u32(cursor, base_offset)?))
+    } else {
+        (flags, MemIdx(0))
+    };
     let offset = decode_u32(cursor, base_offset)?;
-    Ok(MemArg { align, offset })
+    Ok(MemArg {
+        align,
+        offset,
+        memory,
+    })
 }
 
 fn parse_memarg_lane(
@@ -712,23 +721,7 @@ fn parse_v128_const(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<[u8; 
 }
 
 fn parse_mem_idx(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<MemIdx, DecodeError> {
-    let pos = cursor.position();
-    let byte = cursor.read_byte().map_err(|_| DecodeError {
-        offset: ByteOffset(base_offset + pos),
-        context: DecodeContext::CodeSection,
-        kind: DecodeErrorKind::UnexpectedEof,
-    })?;
-    if byte != 0x00 {
-        return Err(DecodeError {
-            offset: ByteOffset(base_offset + pos),
-            context: DecodeContext::CodeSection,
-            kind: DecodeErrorKind::UnexpectedByte {
-                expected: 0x00,
-                found: byte,
-            },
-        });
-    }
-    Ok(MemIdx(0))
+    Ok(MemIdx(decode_u32(cursor, base_offset)?))
 }
 
 fn parse_table_idx(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<TableIdx, DecodeError> {
@@ -970,27 +963,33 @@ mod tests {
                 Instr::GlobalSet(GlobalIdx(1)),
                 Instr::I32Load(MemArg {
                     align: 2,
-                    offset: 0
+                    offset: 0,
+                    memory: MemIdx(0),
                 }),
                 Instr::I32Load8S(MemArg {
                     align: 0,
-                    offset: 1
+                    offset: 1,
+                    memory: MemIdx(0),
                 }),
                 Instr::I64Load32U(MemArg {
                     align: 2,
-                    offset: 2
+                    offset: 2,
+                    memory: MemIdx(0),
                 }),
                 Instr::I32Store(MemArg {
                     align: 2,
-                    offset: 4
+                    offset: 4,
+                    memory: MemIdx(0),
                 }),
                 Instr::I32Store8(MemArg {
                     align: 0,
-                    offset: 8
+                    offset: 8,
+                    memory: MemIdx(0),
                 }),
                 Instr::I64Store32(MemArg {
                     align: 2,
-                    offset: 12
+                    offset: 12,
+                    memory: MemIdx(0),
                 }),
                 Instr::MemorySize(MemIdx(0)),
                 Instr::MemoryGrow(MemIdx(0)),
@@ -1188,6 +1187,73 @@ mod tests {
     }
 
     #[test]
+    fn decode_nonzero_memory_indices() {
+        let instrs = decode_instr_sequence(
+            &[
+                0x3F, 0x01, 0x40, 0x02, 0xFC, 0x08, 0x00, 0x03, 0xFC, 0x0A, 0x01, 0x02, 0xFC, 0x0B,
+                0x04, 0x0B,
+            ],
+            402,
+        )
+        .unwrap();
+        assert_eq!(
+            instrs,
+            vec![
+                Instr::MemorySize(MemIdx(1)),
+                Instr::MemoryGrow(MemIdx(2)),
+                Instr::MemoryInit(crate::types::DataIdx(0), MemIdx(3)),
+                Instr::MemoryCopy {
+                    dst: MemIdx(1),
+                    src: MemIdx(2),
+                },
+                Instr::MemoryFill(MemIdx(4)),
+                Instr::End,
+            ]
+        );
+    }
+
+    #[test]
+    fn decode_nonzero_memargs() {
+        let instrs = decode_instr_sequence(
+            &[
+                0x28, 0x42, 0x01, 0x05, 0x36, 0x42, 0x02, 0x00, 0xFD, 0x00, 0x44, 0x03, 0x00, 0xFD,
+                0x54, 0x40, 0x04, 0x01, 0x07, 0x0B,
+            ],
+            427,
+        )
+        .unwrap();
+        assert_eq!(
+            instrs,
+            vec![
+                Instr::I32Load(MemArg {
+                    align: 2,
+                    offset: 5,
+                    memory: MemIdx(1),
+                }),
+                Instr::I32Store(MemArg {
+                    align: 2,
+                    offset: 0,
+                    memory: MemIdx(2),
+                }),
+                Instr::V128Load(MemArg {
+                    align: 4,
+                    offset: 0,
+                    memory: MemIdx(3),
+                }),
+                Instr::V128Load8Lane {
+                    memarg: MemArg {
+                        align: 0,
+                        offset: 1,
+                        memory: MemIdx(4),
+                    },
+                    lane: 7,
+                },
+                Instr::End,
+            ]
+        );
+    }
+
+    #[test]
     fn decode_vector_memory_ops() {
         let instrs = decode_instr_sequence(
             &[
@@ -1203,29 +1269,34 @@ mod tests {
             vec![
                 Instr::V128Load(MemArg {
                     align: 4,
-                    offset: 0
+                    offset: 0,
+                    memory: MemIdx(0),
                 }),
                 Instr::V128Store(MemArg {
                     align: 4,
-                    offset: 0
+                    offset: 0,
+                    memory: MemIdx(0),
                 }),
                 Instr::V128Load8Lane {
                     memarg: MemArg {
                         align: 0,
-                        offset: 0
+                        offset: 0,
+                        memory: MemIdx(0),
                     },
                     lane: 15,
                 },
                 Instr::V128Store8Lane {
                     memarg: MemArg {
                         align: 0,
-                        offset: 0
+                        offset: 0,
+                        memory: MemIdx(0),
                     },
                     lane: 15,
                 },
                 Instr::V128Load32Zero(MemArg {
                     align: 2,
-                    offset: 0
+                    offset: 0,
+                    memory: MemIdx(0),
                 }),
                 Instr::V128Const([
                     0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C,

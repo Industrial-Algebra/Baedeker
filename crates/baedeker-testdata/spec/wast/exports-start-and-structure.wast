@@ -20,14 +20,14 @@
     (export "dup" (memory 0)))
   "duplicate export")
 
-(assert_invalid
-  (module
-    (memory 1)
-    (memory 1))
-  "multiple memories")
+(module
+  (memory 1)
+  (memory 2)
+  (export "m0" (memory 0))
+  (export "m1" (memory 1)))
 
-(assert_invalid
-  (module
-    (table 1 funcref)
-    (table 1 funcref))
-  "multiple tables")
+(module
+  (table 1 funcref)
+  (table 2 funcref)
+  (export "t0" (table 0))
+  (export "t1" (table 1)))

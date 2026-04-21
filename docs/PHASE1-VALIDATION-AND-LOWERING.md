@@ -173,13 +173,75 @@ This means the spec harness is not just a pass/fail runner. It is also a lightwe
 - what cases are intentionally deferred,
 - and why those deferred cases are not yet expected to pass.
 
+### Decode-vs-validate boundary in the current harness
+
+For the raw `.wasm` fixture lane under `crates/baedeker-testdata/spec/`:
+
+- `invalid-decode/` means `Module::decode(...)` itself must reject the bytes.
+- `invalid-validate/` means the module decodes structurally, then validation rejects it.
+- Some malformed function-body instruction streams intentionally live in `invalid-validate/`
+  because Baedeker keeps code bodies as raw bytes and only decodes instructions during
+  validation. Those cases surface as `ValidationErrorKind::Decode { .. }` rather than top-level
+  `DecodeError`.
+
+Sibling raw-fixture `.meta` files can therefore pin not just `kind=` and `offset=`, but also:
+
+- current wrapped body-decode fixtures now use exact `offset=` together with `context=` and
+  `decode_kind=` for truncated bulk-memory, truncated memarg, unknown SIMD opcode, and unknown
+  opcode cases
+
+- `context=` — the underlying `DecodeContext`
+- `decode_kind=` — the underlying `DecodeErrorKind` when validation preserves a decode failure
+
+That boundary is intentional: module/section structure is decoded first, while per-body instruction
+stream decoding remains part of the semantic validation front-end.
+
 ### Current deferred upstream-derived support matrix
 
-| Area | Representative upstream-derived file | Current handling | Why deferred | Likely next step |
-| --- | --- | --- | --- | --- |
-| Imports / type-use edge | `crates/baedeker-testdata/spec/wast-upstream/imports-unknown-type-skip.wast` | skipped via `.meta` | `wast` canonicalizes the type-use form before Baedeker sees the intended unknown-type validation failure | improve harness reporting around canonicalization mismatches or add a raw-binary counterpart for the exact failure path |
-| Named labels invalids | `crates/baedeker-testdata/spec/wast-upstream/labels-invalid-skip.wast` | skipped via `.meta` | upstream named-label invalid cases do not yet land cleanly on Baedeker's current validation/harness boundary | broaden label-oriented validation coverage and/or add narrower representative cases that preserve the intended failure |
-| Custom-section UTF-8 malformed path | `crates/baedeker-testdata/spec/wast-upstream/utf8-custom-section-id-skip.wast` | skipped via `.meta` | malformed UTF-8 custom-section-id case does not currently fail along the expected malformed path in the harness pipeline | tighten malformed-path accounting between `wast` encoding and Baedeker decode, or cover the exact malformed bytes with a raw fixture |
+There are currently no explicitly deferred upstream-derived `.wast` cases in the active support
+matrix.
+
+Named-label invalid coverage now includes both:
+
+- `crates/baedeker-testdata/spec/wast-upstream/labels-invalid-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/labels-invalid-folded-syntax-subset.wast`
+
+Recent upstream-derived grounding also now covers foundational global/const-expression,
+reference-type / table-const-expression, direct table instructions, bulk table ops,
+return/block/if result-flow, select/br_if/br_table expression positions, local-variable,
+scalar memory, and call argument-flow validation via:
+
+- `crates/baedeker-testdata/spec/wast-upstream/global-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/data-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/elem-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/table-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/return-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/block-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/if-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/select-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/br-if-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/br-table-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/table-get-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/table-set-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/table-grow-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/table-size-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/table-init-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/table-copy-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/table-fill-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/local-get-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/local-set-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/local-tee-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/load-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/store-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/align-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/call-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/call-indirect-subset.wast`
+
+The `call-indirect-subset` lane now also includes broader multi-table / explicit-table-index
+interaction coverage rather than only a narrow single-table argument-flow slice.
+
+Historical active upstream files have also been normalized to `-subset.wast` names; for example,
+`ref-func-undeclared-reference-subset.wast` is active coverage rather than a deferred skip.
 
 That bookkeeping matters for Phase 2 because the register-lowering work should inherit a semantic
 front-end with known boundaries, not an ambiguous notion of "probably enough validation."

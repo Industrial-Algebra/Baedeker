@@ -156,6 +156,30 @@ fn sections_in_valid_order(prev: SectionId, current: SectionId) -> bool {
         )
 }
 
+fn validate_custom_section_name(data: &[u8], base_offset: usize) -> Result<(), DecodeError> {
+    let mut cursor = Cursor::new(data);
+    let name_len = leb128::decode_u32(&mut cursor).map_err(|mut e| {
+        e.context = DecodeContext::SectionBody { id: 0 };
+        e.offset = ByteOffset(base_offset + e.offset.0);
+        e
+    })? as usize;
+
+    let name_offset = cursor.position();
+    let name = cursor.read_bytes(name_len).map_err(|_| DecodeError {
+        offset: ByteOffset(base_offset + name_offset),
+        context: DecodeContext::SectionBody { id: 0 },
+        kind: DecodeErrorKind::UnexpectedEof,
+    })?;
+
+    core::str::from_utf8(name).map_err(|_| DecodeError {
+        offset: ByteOffset(base_offset + name_offset),
+        context: DecodeContext::SectionBody { id: 0 },
+        kind: DecodeErrorKind::InvalidUtf8,
+    })?;
+
+    Ok(())
+}
+
 pub fn parse_sections<'a>(cursor: &mut Cursor<'a>) -> Result<Vec<RawSection<'a>>, DecodeError> {
     let mut sections = Vec::new();
     let mut last_non_custom: Option<(u8, u8)> = None;
@@ -223,6 +247,10 @@ pub fn parse_sections<'a>(cursor: &mut Cursor<'a>) -> Result<Vec<RawSection<'a>>
             context: DecodeContext::SectionBody { id: id_byte },
             kind: DecodeErrorKind::SectionOverflow,
         })?;
+
+        if id == SectionId::Custom {
+            validate_custom_section_name(data, content_offset)?;
+        }
 
         sections.push(RawSection {
             id,
@@ -379,11 +407,11 @@ mod tests {
         let data = [
             0x00, 0x61, 0x73, 0x6D, // magic
             0x01, 0x00, 0x00, 0x00, // version
-            0x00, 0x01, 0xFF, // custom section
+            0x00, 0x01, 0x00, // custom section with empty name
             0x01, 0x01, 0xAA, // type section
-            0x00, 0x01, 0xBB, // another custom section
+            0x00, 0x01, 0x00, // another custom section with empty name
             0x03, 0x01, 0xCC, // function section
-            0x00, 0x01, 0xDD, // yet another custom section
+            0x00, 0x01, 0x00, // yet another custom section with empty name
         ];
         let mut cursor = Cursor::new(&data);
         parse_preamble(&mut cursor).unwrap();
@@ -408,5 +436,19 @@ mod tests {
         parse_preamble(&mut cursor).unwrap();
         let err = parse_sections(&mut cursor).unwrap_err();
         assert!(matches!(err.kind, DecodeErrorKind::SectionOverflow));
+    }
+
+    #[test]
+    fn reject_invalid_utf8_custom_section_name() {
+        let data = [
+            0x00, 0x61, 0x73, 0x6D, // magic
+            0x01, 0x00, 0x00, 0x00, // version
+            0x00, 0x02, 0x01, 0x80, // custom section with 1-byte invalid UTF-8 name
+        ];
+        let mut cursor = Cursor::new(&data);
+        parse_preamble(&mut cursor).unwrap();
+        let err = parse_sections(&mut cursor).unwrap_err();
+        assert!(matches!(err.kind, DecodeErrorKind::InvalidUtf8));
+        assert!(matches!(err.context, DecodeContext::SectionBody { id: 0 }));
     }
 }

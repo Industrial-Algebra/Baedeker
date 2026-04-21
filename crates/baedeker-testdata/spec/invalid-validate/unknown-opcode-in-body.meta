@@ -1,2 +1,4 @@
 kind=Decode
+context=CodeSection
+decode_kind=UnknownOpcode
 offset=23

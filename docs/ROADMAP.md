@@ -86,13 +86,17 @@ interpreter-first with AOT as a future layer.
 - [~] Expand instruction coverage from the current strong subset toward full WebAssembly 3.0
   validation.
   - Current support now includes structured control flow, direct calls and `call_indirect`,
-    locals, globals, scalar memory load/store families, SIMD/vector memory operations and lane
-    checks, bulk-memory and table operations, typed `select`, `br_table`, a substantially
-    broader numeric operator subset across i32/i64/f32/f64 comparisons and arithmetic, the
-    core conversion / reinterpretation families, integer sign-extension operators, saturating
-    float-to-int truncation variants, and an expanded reference/const-expression subset
-    including `ref.null`, `ref.func`, `ref.is_null`, and imported immutable `global.get` in
-    more const-expression positions.
+    locals, globals, multi-memory / multi-table module validation, scalar memory load/store
+    families, SIMD/vector memory operations and lane checks, explicit nonzero memory-index
+    validation across `memory.size` / `memory.grow`, bulk-memory instructions, scalar memory
+    ops, and SIMD memory ops, typed `select`, `br_table`, a substantially broader numeric
+    operator subset across i32/i64/f32/f64 comparisons and arithmetic, the core conversion /
+    reinterpretation families, integer sign-extension operators, saturating float-to-int
+    truncation variants, and an expanded reference/const-expression subset including `ref.null`,
+    `ref.func`, `ref.is_null`, imported immutable `global.get` in more const-expression
+    positions, and declared-function-reference checking for `ref.func` in function bodies with
+    declaration sources currently grounded in exports, global initializer `ref.func`, and
+    element segments.
   - Major remaining gaps are now broader reference-type-driven validation paths beyond the
     current subset, additional proposal-era completeness, and external spec-suite
     integration/backfill rather than the main scalar numeric families.
@@ -105,22 +109,94 @@ interpreter-first with AOT as a future layer.
   tests.
   - Baedeker now has a filesystem-backed spec fixture harness with `valid`, `invalid-decode`, and
     `invalid-validate` buckets plus optional `.meta` files for exact error `kind`/`offset`
-    assertions.
+    assertions, plus `context=` and `decode_kind=` for cases where validation intentionally
+    preserves an underlying body-decode failure as `ValidationErrorKind::Decode`.
   - Baedeker also now has a separate `wast` integration path with curated local files plus a broad
     `wast-upstream/` directory of small upstream-derived official-spec subsets.
   - Upstream-derived `.wast` coverage now uses sibling `.meta` files with `skip=...` to record
     intentionally deferred or currently mismatched cases explicitly, so the harness acts as both a
     runner and a lightweight support ledger for spec-suite friction points.
-  - Current explicitly deferred upstream-derived cases are:
+  - There are currently no explicitly deferred upstream-derived cases in the support matrix.
 
-    | Upstream area | Representative file | Current status | Reason |
-    | --- | --- | --- | --- |
-    | imports | `imports-unknown-type-skip.wast` | deferred | `wast` canonicalizes the case before Baedeker sees the intended unknown-type validation failure |
-    | labels | `labels-invalid-skip.wast` | deferred | named-label invalids do not yet map cleanly onto Baedeker's current validation/harness boundary |
-    | custom section UTF-8 | `utf8-custom-section-id-skip.wast` | deferred | malformed UTF-8 custom-section-id case does not currently fail along the expected malformed path in the harness |
+  - Active upstream-derived subsets now include:
+    - `wast-upstream/labels-invalid-subset.wast`
+    - `wast-upstream/labels-invalid-folded-syntax-subset.wast`
+    - `wast-upstream/ref-func-undeclared-reference-subset.wast`
+    - `wast-upstream/imports-unknown-type-subset.wast`
+    - `wast-upstream/global-subset.wast`
+    - `wast-upstream/data-subset.wast`
+    - `wast-upstream/elem-subset.wast`
+    - `wast-upstream/local-get-subset.wast`
+    - `wast-upstream/local-set-subset.wast`
+    - `wast-upstream/local-tee-subset.wast`
+    - `wast-upstream/load-subset.wast`
+    - `wast-upstream/store-subset.wast`
+    - `wast-upstream/align-subset.wast`
+    - `wast-upstream/call-subset.wast`
+    - `wast-upstream/call-indirect-subset.wast`
+    - `wast-upstream/return-subset.wast`
+    - `wast-upstream/block-subset.wast`
+    - `wast-upstream/if-subset.wast`
+    - `wast-upstream/select-subset.wast`
+    - `wast-upstream/br-if-subset.wast`
+    - `wast-upstream/br-table-subset.wast`
+    - `wast-upstream/table-get-subset.wast`
+    - `wast-upstream/table-set-subset.wast`
+    - `wast-upstream/table-grow-subset.wast`
+    - `wast-upstream/table-size-subset.wast`
+    - `wast-upstream/table-init-subset.wast`
+    - `wast-upstream/table-copy-subset.wast`
+    - `wast-upstream/table-fill-subset.wast`
+    - `wast-upstream/utf8-custom-section-id-subset.wast`
+
+  - Historical active upstream files have been normalized to `-subset.wast` names; no active
+    upstream-derived coverage currently retains the old `-skip` suffix.
 
   - Remaining work is to continue integrating official `wast`/spec-suite cases while tightening the
     support/defer boundary and tracking unsupported areas explicitly.
+  - Recent upstream grounding has strengthened scalar memory structure/alignment coverage across
+    `memory-subset`, `load-subset`, `store-subset`, and `align-subset`.
+  - Recent upstream grounding has also broadened direct/indirect call argument-flow coverage via
+    `call-subset` and an expanded `call-indirect-subset`.
+  - Recent upstream grounding has also broadened global / const-expression coverage via expanded
+    `global-subset`, `data-subset`, and `elem-subset` files, including imported-const-global
+    offsets, reference-valued constant initializers, immutable-global writes, and representative
+    invalid constant-expression forms.
+  - Recent upstream grounding has also broadened reference-type / table-const-expression coverage
+    via expanded `table-subset` and `elem-subset` cases, including inline table element syntax,
+    `ref.func` / `ref.null` table initializers in supported sugar forms, imported `externref` /
+    `funcref` globals as constant element expressions, and corresponding mismatch / non-constant
+    invalid cases.
+  - Recent upstream grounding has also broadened direct table-instruction coverage via expanded
+    `table-get-subset`, `table-set-subset`, and `table-grow-subset` files plus new
+    `table-size-subset` coverage, including multi-table index selection, ref-typed operand/result
+    flow, and representative wrong-arity / wrong-type / wrong-result invalid cases.
+  - Recent upstream grounding has also broadened return / block / if result-flow coverage via
+    expanded `return-subset`, `block-subset`, and `if-subset` files, including nested result
+    propagation through structured control, `return` flowing through block/loop/if/call contexts,
+    and representative empty-vs-valued / void-vs-valued / malformed inline-type invalid cases.
+  - Recent upstream grounding has also broadened select / `br_if` / `br_table` expression-position
+    coverage via expanded `select-subset`, `br-if-subset`, and `br-table-subset` files, including
+    use inside loop/if/branch contexts and representative arity / operand-type / label-result
+    mismatch invalid cases.
+  - Recent upstream grounding has also broadened bulk table-op coverage via new
+    `table-init-subset`, `table-copy-subset`, and `table-fill-subset` files, including nonzero
+    table/element indices, `elem.drop`, same-table and cross-table copies, and representative
+    unknown-index / operand-type / result-shape invalid cases.
+  - Recent upstream grounding has also broadened `call_indirect` / table interaction coverage via
+    an expanded `call-indirect-subset` with multi-table valid modules, explicit nonzero table
+    selection, and representative no-table / wrong-result / wrong-argument invalid cases.
+  - Raw invalid body-fixture metadata is now tighter for decode-preserving validation failures:
+    the current wrapped `ValidationErrorKind::Decode` cases for truncated bulk-memory, truncated
+    memarg, and unknown SIMD opcode bodies now pin exact `offset=` alongside `context=` and
+    `decode_kind=`.
+
+  - Current decode-vs-validate boundary in the raw fixture harness is:
+    - `invalid-decode`: `Module::decode(...)` itself must fail.
+    - `invalid-validate`: module decoding succeeds, then validation fails.
+    - malformed function-body instruction streams that are only decoded during validation belong in
+      `invalid-validate` and should assert `kind=Decode` plus nested `context=` / `decode_kind=`
+      metadata where useful.
 
 #### Revised Phase 1 completion definition
 Phase 1 is complete only when Baedeker provides a robust, diagnostics-oriented validation front-end
@@ -154,9 +230,9 @@ More concretely, Phase 1 is done when all of the following are true:
   `ref.func` / `ref.is_null` and imported-const-`global.get` subset.
 - [ ] Integrate more official spec-suite `assert_invalid` / `assert_malformed` style coverage and
   keep compliance/defer status explicit.
-- [ ] Continue converting known upstream friction points into explicit tracked deferred cases
-  (`.meta` `skip=...`) or implemented support, so Phase 2 builds on a crisp semantic contract
-  rather than assumptions.
+- [ ] Continue converting any newly discovered upstream friction points into either explicit tracked
+  deferred cases (`.meta` `skip=...`) or implemented support, so Phase 2 builds on a crisp
+  semantic contract rather than assumptions.
 
 ### Recommended next steps
 1. Prioritize the highest-leverage remaining semantic gaps for both full validation and future
@@ -172,18 +248,15 @@ More concretely, Phase 1 is done when all of the following are true:
 ### Current verification snapshot
 - `cargo fmt -- --check`
 - `cargo test -p baedeker-core --test spec`
-- `cargo test`
-- `cargo clippy --all-targets -- -D warnings`
-- Current `baedeker-core` unit test count: **169 passing**
-- Current spec harness integration tests: **3 passing**
+- `cargo test -p baedeker-core --test spec_wast`
+- `cargo test -p baedeker-core`
+- `cargo clippy -p baedeker-core --all-targets -- -D warnings`
+- Current `baedeker-core` unit test count: **203 passing**
+- Current spec-harness integration tests: **5 passing** (`spec`: 3, `spec_wast`: 2)
 
 ### Current branch snapshot
-Recent Phase 1 commits on `feature/phase1-type-section` include:
-- `c6d8dc7` — `feat: improve validation diagnostics`
-- `ec26942` — `feat: expand validation diagnostics`
-- `266eaa0` — `feat: validate global initializer expressions`
-- `cb21973` — `feat: parse defined memory section`
-- `9a2fb76` — `feat: enrich index diagnostics`
+Current Phase 1 closure work continues on `feat/phase-1-part-2-closures`, with the validator and
+fixture/docs support matrix kept in sync as upstream-derived skips are narrowed or retired.
 
 ### Phase 1 note
 The validator stack remains the spec-facing abstract operand/control stack used for proof of
