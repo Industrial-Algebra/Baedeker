@@ -191,6 +191,9 @@ Sibling raw-fixture `.meta` files can therefore pin not just `kind=` and `offset
   opcode cases
 - representative raw bulk-memory invalid fixtures now also pin exact `offset=` for `memory.init`,
   `memory.copy`, `memory.fill`, and `data.drop` validation failures
+- representative raw initialization/const-expression invalid fixtures now also pin exact `offset=`
+  for global-init, active-data, element-expression, active-element-table, and `table.init`
+  validation failures
 
 - `context=` — the underlying `DecodeContext`
 - `decode_kind=` — the underlying `DecodeErrorKind` when validation preserves a decode failure
@@ -214,8 +217,11 @@ return/block/if result-flow, select/br_if/br_table expression positions, local-v
 scalar memory, and call argument-flow validation via:
 
 - `crates/baedeker-testdata/spec/wast-upstream/global-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/global-ref-init-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/data-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/data-memory-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/elem-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/elem-table-init-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/table-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/return-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/block-subset.wast`
@@ -250,6 +256,11 @@ Bulk-memory grounding now also includes dedicated `memory-init-subset`, `data-dr
 `memory-copy-subset`, and `memory-fill-subset` files, covering explicit nonzero memory indices,
 active/passive data-segment interaction, same-memory and cross-memory copy shapes, and
 representative unknown-index / operand-type invalids.
+
+Const-expression / initialization grounding now also includes `global-ref-init-subset`,
+`data-memory-subset`, and `elem-table-init-subset`, covering imported immutable ref globals in
+new global-initializer positions, explicit-memory active data syntax, and nonzero-table element
+initialization with imported-global offsets and ref-valued expressions.
 
 Historical active upstream files have also been normalized to `-subset.wast` names; for example,
 `ref-func-undeclared-reference-subset.wast` is active coverage rather than a deferred skip.

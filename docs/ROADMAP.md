@@ -124,8 +124,11 @@ interpreter-first with AOT as a future layer.
     - `wast-upstream/ref-func-undeclared-reference-subset.wast`
     - `wast-upstream/imports-unknown-type-subset.wast`
     - `wast-upstream/global-subset.wast`
+    - `wast-upstream/global-ref-init-subset.wast`
     - `wast-upstream/data-subset.wast`
+    - `wast-upstream/data-memory-subset.wast`
     - `wast-upstream/elem-subset.wast`
+    - `wast-upstream/elem-table-init-subset.wast`
     - `wast-upstream/local-get-subset.wast`
     - `wast-upstream/local-set-subset.wast`
     - `wast-upstream/local-tee-subset.wast`
@@ -171,6 +174,11 @@ interpreter-first with AOT as a future layer.
     `global-subset`, `data-subset`, and `elem-subset` files, including imported-const-global
     offsets, reference-valued constant initializers, immutable-global writes, and representative
     invalid constant-expression forms.
+  - Recent upstream grounding has also broadened const-expression / initialization coverage via new
+    `global-ref-init-subset`, `data-memory-subset`, and `elem-table-init-subset` files, including
+    imported immutable ref globals in global initializers, explicit memory selection in active data
+    segments, and nonzero-table element initialization with imported-global offsets and ref-valued
+    expressions.
   - Recent upstream grounding has also broadened reference-type / table-const-expression coverage
     via expanded `table-subset` and `elem-subset` cases, including inline table element syntax,
     `ref.func` / `ref.null` table initializers in supported sugar forms, imported `externref` /
@@ -201,6 +209,9 @@ interpreter-first with AOT as a future layer.
     `decode_kind=`.
   - Raw bulk-memory invalid fixtures now also pin exact `offset=` for representative
     `memory.init`, `memory.copy`, `memory.fill`, and `data.drop` validation failures.
+  - Raw initialization/const-expression invalid fixtures now also pin exact `offset=` for
+    representative global-init, active-data, element-expression, active-element-table, and
+    `table.init` validation failures.
 
   - Current decode-vs-validate boundary in the raw fixture harness is:
     - `invalid-decode`: `Module::decode(...)` itself must fail.
