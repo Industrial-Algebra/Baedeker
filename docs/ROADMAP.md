@@ -154,6 +154,9 @@ interpreter-first with AOT as a future layer.
     - `wast-upstream/table-set-subset.wast`
     - `wast-upstream/table-grow-subset.wast`
     - `wast-upstream/table-size-subset.wast`
+    - `wast-upstream/table-ref-flow-subset.wast`
+    - `wast-upstream/table-grow-ref-subset.wast`
+    - `wast-upstream/ref-func-table-call-subset.wast`
     - `wast-upstream/table-init-subset.wast`
     - `wast-upstream/table-copy-subset.wast`
     - `wast-upstream/table-fill-subset.wast`
@@ -210,6 +213,11 @@ interpreter-first with AOT as a future layer.
   - Recent upstream grounding has also broadened `call_indirect` / table interaction coverage via
     an expanded `call-indirect-subset` with multi-table valid modules, explicit nonzero table
     selection, and representative no-table / wrong-result / wrong-argument invalid cases.
+  - Recent upstream grounding has also broadened call / table / reference interaction coverage via
+    new `table-ref-flow-subset`, `table-grow-ref-subset`, and `ref-func-table-call-subset` files,
+    including `table.get -> table.set` round-trips, `table.grow` with `ref.null` / `ref.func`,
+    `ref.func`-driven `call_indirect` through mutable/global/table flows, and representative
+    ref-type mismatch invalid cases.
   - Raw invalid body-fixture metadata is now tighter for decode-preserving validation failures:
     the current wrapped `ValidationErrorKind::Decode` cases for truncated bulk-memory, truncated
     memarg, and unknown SIMD opcode bodies now pin exact `offset=` alongside `context=` and
@@ -221,6 +229,8 @@ interpreter-first with AOT as a future layer.
     `table.init` validation failures.
   - Raw control invalid fixtures now also pin exact `offset=` for representative
     `call_indirect` table-type validation failures.
+  - Raw table/reference invalid fixtures now also pin exact `offset=` for representative unknown
+    exported-table index failures.
 
   - Current decode-vs-validate boundary in the raw fixture harness is:
     - `invalid-decode`: `Module::decode(...)` itself must fail.

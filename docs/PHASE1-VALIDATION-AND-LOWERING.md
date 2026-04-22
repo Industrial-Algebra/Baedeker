@@ -196,6 +196,8 @@ Sibling raw-fixture `.meta` files can therefore pin not just `kind=` and `offset
   validation failures
 - representative raw control invalid fixtures now also pin exact `offset=` for `call_indirect`
   table-type validation failures
+- representative raw table/reference invalid fixtures now also pin exact `offset=` for unknown
+  exported-table index failures
 
 - `context=` — the underlying `DecodeContext`
 - `decode_kind=` — the underlying `DecodeErrorKind` when validation preserves a decode failure
@@ -238,6 +240,9 @@ scalar memory, and call argument-flow validation via:
 - `crates/baedeker-testdata/spec/wast-upstream/table-set-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/table-grow-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/table-size-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/table-ref-flow-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/table-grow-ref-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/ref-func-table-call-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/table-init-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/table-copy-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/table-fill-subset.wast`
@@ -270,6 +275,11 @@ initialization with imported-global offsets and ref-valued expressions.
 Control-expression grounding now also includes `loop-subset`, `unreachable-subset`, and
 `switch-subset`, covering loop-valued expression positions, stack-polymorphic unreachable use in
 control/call/memory contexts, and additional `br_table`-driven structured-control nesting.
+
+Call / table / reference interaction grounding now also includes `table-ref-flow-subset`,
+`table-grow-ref-subset`, and `ref-func-table-call-subset`, covering `table.get -> table.set`
+round-trips, `table.grow` with `ref.null` / `ref.func`, and `ref.func`-driven `call_indirect`
+through mutable/global/table flows.
 
 Historical active upstream files have also been normalized to `-subset.wast` names; for example,
 `ref-func-undeclared-reference-subset.wast` is active coverage rather than a deferred skip.
