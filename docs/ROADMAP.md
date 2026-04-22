@@ -144,6 +144,9 @@ interpreter-first with AOT as a future layer.
     - `wast-upstream/return-subset.wast`
     - `wast-upstream/block-subset.wast`
     - `wast-upstream/if-subset.wast`
+    - `wast-upstream/loop-subset.wast`
+    - `wast-upstream/unreachable-subset.wast`
+    - `wast-upstream/switch-subset.wast`
     - `wast-upstream/select-subset.wast`
     - `wast-upstream/br-if-subset.wast`
     - `wast-upstream/br-table-subset.wast`
@@ -196,6 +199,10 @@ interpreter-first with AOT as a future layer.
     coverage via expanded `select-subset`, `br-if-subset`, and `br-table-subset` files, including
     use inside loop/if/branch contexts and representative arity / operand-type / label-result
     mismatch invalid cases.
+  - Recent upstream grounding has also broadened control-expression saturation via new
+    `loop-subset`, `unreachable-subset`, and `switch-subset` files, including loop-valued
+    expression positions, stack-polymorphic unreachable use in control/call/memory contexts, and
+    additional `br_table`-driven structured-control nesting.
   - Recent upstream grounding has also broadened bulk table-op coverage via new
     `table-init-subset`, `table-copy-subset`, and `table-fill-subset` files, including nonzero
     table/element indices, `elem.drop`, same-table and cross-table copies, and representative
@@ -212,6 +219,8 @@ interpreter-first with AOT as a future layer.
   - Raw initialization/const-expression invalid fixtures now also pin exact `offset=` for
     representative global-init, active-data, element-expression, active-element-table, and
     `table.init` validation failures.
+  - Raw control invalid fixtures now also pin exact `offset=` for representative
+    `call_indirect` table-type validation failures.
 
   - Current decode-vs-validate boundary in the raw fixture harness is:
     - `invalid-decode`: `Module::decode(...)` itself must fail.

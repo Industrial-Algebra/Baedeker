@@ -194,6 +194,8 @@ Sibling raw-fixture `.meta` files can therefore pin not just `kind=` and `offset
 - representative raw initialization/const-expression invalid fixtures now also pin exact `offset=`
   for global-init, active-data, element-expression, active-element-table, and `table.init`
   validation failures
+- representative raw control invalid fixtures now also pin exact `offset=` for `call_indirect`
+  table-type validation failures
 
 - `context=` — the underlying `DecodeContext`
 - `decode_kind=` — the underlying `DecodeErrorKind` when validation preserves a decode failure
@@ -226,6 +228,9 @@ scalar memory, and call argument-flow validation via:
 - `crates/baedeker-testdata/spec/wast-upstream/return-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/block-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/if-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/loop-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/unreachable-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/switch-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/select-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/br-if-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/br-table-subset.wast`
@@ -261,6 +266,10 @@ Const-expression / initialization grounding now also includes `global-ref-init-s
 `data-memory-subset`, and `elem-table-init-subset`, covering imported immutable ref globals in
 new global-initializer positions, explicit-memory active data syntax, and nonzero-table element
 initialization with imported-global offsets and ref-valued expressions.
+
+Control-expression grounding now also includes `loop-subset`, `unreachable-subset`, and
+`switch-subset`, covering loop-valued expression positions, stack-polymorphic unreachable use in
+control/call/memory contexts, and additional `br_table`-driven structured-control nesting.
 
 Historical active upstream files have also been normalized to `-subset.wast` names; for example,
 `ref-func-undeclared-reference-subset.wast` is active coverage rather than a deferred skip.
