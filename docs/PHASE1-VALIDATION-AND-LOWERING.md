@@ -198,6 +198,10 @@ Sibling raw-fixture `.meta` files can therefore pin not just `kind=` and `offset
   table-type validation failures
 - representative raw table/reference invalid fixtures now also pin exact `offset=` for unknown
   exported-table index failures
+- the full raw `invalid-decode/` corpus now pins both exact `offset=` and direct decode
+  `context=`, and `crates/baedeker-core/tests/spec.rs` now asserts that all raw invalid fixtures
+  carry complete metadata (`kind`/`offset`, plus `context` for direct decode failures and nested
+  `decode_kind` for decode-preserving validation failures)
 
 - `context=` — the underlying `DecodeContext`
 - `decode_kind=` — the underlying `DecodeErrorKind` when validation preserves a decode failure

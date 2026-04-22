@@ -231,6 +231,51 @@ fn assert_decode_meta(path: &Path, err: &baedeker_core::error::DecodeError, meta
     }
 }
 
+fn assert_invalid_case_meta(path: &Path, expected: Expectation) {
+    let meta = read_case_meta(path).unwrap_or_else(|| {
+        panic!(
+            "{}: invalid cases must provide .meta assertions",
+            path.display()
+        )
+    });
+
+    assert!(
+        meta.kind.is_some(),
+        "{}: invalid-case metadata must specify kind=...",
+        path.display()
+    );
+    assert!(
+        meta.offset.is_some(),
+        "{}: invalid-case metadata must specify offset=...",
+        path.display()
+    );
+
+    match expected {
+        Expectation::DecodeError => {
+            assert!(
+                meta.context.is_some(),
+                "{}: invalid-decode metadata must specify context=...",
+                path.display()
+            );
+        }
+        Expectation::ValidationError => {
+            if meta.kind.as_deref() == Some("Decode") {
+                assert!(
+                    meta.context.is_some(),
+                    "{}: decode-preserving invalid-validate metadata must specify context=...",
+                    path.display()
+                );
+                assert!(
+                    meta.decode_kind.is_some(),
+                    "{}: decode-preserving invalid-validate metadata must specify decode_kind=...",
+                    path.display()
+                );
+            }
+        }
+        Expectation::Valid => unreachable!("only invalid cases require metadata assertions"),
+    }
+}
+
 fn run_case(path: &Path, expected: Expectation) {
     let bytes = baedeker_testdata::spec_case_bytes(path);
     let meta = read_case_meta(path);
@@ -285,6 +330,7 @@ fn spec_valid_groundwork_cases() {
 #[test]
 fn spec_invalid_decode_groundwork_cases() {
     for path in baedeker_testdata::spec_cases("invalid-decode") {
+        assert_invalid_case_meta(&path, Expectation::DecodeError);
         run_case(&path, Expectation::DecodeError);
     }
 }
@@ -292,6 +338,7 @@ fn spec_invalid_decode_groundwork_cases() {
 #[test]
 fn spec_invalid_validate_groundwork_cases() {
     for path in baedeker_testdata::spec_cases("invalid-validate") {
+        assert_invalid_case_meta(&path, Expectation::ValidationError);
         run_case(&path, Expectation::ValidationError);
     }
 }

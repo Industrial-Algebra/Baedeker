@@ -231,6 +231,10 @@ interpreter-first with AOT as a future layer.
     `call_indirect` table-type validation failures.
   - Raw table/reference invalid fixtures now also pin exact `offset=` for representative unknown
     exported-table index failures.
+  - Raw malformed/decode fixtures now pin both exact `offset=` and direct decode `context=` across
+    the full `invalid-decode/` corpus, and `spec.rs` now asserts that all raw invalid fixtures
+    carry complete metadata (`kind`/`offset`, plus `context` for direct decode failures and nested
+    `decode_kind` for decode-preserving validation failures).
 
   - Current decode-vs-validate boundary in the raw fixture harness is:
     - `invalid-decode`: `Module::decode(...)` itself must fail.
