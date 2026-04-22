@@ -121,6 +121,9 @@ interpreter-first with AOT as a future layer.
   - Active upstream-derived subsets now include:
     - `wast-upstream/labels-invalid-subset.wast`
     - `wast-upstream/labels-invalid-folded-syntax-subset.wast`
+    - `wast-upstream/ref-null-subset.wast`
+    - `wast-upstream/ref-select-subset.wast`
+    - `wast-upstream/ref-control-subset.wast`
     - `wast-upstream/ref-func-undeclared-reference-subset.wast`
     - `wast-upstream/imports-unknown-type-subset.wast`
     - `wast-upstream/global-subset.wast`
@@ -232,6 +235,11 @@ interpreter-first with AOT as a future layer.
     operators, float compare/unary/binary families, saturating truncations, reinterpretation and
     conversion paths, `v128.const`, SIMD load/store/alignment/lane validation, and nonzero-memory
     SIMD lane syntax.
+  - Recent upstream grounding has also broadened reference/control proposal-edge coverage via new
+    `ref-null-subset`, `ref-select-subset`, and `ref-control-subset` files, including
+    `ref.null` in function/global/control positions, typed `select` over `funcref`/`externref`,
+    `ref.func` / `ref.null` joins, and reference-valued block/if result flow with representative
+    ref-type mismatch invalid cases.
   - Raw invalid body-fixture metadata is now tighter for decode-preserving validation failures:
     the current wrapped `ValidationErrorKind::Decode` cases for truncated bulk-memory, truncated
     memarg, and unknown SIMD opcode bodies now pin exact `offset=` alongside `context=` and

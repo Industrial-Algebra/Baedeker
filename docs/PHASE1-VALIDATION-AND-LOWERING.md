@@ -231,6 +231,9 @@ scalar memory, and call argument-flow validation via:
 - `crates/baedeker-testdata/spec/wast-upstream/elem-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/elem-table-init-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/table-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/ref-null-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/ref-select-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/ref-control-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/return-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/block-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/if-subset.wast`
@@ -298,6 +301,11 @@ Numeric / SIMD / proposal-surface grounding now also includes `integer-numeric-s
 unary/binary/compare/sign-extension operators, float compare/unary/binary families, saturating
 truncation plus reinterpretation/conversion paths, `v128.const`, SIMD load/store/alignment/lane
 validation, and nonzero-memory SIMD lane syntax.
+
+Reference/control proposal-edge grounding now also includes `ref-null-subset`,
+`ref-select-subset`, and `ref-control-subset`, covering `ref.null` in function/global/control
+positions, typed `select` over `funcref`/`externref`, `ref.func` / `ref.null` joins, and
+reference-valued block/if result flow.
 
 Historical active upstream files have also been normalized to `-subset.wast` names; for example,
 `ref-func-undeclared-reference-subset.wast` is active coverage rather than a deferred skip.
