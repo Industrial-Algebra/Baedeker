@@ -132,6 +132,10 @@ interpreter-first with AOT as a future layer.
     - `wast-upstream/load-subset.wast`
     - `wast-upstream/store-subset.wast`
     - `wast-upstream/align-subset.wast`
+    - `wast-upstream/memory-init-subset.wast`
+    - `wast-upstream/data-drop-subset.wast`
+    - `wast-upstream/memory-copy-subset.wast`
+    - `wast-upstream/memory-fill-subset.wast`
     - `wast-upstream/call-subset.wast`
     - `wast-upstream/call-indirect-subset.wast`
     - `wast-upstream/return-subset.wast`
@@ -156,6 +160,11 @@ interpreter-first with AOT as a future layer.
     support/defer boundary and tracking unsupported areas explicitly.
   - Recent upstream grounding has strengthened scalar memory structure/alignment coverage across
     `memory-subset`, `load-subset`, `store-subset`, and `align-subset`.
+  - Recent upstream grounding has also broadened bulk memory coverage via new
+    `memory-init-subset`, `data-drop-subset`, `memory-copy-subset`, and `memory-fill-subset`
+    files, including explicit nonzero memory selection, active/passive data-segment use, same-
+    memory and cross-memory copies, and representative unknown-index / missing-data-count /
+    operand-type invalid cases.
   - Recent upstream grounding has also broadened direct/indirect call argument-flow coverage via
     `call-subset` and an expanded `call-indirect-subset`.
   - Recent upstream grounding has also broadened global / const-expression coverage via expanded
@@ -190,6 +199,8 @@ interpreter-first with AOT as a future layer.
     the current wrapped `ValidationErrorKind::Decode` cases for truncated bulk-memory, truncated
     memarg, and unknown SIMD opcode bodies now pin exact `offset=` alongside `context=` and
     `decode_kind=`.
+  - Raw bulk-memory invalid fixtures now also pin exact `offset=` for representative
+    `memory.init`, `memory.copy`, `memory.fill`, and `data.drop` validation failures.
 
   - Current decode-vs-validate boundary in the raw fixture harness is:
     - `invalid-decode`: `Module::decode(...)` itself must fail.

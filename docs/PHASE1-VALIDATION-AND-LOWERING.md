@@ -189,6 +189,8 @@ Sibling raw-fixture `.meta` files can therefore pin not just `kind=` and `offset
 - current wrapped body-decode fixtures now use exact `offset=` together with `context=` and
   `decode_kind=` for truncated bulk-memory, truncated memarg, unknown SIMD opcode, and unknown
   opcode cases
+- representative raw bulk-memory invalid fixtures now also pin exact `offset=` for `memory.init`,
+  `memory.copy`, `memory.fill`, and `data.drop` validation failures
 
 - `context=` — the underlying `DecodeContext`
 - `decode_kind=` — the underlying `DecodeErrorKind` when validation preserves a decode failure
@@ -234,11 +236,20 @@ scalar memory, and call argument-flow validation via:
 - `crates/baedeker-testdata/spec/wast-upstream/load-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/store-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/align-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/memory-init-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/data-drop-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/memory-copy-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/memory-fill-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/call-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/call-indirect-subset.wast`
 
 The `call-indirect-subset` lane now also includes broader multi-table / explicit-table-index
 interaction coverage rather than only a narrow single-table argument-flow slice.
+
+Bulk-memory grounding now also includes dedicated `memory-init-subset`, `data-drop-subset`,
+`memory-copy-subset`, and `memory-fill-subset` files, covering explicit nonzero memory indices,
+active/passive data-segment interaction, same-memory and cross-memory copy shapes, and
+representative unknown-index / operand-type invalids.
 
 Historical active upstream files have also been normalized to `-subset.wast` names; for example,
 `ref-func-undeclared-reference-subset.wast` is active coverage rather than a deferred skip.
