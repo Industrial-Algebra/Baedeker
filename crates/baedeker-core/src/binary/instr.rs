@@ -41,6 +41,8 @@ pub enum Instr {
     Return,
     Call(FuncIdx),
     ReturnCall(FuncIdx),
+    CallRef(TypeIdx),
+    ReturnCallRef(TypeIdx),
     CallIndirect {
         type_idx: TypeIdx,
         table_idx: TableIdx,
@@ -388,6 +390,8 @@ pub fn decode_instr_with_offset(
         0x0F => Instr::Return,
         0x10 => Instr::Call(FuncIdx(decode_u32(cursor, base_offset)?)),
         0x12 => Instr::ReturnCall(FuncIdx(decode_u32(cursor, base_offset)?)),
+        0x14 => Instr::CallRef(TypeIdx(decode_u32(cursor, base_offset)?)),
+        0x15 => Instr::ReturnCallRef(TypeIdx(decode_u32(cursor, base_offset)?)),
         0x11 => Instr::CallIndirect {
             type_idx: TypeIdx(decode_u32(cursor, base_offset)?),
             table_idx: parse_table_idx(cursor, base_offset)?,
@@ -1067,7 +1071,8 @@ mod tests {
     fn decode_call_indirect_and_table_ops() {
         let instrs = decode_instr_sequence(
             &[
-                0x12, 0x00, 0x11, 0x01, 0x00, 0x13, 0x02, 0x00, 0x25, 0x00, 0x26, 0x00, 0x0B,
+                0x12, 0x00, 0x14, 0x03, 0x15, 0x04, 0x11, 0x01, 0x00, 0x13, 0x02, 0x00, 0x25, 0x00,
+                0x26, 0x00, 0x0B,
             ],
             95,
         )
@@ -1076,6 +1081,8 @@ mod tests {
             instrs,
             vec![
                 Instr::ReturnCall(FuncIdx(0)),
+                Instr::CallRef(TypeIdx(3)),
+                Instr::ReturnCallRef(TypeIdx(4)),
                 Instr::CallIndirect {
                     type_idx: TypeIdx(1),
                     table_idx: TableIdx(0),

@@ -151,8 +151,10 @@ interpreter-first with AOT as a future layer.
     - `wast-upstream/memory-fill-subset.wast`
     - `wast-upstream/call-subset.wast`
     - `wast-upstream/call-indirect-subset.wast`
+    - `wast-upstream/call-ref-subset.wast`
     - `wast-upstream/return-call-subset.wast`
     - `wast-upstream/return-call-indirect-subset.wast`
+    - `wast-upstream/return-call-ref-subset.wast`
     - `wast-upstream/return-subset.wast`
     - `wast-upstream/block-subset.wast`
     - `wast-upstream/if-subset.wast`
@@ -247,12 +249,16 @@ interpreter-first with AOT as a future layer.
     `return-call-indirect-subset` upstream files, new raw valid fixtures
     `valid/return-call-minimal.wasm` and `valid/return-call-indirect-funcref-table.wasm`, and new
     raw invalid fixtures for result-mismatch and non-`funcref`-table cases.
-  - Proposal-boundary scouting now pins the remaining unsupported function-reference /
-    null-branch operators through raw `invalid-validate` fixtures:
-    `proposal-call-ref-unsupported`, `proposal-return-call-ref-unsupported`,
-    `proposal-br-on-null-unsupported`, and `proposal-br-on-non-null-unsupported`. These remain
-    future implementation targets rather than active upstream subsets; today they surface as
-    decode-preserving `ValidationErrorKind::Decode` failures with `context=CodeSection` and
+  - Function-reference call support now also includes `call_ref` and `return_call_ref` decoding
+    plus current funcref-based validation grounding via new `call-ref-subset` and
+    `return-call-ref-subset` upstream files, new raw valid fixtures
+    `valid/call-ref-minimal.wasm` and `valid/return-call-ref-minimal.wasm`, and raw invalid
+    fixtures for non-`funcref` references and result-mismatch cases.
+  - Proposal-boundary scouting now pins the remaining unsupported null-branch operators through raw
+    `invalid-validate` fixtures: `proposal-br-on-null-unsupported` and
+    `proposal-br-on-non-null-unsupported`. These remain future implementation targets rather than
+    active upstream subsets; today they surface as decode-preserving
+    `ValidationErrorKind::Decode` failures with `context=CodeSection` and
     `decode_kind=UnknownOpcode`.
   - Raw invalid body-fixture metadata is now tighter for decode-preserving validation failures:
     the current wrapped `ValidationErrorKind::Decode` cases for truncated bulk-memory, truncated
@@ -332,7 +338,7 @@ More concretely, Phase 1 is done when all of the following are true:
 - `cargo test -p baedeker-core --test spec_wast`
 - `cargo test -p baedeker-core`
 - `cargo clippy -p baedeker-core --all-targets -- -D warnings`
-- Current `baedeker-core` unit test count: **209 passing**
+- Current `baedeker-core` unit test count: **213 passing**
 - Current spec-harness integration tests: **5 passing** (`spec`: 3, `spec_wast`: 2)
 
 ### Current branch snapshot
