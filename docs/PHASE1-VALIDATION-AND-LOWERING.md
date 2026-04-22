@@ -256,6 +256,13 @@ scalar memory, and call argument-flow validation via:
 - `crates/baedeker-testdata/spec/wast-upstream/load-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/store-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/align-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/integer-numeric-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/float-numeric-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/proposal-conversions-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/simd-const-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/simd-memory-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/simd-lane-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/simd-memory-multi-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/memory-init-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/data-drop-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/memory-copy-subset.wast`
@@ -284,6 +291,13 @@ Call / table / reference interaction grounding now also includes `table-ref-flow
 `table-grow-ref-subset`, and `ref-func-table-call-subset`, covering `table.get -> table.set`
 round-trips, `table.grow` with `ref.null` / `ref.func`, and `ref.func`-driven `call_indirect`
 through mutable/global/table flows.
+
+Numeric / SIMD / proposal-surface grounding now also includes `integer-numeric-subset`,
+`float-numeric-subset`, `proposal-conversions-subset`, `simd-const-subset`,
+`simd-memory-subset`, `simd-lane-subset`, and `simd-memory-multi-subset`, covering integer
+unary/binary/compare/sign-extension operators, float compare/unary/binary families, saturating
+truncation plus reinterpretation/conversion paths, `v128.const`, SIMD load/store/alignment/lane
+validation, and nonzero-memory SIMD lane syntax.
 
 Historical active upstream files have also been normalized to `-subset.wast` names; for example,
 `ref-func-undeclared-reference-subset.wast` is active coverage rather than a deferred skip.

@@ -135,6 +135,13 @@ interpreter-first with AOT as a future layer.
     - `wast-upstream/load-subset.wast`
     - `wast-upstream/store-subset.wast`
     - `wast-upstream/align-subset.wast`
+    - `wast-upstream/integer-numeric-subset.wast`
+    - `wast-upstream/float-numeric-subset.wast`
+    - `wast-upstream/proposal-conversions-subset.wast`
+    - `wast-upstream/simd-const-subset.wast`
+    - `wast-upstream/simd-memory-subset.wast`
+    - `wast-upstream/simd-lane-subset.wast`
+    - `wast-upstream/simd-memory-multi-subset.wast`
     - `wast-upstream/memory-init-subset.wast`
     - `wast-upstream/data-drop-subset.wast`
     - `wast-upstream/memory-copy-subset.wast`
@@ -218,6 +225,13 @@ interpreter-first with AOT as a future layer.
     including `table.get -> table.set` round-trips, `table.grow` with `ref.null` / `ref.func`,
     `ref.func`-driven `call_indirect` through mutable/global/table flows, and representative
     ref-type mismatch invalid cases.
+  - Recent upstream grounding has also broadened numeric / SIMD / proposal-surface completeness via
+    new `integer-numeric-subset`, `float-numeric-subset`, `proposal-conversions-subset`,
+    `simd-const-subset`, `simd-memory-subset`, `simd-lane-subset`, and
+    `simd-memory-multi-subset` files, including integer unary/binary/compare/sign-extension
+    operators, float compare/unary/binary families, saturating truncations, reinterpretation and
+    conversion paths, `v128.const`, SIMD load/store/alignment/lane validation, and nonzero-memory
+    SIMD lane syntax.
   - Raw invalid body-fixture metadata is now tighter for decode-preserving validation failures:
     the current wrapped `ValidationErrorKind::Decode` cases for truncated bulk-memory, truncated
     memarg, and unknown SIMD opcode bodies now pin exact `offset=` alongside `context=` and
