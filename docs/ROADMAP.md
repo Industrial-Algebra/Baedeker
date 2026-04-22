@@ -151,6 +151,8 @@ interpreter-first with AOT as a future layer.
     - `wast-upstream/memory-fill-subset.wast`
     - `wast-upstream/call-subset.wast`
     - `wast-upstream/call-indirect-subset.wast`
+    - `wast-upstream/return-call-subset.wast`
+    - `wast-upstream/return-call-indirect-subset.wast`
     - `wast-upstream/return-subset.wast`
     - `wast-upstream/block-subset.wast`
     - `wast-upstream/if-subset.wast`
@@ -240,9 +242,13 @@ interpreter-first with AOT as a future layer.
     `ref.null` in function/global/control positions, typed `select` over `funcref`/`externref`,
     `ref.func` / `ref.null` joins, and reference-valued block/if result flow with representative
     ref-type mismatch invalid cases.
-  - Proposal-boundary scouting now also pins currently unsupported tail-call / function-reference /
+  - Tail-call mini-cluster support now also includes `return_call` and `return_call_indirect`
+    decoding plus validation grounding via new `return-call-subset` and
+    `return-call-indirect-subset` upstream files, new raw valid fixtures
+    `valid/return-call-minimal.wasm` and `valid/return-call-indirect-funcref-table.wasm`, and new
+    raw invalid fixtures for result-mismatch and non-`funcref`-table cases.
+  - Proposal-boundary scouting now pins the remaining unsupported function-reference /
     null-branch operators through raw `invalid-validate` fixtures:
-    `proposal-return-call-unsupported`, `proposal-return-call-indirect-unsupported`,
     `proposal-call-ref-unsupported`, `proposal-return-call-ref-unsupported`,
     `proposal-br-on-null-unsupported`, and `proposal-br-on-non-null-unsupported`. These remain
     future implementation targets rather than active upstream subsets; today they surface as
@@ -326,7 +332,7 @@ More concretely, Phase 1 is done when all of the following are true:
 - `cargo test -p baedeker-core --test spec_wast`
 - `cargo test -p baedeker-core`
 - `cargo clippy -p baedeker-core --all-targets -- -D warnings`
-- Current `baedeker-core` unit test count: **203 passing**
+- Current `baedeker-core` unit test count: **209 passing**
 - Current spec-harness integration tests: **5 passing** (`spec`: 3, `spec_wast`: 2)
 
 ### Current branch snapshot

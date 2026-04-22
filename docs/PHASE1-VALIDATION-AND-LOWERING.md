@@ -272,6 +272,8 @@ scalar memory, and call argument-flow validation via:
 - `crates/baedeker-testdata/spec/wast-upstream/memory-fill-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/call-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/call-indirect-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/return-call-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/return-call-indirect-subset.wast`
 
 The `call-indirect-subset` lane now also includes broader multi-table / explicit-table-index
 interaction coverage rather than only a narrow single-table argument-flow slice.
@@ -307,12 +309,16 @@ Reference/control proposal-edge grounding now also includes `ref-null-subset`,
 positions, typed `select` over `funcref`/`externref`, `ref.func` / `ref.null` joins, and
 reference-valued block/if result flow.
 
-Proposal-boundary scouting now also pins currently unsupported tail-call / function-reference /
-null-branch operators through raw `invalid-validate` fixtures:
-`proposal-return-call-unsupported`, `proposal-return-call-indirect-unsupported`,
-`proposal-call-ref-unsupported`, `proposal-return-call-ref-unsupported`,
-`proposal-br-on-null-unsupported`, and `proposal-br-on-non-null-unsupported`. These remain future
-implementation targets rather than active upstream subsets; today they surface as
+Tail-call mini-cluster support now also includes `return_call` and `return_call_indirect`
+decoding plus validation grounding via `return-call-subset` and
+`return-call-indirect-subset`, along with raw valid fixtures for minimal direct/indirect tail-call
+shapes and raw invalid fixtures for result-mismatch and non-`funcref`-table cases.
+
+Proposal-boundary scouting now pins the remaining unsupported function-reference / null-branch
+operators through raw `invalid-validate` fixtures: `proposal-call-ref-unsupported`,
+`proposal-return-call-ref-unsupported`, `proposal-br-on-null-unsupported`, and
+`proposal-br-on-non-null-unsupported`. These remain future implementation targets rather than
+active upstream subsets; today they surface as
 `ValidationErrorKind::Decode { context: CodeSection, kind: UnknownOpcode { .. } }`.
 
 Historical active upstream files have also been normalized to `-subset.wast` names; for example,

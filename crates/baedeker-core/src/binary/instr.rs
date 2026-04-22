@@ -40,7 +40,12 @@ pub enum Instr {
     },
     Return,
     Call(FuncIdx),
+    ReturnCall(FuncIdx),
     CallIndirect {
+        type_idx: TypeIdx,
+        table_idx: TableIdx,
+    },
+    ReturnCallIndirect {
         type_idx: TypeIdx,
         table_idx: TableIdx,
     },
@@ -382,7 +387,12 @@ pub fn decode_instr_with_offset(
         }
         0x0F => Instr::Return,
         0x10 => Instr::Call(FuncIdx(decode_u32(cursor, base_offset)?)),
+        0x12 => Instr::ReturnCall(FuncIdx(decode_u32(cursor, base_offset)?)),
         0x11 => Instr::CallIndirect {
+            type_idx: TypeIdx(decode_u32(cursor, base_offset)?),
+            table_idx: parse_table_idx(cursor, base_offset)?,
+        },
+        0x13 => Instr::ReturnCallIndirect {
             type_idx: TypeIdx(decode_u32(cursor, base_offset)?),
             table_idx: parse_table_idx(cursor, base_offset)?,
         },
@@ -1055,13 +1065,23 @@ mod tests {
 
     #[test]
     fn decode_call_indirect_and_table_ops() {
-        let instrs =
-            decode_instr_sequence(&[0x11, 0x01, 0x00, 0x25, 0x00, 0x26, 0x00, 0x0B], 95).unwrap();
+        let instrs = decode_instr_sequence(
+            &[
+                0x12, 0x00, 0x11, 0x01, 0x00, 0x13, 0x02, 0x00, 0x25, 0x00, 0x26, 0x00, 0x0B,
+            ],
+            95,
+        )
+        .unwrap();
         assert_eq!(
             instrs,
             vec![
+                Instr::ReturnCall(FuncIdx(0)),
                 Instr::CallIndirect {
                     type_idx: TypeIdx(1),
+                    table_idx: TableIdx(0),
+                },
+                Instr::ReturnCallIndirect {
+                    type_idx: TypeIdx(2),
                     table_idx: TableIdx(0),
                 },
                 Instr::TableGet(TableIdx(0)),

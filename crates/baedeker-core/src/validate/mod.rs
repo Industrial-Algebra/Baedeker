@@ -502,6 +502,10 @@ fn validate_function(
         });
     }
 
+    if state.reachability == Reachability::Unreachable {
+        return Ok(());
+    }
+
     let full_stack = state.operands.as_slice().to_vec();
     if full_stack != ty.results {
         let found_len = core::cmp::min(full_stack.len(), ty.results.len());
@@ -655,6 +659,12 @@ fn validate_instr(
                 state.operands.push(*result);
             }
         }
+        Instr::ReturnCall(idx) => {
+            let ty = resolve_func_type(module, *idx, function, offset)?;
+            validate_tail_call_results(function, state, &ty.results, offset)?;
+            pop_exact(function, state, &ty.params, offset)?;
+            state.enter_unreachable();
+        }
         Instr::CallIndirect {
             type_idx,
             table_idx,
@@ -683,6 +693,34 @@ fn validate_instr(
             for result in &ty.results {
                 state.operands.push(*result);
             }
+        }
+        Instr::ReturnCallIndirect {
+            type_idx,
+            table_idx,
+        } => {
+            let table_type =
+                resolve_table_type_with_context(module, *table_idx, Some(function), offset)?;
+            if table_type.elem != RefType::FuncRef {
+                return Err(ValidationError {
+                    offset: ByteOffset(offset),
+                    function: Some(function),
+                    kind: ValidationErrorKind::InvalidCallIndirectTableType {
+                        expected: RefType::FuncRef,
+                        found: table_type.elem,
+                    },
+                });
+            }
+            let ty = resolve_type(module, *type_idx, Some(function), offset)?;
+            validate_tail_call_results(function, state, &ty.results, offset)?;
+            pop_expect(
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I32),
+                offset,
+                "return_call_indirect",
+            )?;
+            pop_exact(function, state, &ty.params, offset)?;
+            state.enter_unreachable();
         }
         Instr::Drop => {
             pop_any(function, state, offset, "drop")?;
@@ -2551,6 +2589,27 @@ fn pop_exact(
     Ok(())
 }
 
+fn validate_tail_call_results(
+    function: FuncIdx,
+    state: &ValidationState,
+    found: &[ValType],
+    offset: usize,
+) -> Result<(), ValidationError> {
+    let expected = &state.controls[0].end_types;
+    if found != expected {
+        return Err(ValidationError {
+            offset: ByteOffset(offset),
+            function: Some(function),
+            kind: ValidationErrorKind::ResultTypeMismatch {
+                expected: expected.clone(),
+                found: found.to_vec(),
+            },
+        });
+    }
+
+    Ok(())
+}
+
 fn pop_branch_types(
     function: FuncIdx,
     state: &mut ValidationState,
@@ -2673,6 +2732,16 @@ mod tests {
             ValidationErrorKind::UnknownLocalIdx { .. }
         ));
         assert_eq!(err.offset, ByteOffset(24));
+    }
+
+    #[test]
+    fn validate_unreachable_function_end_with_result_type() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01,
+            0x7F, 0x03, 0x02, 0x01, 0x00, 0x0A, 0x05, 0x01, 0x03, 0x00, 0x00, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        module.validate().unwrap();
     }
 
     #[test]
@@ -3837,6 +3906,69 @@ mod tests {
     }
 
     #[test]
+    fn validate_return_call() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01,
+            0x7F, 0x03, 0x03, 0x02, 0x00, 0x00, 0x0A, 0x0B, 0x02, 0x04, 0x00, 0x41, 0x00, 0x0B,
+            0x04, 0x00, 0x12, 0x00, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn reject_return_call_result_mismatch() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x09, 0x02, 0x60, 0x00, 0x01,
+            0x7F, 0x60, 0x00, 0x01, 0x7E, 0x03, 0x03, 0x02, 0x01, 0x00, 0x0A, 0x0B, 0x02, 0x04,
+            0x00, 0x42, 0x00, 0x0B, 0x04, 0x00, 0x12, 0x00, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(34));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::ResultTypeMismatch {
+                expected,
+                found,
+            } if expected == vec![ValType::Num(crate::types::NumType::I32)]
+                && found == vec![ValType::Num(crate::types::NumType::I64)]
+        ));
+    }
+
+    #[test]
+    fn validate_return_call_indirect_with_funcref_table() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7F,
+            0x01, 0x7F, 0x03, 0x03, 0x02, 0x00, 0x00, 0x04, 0x04, 0x01, 0x70, 0x00, 0x01, 0x0A,
+            0x10, 0x02, 0x04, 0x00, 0x20, 0x00, 0x0B, 0x09, 0x00, 0x20, 0x00, 0x41, 0x00, 0x13,
+            0x00, 0x00, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn reject_return_call_indirect_result_mismatch() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x09, 0x02, 0x60, 0x00, 0x01,
+            0x7F, 0x60, 0x00, 0x01, 0x7E, 0x03, 0x02, 0x01, 0x00, 0x04, 0x04, 0x01, 0x70, 0x00,
+            0x01, 0x0A, 0x09, 0x01, 0x07, 0x00, 0x41, 0x00, 0x13, 0x01, 0x00, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(36));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::ResultTypeMismatch {
+                expected,
+                found,
+            } if expected == vec![ValType::Num(crate::types::NumType::I32)]
+                && found == vec![ValType::Num(crate::types::NumType::I64)]
+        ));
+    }
+
+    #[test]
     fn reject_call_indirect_with_non_funcref_table() {
         let bytes = [
             0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
@@ -3846,6 +3978,25 @@ mod tests {
         ];
         let module = Module::decode(&bytes).unwrap();
         let err = module.validate().unwrap_err();
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::InvalidCallIndirectTableType {
+                expected: RefType::FuncRef,
+                found: RefType::ExternRef,
+            }
+        ));
+    }
+
+    #[test]
+    fn reject_return_call_indirect_with_non_funcref_table() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01,
+            0x7F, 0x03, 0x02, 0x01, 0x00, 0x04, 0x04, 0x01, 0x6F, 0x00, 0x01, 0x0A, 0x09, 0x01,
+            0x07, 0x00, 0x41, 0x00, 0x13, 0x00, 0x00, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(32));
         assert!(matches!(
             err.kind,
             ValidationErrorKind::InvalidCallIndirectTableType {
