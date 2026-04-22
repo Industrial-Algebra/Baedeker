@@ -240,6 +240,14 @@ interpreter-first with AOT as a future layer.
     `ref.null` in function/global/control positions, typed `select` over `funcref`/`externref`,
     `ref.func` / `ref.null` joins, and reference-valued block/if result flow with representative
     ref-type mismatch invalid cases.
+  - Proposal-boundary scouting now also pins currently unsupported tail-call / function-reference /
+    null-branch operators through raw `invalid-validate` fixtures:
+    `proposal-return-call-unsupported`, `proposal-return-call-indirect-unsupported`,
+    `proposal-call-ref-unsupported`, `proposal-return-call-ref-unsupported`,
+    `proposal-br-on-null-unsupported`, and `proposal-br-on-non-null-unsupported`. These remain
+    future implementation targets rather than active upstream subsets; today they surface as
+    decode-preserving `ValidationErrorKind::Decode` failures with `context=CodeSection` and
+    `decode_kind=UnknownOpcode`.
   - Raw invalid body-fixture metadata is now tighter for decode-preserving validation failures:
     the current wrapped `ValidationErrorKind::Decode` cases for truncated bulk-memory, truncated
     memarg, and unknown SIMD opcode bodies now pin exact `offset=` alongside `context=` and

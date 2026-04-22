@@ -307,6 +307,14 @@ Reference/control proposal-edge grounding now also includes `ref-null-subset`,
 positions, typed `select` over `funcref`/`externref`, `ref.func` / `ref.null` joins, and
 reference-valued block/if result flow.
 
+Proposal-boundary scouting now also pins currently unsupported tail-call / function-reference /
+null-branch operators through raw `invalid-validate` fixtures:
+`proposal-return-call-unsupported`, `proposal-return-call-indirect-unsupported`,
+`proposal-call-ref-unsupported`, `proposal-return-call-ref-unsupported`,
+`proposal-br-on-null-unsupported`, and `proposal-br-on-non-null-unsupported`. These remain future
+implementation targets rather than active upstream subsets; today they surface as
+`ValidationErrorKind::Decode { context: CodeSection, kind: UnknownOpcode { .. } }`.
+
 Historical active upstream files have also been normalized to `-subset.wast` names; for example,
 `ref-func-undeclared-reference-subset.wast` is active coverage rather than a deferred skip.
 
