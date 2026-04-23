@@ -232,6 +232,7 @@ scalar memory, and call argument-flow validation via:
 - `crates/baedeker-testdata/spec/wast-upstream/elem-table-init-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/table-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/ref-null-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/ref-as-non-null-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/ref-select-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/ref-control-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/return-subset.wast`
@@ -313,8 +314,9 @@ truncation plus reinterpretation/conversion paths, `v128.const`, SIMD load/store
 validation, and nonzero-memory SIMD lane syntax.
 
 Reference/control proposal-edge grounding now also includes `ref-null-subset`,
-`ref-select-subset`, and `ref-control-subset`, covering `ref.null` in function/global/control
-positions, typed `select` over `funcref`/`externref`, `ref.func` / `ref.null` joins, and
+`ref-as-non-null-subset`, `ref-select-subset`, and `ref-control-subset`, covering `ref.null` in
+function/global/control positions, `ref.as_non_null` over nullable and already-non-null
+references, typed `select` over `funcref`/`externref`, `ref.func` / `ref.null` joins, and
 reference-valued block/if result flow.
 
 Tail-call mini-cluster support now also includes `return_call` and `return_call_indirect`
@@ -332,6 +334,11 @@ function refs as subtypes of abstract `funcref` where appropriate. Grounding now
 `typed-reference-types-subset`, along with raw valid fixtures for typed global init / typed
 `call_ref` / typed table flows and raw invalid fixtures for non-`funcref` references,
 concrete-type mismatches, and result-mismatch cases.
+
+`ref.as_non_null` now also has dedicated grounding via `ref-as-non-null-subset`, along with raw
+valid fixture `ref-as-non-null-call-ref.wasm` and raw invalid fixture
+`ref-as-non-null-non-ref-input.wasm`. Within the current bounded typed-reference model it accepts
+reference operands and produces the non-null form of the same reference type.
 
 Null-branch support now also includes `br_on_null` and `br_on_non_null` decoding plus validation
 via `br-on-null-subset` and `br-on-non-null-subset`, along with raw valid fixtures

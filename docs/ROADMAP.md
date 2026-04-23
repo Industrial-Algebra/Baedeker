@@ -122,6 +122,7 @@ interpreter-first with AOT as a future layer.
     - `wast-upstream/labels-invalid-subset.wast`
     - `wast-upstream/labels-invalid-folded-syntax-subset.wast`
     - `wast-upstream/ref-null-subset.wast`
+    - `wast-upstream/ref-as-non-null-subset.wast`
     - `wast-upstream/ref-select-subset.wast`
     - `wast-upstream/ref-control-subset.wast`
     - `wast-upstream/ref-func-undeclared-reference-subset.wast`
@@ -246,8 +247,9 @@ interpreter-first with AOT as a future layer.
     conversion paths, `v128.const`, SIMD load/store/alignment/lane validation, and nonzero-memory
     SIMD lane syntax.
   - Recent upstream grounding has also broadened reference/control proposal-edge coverage via new
-    `ref-null-subset`, `ref-select-subset`, and `ref-control-subset` files, including
-    `ref.null` in function/global/control positions, typed `select` over `funcref`/`externref`,
+    `ref-null-subset`, `ref-as-non-null-subset`, `ref-select-subset`, and `ref-control-subset`
+    files, including `ref.null` in function/global/control positions, `ref.as_non_null` over
+    nullable and already-non-null references, typed `select` over `funcref`/`externref`,
     `ref.func` / `ref.null` joins, and reference-valued block/if result flow with representative
     ref-type mismatch invalid cases.
   - Tail-call mini-cluster support now also includes `return_call` and `return_call_indirect`
@@ -267,6 +269,12 @@ interpreter-first with AOT as a future layer.
     `valid/typed-ref-global-init-from-ref-func.wasm`, `valid/typed-call-ref-null-concrete.wasm`,
     and `valid/typed-table-set-get-concrete.wasm`, plus raw invalid fixtures for non-`funcref`
     references, concrete-type mismatches, and result-mismatch cases.
+  - `ref.as_non_null` support now also includes decoding plus validation grounding via new
+    `ref-as-non-null-subset` upstream coverage, raw valid
+    `valid/ref-as-non-null-call-ref.wasm`, and raw invalid
+    `invalid-validate/ref-as-non-null-non-ref-input.wasm`. Within the current bounded model,
+    `ref.as_non_null` accepts reference operands and produces the non-null form of that reference
+    type.
   - Null-branch support now also includes `br_on_null` and `br_on_non_null` decoding plus
     validation grounding via new `br-on-null-subset` and `br-on-non-null-subset` upstream files.
     Raw fixtures now include valid `valid/br-on-null-fallthrough-narrow.wasm` and
@@ -354,7 +362,7 @@ More concretely, Phase 1 is done when all of the following are true:
 - `cargo test -p baedeker-core --test spec_node`
 - `cargo test -p baedeker-core`
 - `cargo clippy -p baedeker-core --all-targets -- -D warnings`
-- Current `baedeker-core` unit test count: **227 passing**
+- Current `baedeker-core` unit test count: **229 passing**
 - Current spec-harness integration tests: **8 passing** (`spec`: 3, `spec_wast`: 2, `spec_node`: 3)
 - `spec_node` adds a Node/V8 compile-time cross-check over the raw fixture corpus plus the active
   upstream-derived `wast-upstream` subset lane. Custom `spec/wast` cases remain Baedeker-shaped

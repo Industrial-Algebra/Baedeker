@@ -1621,6 +1621,7 @@ fn validate_instr(
             .push(ValType::Num(crate::types::NumType::F64)),
         Instr::RefNull(ref_type) => state.operands.push(ValType::Ref(*ref_type)),
         Instr::RefIsNull => validate_ref_is_null(function, state, offset)?,
+        Instr::RefAsNonNull => validate_ref_as_non_null(function, state, offset)?,
         Instr::RefFunc(idx) => {
             let type_idx = resolve_func_type_idx(module, *idx, function, offset)?;
             if !is_declared_function_ref(module, *idx) {
@@ -2055,6 +2056,16 @@ fn validate_ref_is_null(
     state
         .operands
         .push(ValType::Num(crate::types::NumType::I32));
+    Ok(())
+}
+
+fn validate_ref_as_non_null(
+    function: FuncIdx,
+    state: &mut ValidationState,
+    offset: usize,
+) -> Result<(), ValidationError> {
+    let found = pop_ref_type(function, state, offset, "ref.as_non_null")?;
+    state.operands.push(ValType::Ref(found.as_non_null()));
     Ok(())
 }
 
@@ -3049,6 +3060,37 @@ mod tests {
                 op: "ref.is_null",
                 found: ValType::Num(crate::types::NumType::I32),
                 ..
+            }
+        ));
+    }
+
+    #[test]
+    fn validate_ref_as_non_null() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0B, 0x02, 0x60, 0x00, 0x01,
+            0x7F, 0x60, 0x01, 0x63, 0x00, 0x01, 0x7F, 0x03, 0x03, 0x02, 0x00, 0x01, 0x07, 0x05,
+            0x01, 0x01, 0x66, 0x00, 0x00, 0x0A, 0x0E, 0x02, 0x04, 0x00, 0x41, 0x07, 0x0B, 0x07,
+            0x00, 0x20, 0x00, 0xD4, 0x14, 0x00, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn reject_ref_as_non_null_on_non_ref() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x03, 0x02, 0x01, 0x00, 0x0A, 0x08, 0x01, 0x06, 0x00, 0x41, 0x00, 0xD4, 0x1A, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(25));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::TypeMismatch {
+                op: "ref.as_non_null",
+                expected: ValType::Ref(RefType::ExternRef),
+                found: ValType::Num(crate::types::NumType::I32),
             }
         ));
     }

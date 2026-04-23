@@ -163,6 +163,7 @@ pub enum Instr {
     RefNull(RefType),
     RefIsNull,
     RefFunc(FuncIdx),
+    RefAsNonNull,
     V128Const([u8; 16]),
     I32Eqz,
     I32Eq,
@@ -452,6 +453,7 @@ pub fn decode_instr_with_offset(
         )),
         0xD1 => Instr::RefIsNull,
         0xD2 => Instr::RefFunc(FuncIdx(decode_u32(cursor, base_offset)?)),
+        0xD4 => Instr::RefAsNonNull,
         0xD5 => Instr::BrOnNull(LabelIdx(decode_u32(cursor, base_offset)?)),
         0xD6 => Instr::BrOnNonNull(LabelIdx(decode_u32(cursor, base_offset)?)),
         0x45 => Instr::I32Eqz,
@@ -1045,7 +1047,9 @@ mod tests {
     #[test]
     fn decode_ref_instructions() {
         let instrs = decode_instr_sequence(
-            &[0xD0, 0x70, 0xD1, 0xD2, 0x00, 0xD5, 0x01, 0xD6, 0x02, 0x0B],
+            &[
+                0xD0, 0x70, 0xD1, 0xD2, 0x00, 0xD4, 0xD5, 0x01, 0xD6, 0x02, 0x0B,
+            ],
             90,
         )
         .unwrap();
@@ -1055,6 +1059,7 @@ mod tests {
                 Instr::RefNull(RefType::FuncRef),
                 Instr::RefIsNull,
                 Instr::RefFunc(FuncIdx(0)),
+                Instr::RefAsNonNull,
                 Instr::BrOnNull(LabelIdx(1)),
                 Instr::BrOnNonNull(LabelIdx(2)),
                 Instr::End
