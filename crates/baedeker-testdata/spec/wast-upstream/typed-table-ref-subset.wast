@@ -16,6 +16,20 @@
     (table.set $t (i32.const 0) (ref.func $f))
     (table.get $t (i32.const 0))))
 
+(module
+  (type $t0 (func (param i32) (result i32)))
+  (type $t1 (func (param i32) (result i32)))
+
+  (func $f (type $t0)
+    (local.get 0))
+  (export "f" (func $f))
+
+  (table $t 1 (ref null $t1))
+
+  (func (result (ref null $t1))
+    (table.set $t (i32.const 0) (ref.func $f))
+    (table.get $t (i32.const 0))))
+
 (assert_invalid
   (module
     (type $ii (func (param i32) (result i32)))

@@ -130,7 +130,7 @@ fn validate_global_init_expr(
         Instr::I64Const(_) => ValType::Num(crate::types::NumType::I64),
         Instr::F32Const(_) => ValType::Num(crate::types::NumType::F32),
         Instr::F64Const(_) => ValType::Num(crate::types::NumType::F64),
-        Instr::RefNull(ref_type) => ValType::Ref(ref_type),
+        Instr::RefNull(ref_type) => normalize_valtype(module, ValType::Ref(ref_type)),
         Instr::RefFunc(idx) => {
             let type_idx = resolve_func_type_idx_for_module(module, idx, instrs[0].offset.0)?;
             ValType::Ref(RefType::concrete(false, type_idx))
@@ -147,14 +147,12 @@ fn validate_global_init_expr(
         }
     };
 
-    if !valtype_matches(found, global.global_type.val_type) {
+    let expected = normalize_valtype(module, global.global_type.val_type);
+    if !valtype_matches(found, expected) {
         return Err(ValidationError {
             offset: instrs[0].offset,
             function: None,
-            kind: ValidationErrorKind::GlobalInitTypeMismatch {
-                expected: global.global_type.val_type,
-                found,
-            },
+            kind: ValidationErrorKind::GlobalInitTypeMismatch { expected, found },
         });
     }
 
@@ -193,7 +191,7 @@ fn resolve_imported_const_global_val_type(
         });
     }
 
-    Ok(imported_global.val_type)
+    Ok(normalize_valtype(module, imported_global.val_type))
 }
 
 fn validate_data_segments(module: &Module<'_>) -> Result<(), ValidationError> {
@@ -270,7 +268,7 @@ fn validate_const_i32_expr(
                     Instr::I64Const(_) => ValType::Num(crate::types::NumType::I64),
                     Instr::F32Const(_) => ValType::Num(crate::types::NumType::F32),
                     Instr::F64Const(_) => ValType::Num(crate::types::NumType::F64),
-                    Instr::RefNull(ref_type) => ValType::Ref(ref_type),
+                    Instr::RefNull(ref_type) => normalize_valtype(module, ValType::Ref(ref_type)),
                     Instr::RefFunc(_) => ValType::Ref(RefType::FuncRef),
                     _ => ValType::Num(crate::types::NumType::I32),
                 },
@@ -300,7 +298,7 @@ fn validate_const_ref_expr(
     }
 
     let found = match instrs[0].instr {
-        Instr::RefNull(ref_type) => ValType::Ref(ref_type),
+        Instr::RefNull(ref_type) => normalize_valtype(module, ValType::Ref(ref_type)),
         Instr::RefFunc(idx) => {
             let type_idx = resolve_func_type_idx_for_module(module, idx, instrs[0].offset.0)?;
             ValType::Ref(RefType::concrete(false, type_idx))
@@ -317,7 +315,7 @@ fn validate_const_ref_expr(
         }
     };
 
-    let expected = ValType::Ref(expected);
+    let expected = normalize_valtype(module, ValType::Ref(expected));
     if !valtype_matches(found, expected) {
         return Err(ValidationError {
             offset: instrs[0].offset,
@@ -415,13 +413,14 @@ fn validate_elements(module: &Module<'_>) -> Result<(), ValidationError> {
         } = &element.mode
         {
             let table_type = resolve_table_type_for_module(module, *table, *offset_offset)?;
-            if !reftype_matches(element.elem_type, table_type.elem) {
+            let elem_type = normalize_reftype(module, element.elem_type);
+            if !reftype_matches(elem_type, table_type.elem) {
                 return Err(ValidationError {
                     offset: ByteOffset(*offset_offset),
                     function: None,
                     kind: ValidationErrorKind::ElementTableTypeMismatch {
                         expected: table_type.elem,
-                        found: element.elem_type,
+                        found: elem_type,
                     },
                 });
             }
@@ -436,7 +435,12 @@ fn validate_elements(module: &Module<'_>) -> Result<(), ValidationError> {
             }
             ElementInit::Expressions(exprs) => {
                 for expr in exprs {
-                    validate_const_ref_expr(module, expr.expr, expr.offset, element.elem_type)?;
+                    validate_const_ref_expr(
+                        module,
+                        expr.expr,
+                        expr.offset,
+                        normalize_reftype(module, element.elem_type),
+                    )?;
                 }
             }
         }
@@ -477,8 +481,9 @@ fn validate_function(
     local_decls: &[LocalDecl],
     code: &crate::types::CodeBody<'_>,
 ) -> Result<(), ValidationError> {
+    let ty = normalize_func_type(module, ty);
     let mut locals = ty.params.clone();
-    expand_locals(&mut locals, local_decls);
+    expand_locals(module, &mut locals, local_decls);
 
     let instrs = code
         .instructions_with_offsets()
@@ -709,7 +714,10 @@ fn validate_instr(
             pop_expect(
                 function,
                 state,
-                ValType::Ref(RefType::concrete(true, *type_idx)),
+                ValType::Ref(RefType::concrete(
+                    true,
+                    canonicalize_func_type_idx(module, *type_idx),
+                )),
                 offset,
                 "call_ref",
             )?;
@@ -724,7 +732,10 @@ fn validate_instr(
             pop_expect(
                 function,
                 state,
-                ValType::Ref(RefType::concrete(true, *type_idx)),
+                ValType::Ref(RefType::concrete(
+                    true,
+                    canonicalize_func_type_idx(module, *type_idx),
+                )),
                 offset,
                 "return_call_ref",
             )?;
@@ -821,7 +832,7 @@ fn validate_instr(
                     kind: ValidationErrorKind::InvalidSelectResultArity { found: types.len() },
                 });
             }
-            let expected = types[0];
+            let expected = normalize_valtype(module, types[0]);
             pop_expect(
                 function,
                 state,
@@ -1619,7 +1630,11 @@ fn validate_instr(
         Instr::F64Const(_) => state
             .operands
             .push(ValType::Num(crate::types::NumType::F64)),
-        Instr::RefNull(ref_type) => state.operands.push(ValType::Ref(*ref_type)),
+        Instr::RefNull(ref_type) => {
+            state
+                .operands
+                .push(normalize_valtype(module, ValType::Ref(*ref_type)));
+        }
         Instr::RefIsNull => validate_ref_is_null(function, state, offset)?,
         Instr::RefAsNonNull => validate_ref_as_non_null(function, state, offset)?,
         Instr::RefFunc(idx) => {
@@ -2246,12 +2261,12 @@ fn resolve_block_type(
         }),
         BlockType::Val(val) => Ok(FuncType {
             params: Vec::new(),
-            results: vec![val],
+            results: vec![normalize_valtype(module, val)],
         }),
         BlockType::TypeIdx(idx) => module
             .types
             .get(idx as usize)
-            .cloned()
+            .map(|ty| normalize_func_type(module, ty))
             .ok_or(ValidationError {
                 offset: ByteOffset(offset),
                 function: Some(function),
@@ -2260,26 +2275,32 @@ fn resolve_block_type(
     }
 }
 
-fn resolve_type<'m>(
-    module: &'m Module<'_>,
+fn resolve_type(
+    module: &Module<'_>,
     idx: TypeIdx,
     function: Option<FuncIdx>,
     offset: usize,
-) -> Result<&'m FuncType, ValidationError> {
-    module.types.get(idx.0 as usize).ok_or(ValidationError {
-        offset: ByteOffset(offset),
-        function,
-        kind: ValidationErrorKind::UnknownTypeIdx { idx },
-    })
+) -> Result<FuncType, ValidationError> {
+    let idx = canonicalize_func_type_idx(module, idx);
+    module
+        .types
+        .get(idx.0 as usize)
+        .map(|ty| normalize_func_type(module, ty))
+        .ok_or(ValidationError {
+            offset: ByteOffset(offset),
+            function,
+            kind: ValidationErrorKind::UnknownTypeIdx { idx },
+        })
 }
 
-fn resolve_func_type<'m>(
-    module: &'m Module<'_>,
+fn resolve_func_type(
+    module: &Module<'_>,
     idx: FuncIdx,
     function: FuncIdx,
     offset: usize,
-) -> Result<&'m FuncType, ValidationError> {
-    resolve_func_type_with_context(module, idx, Some(function), offset)
+) -> Result<FuncType, ValidationError> {
+    let type_idx = resolve_func_type_idx_with_context(module, idx, Some(function), offset)?;
+    resolve_type(module, type_idx, Some(function), offset)
 }
 
 fn contains_ref_func_expr(
@@ -2328,6 +2349,7 @@ fn resolve_func_type_idx_for_module(
     offset: usize,
 ) -> Result<TypeIdx, ValidationError> {
     resolve_func_type_idx_with_context(module, idx, None, offset)
+        .map(|idx| canonicalize_func_type_idx(module, idx))
 }
 
 fn resolve_func_type_idx(
@@ -2337,6 +2359,7 @@ fn resolve_func_type_idx(
     offset: usize,
 ) -> Result<TypeIdx, ValidationError> {
     resolve_func_type_idx_with_context(module, idx, Some(function), offset)
+        .map(|idx| canonicalize_func_type_idx(module, idx))
 }
 
 fn resolve_func_type_for_module<'m>(
@@ -2433,6 +2456,7 @@ fn resolve_global_type_with_context(
     imported
         .chain(defined)
         .nth(idx.0 as usize)
+        .map(|global| normalize_global_type(module, global))
         .ok_or(ValidationError {
             offset: ByteOffset(offset),
             function,
@@ -2474,6 +2498,7 @@ fn resolve_table_type_with_context(
     imported
         .chain(defined)
         .nth(idx.0 as usize)
+        .map(|table| normalize_table_type(module, table))
         .ok_or(ValidationError {
             offset: ByteOffset(offset),
             function,
@@ -2620,6 +2645,143 @@ fn finish_frame(
     }
     state.reachability = Reachability::Reachable;
     Ok(())
+}
+
+fn canonicalize_func_type_idx(module: &Module<'_>, idx: TypeIdx) -> TypeIdx {
+    if module.types.get(idx.0 as usize).is_none() {
+        return idx;
+    }
+
+    for candidate in 0..idx.0 {
+        let candidate = TypeIdx(candidate);
+        if func_type_indices_equivalent(module, candidate, idx) {
+            return candidate;
+        }
+    }
+
+    idx
+}
+
+fn func_type_indices_equivalent(module: &Module<'_>, lhs: TypeIdx, rhs: TypeIdx) -> bool {
+    let mut seen = BTreeSet::new();
+    func_type_indices_equivalent_inner(module, lhs, rhs, &mut seen)
+}
+
+fn func_type_indices_equivalent_inner(
+    module: &Module<'_>,
+    lhs: TypeIdx,
+    rhs: TypeIdx,
+    seen: &mut BTreeSet<(u32, u32)>,
+) -> bool {
+    let key = if lhs.0 <= rhs.0 {
+        (lhs.0, rhs.0)
+    } else {
+        (rhs.0, lhs.0)
+    };
+    if !seen.insert(key) {
+        return true;
+    }
+
+    let Some(lhs_ty) = module.types.get(lhs.0 as usize) else {
+        return false;
+    };
+    let Some(rhs_ty) = module.types.get(rhs.0 as usize) else {
+        return false;
+    };
+
+    lhs_ty.params.len() == rhs_ty.params.len()
+        && lhs_ty.results.len() == rhs_ty.results.len()
+        && lhs_ty
+            .params
+            .iter()
+            .zip(&rhs_ty.params)
+            .all(|(lhs, rhs)| valtype_equivalent_inner(module, *lhs, *rhs, seen))
+        && lhs_ty
+            .results
+            .iter()
+            .zip(&rhs_ty.results)
+            .all(|(lhs, rhs)| valtype_equivalent_inner(module, *lhs, *rhs, seen))
+}
+
+fn valtype_equivalent_inner(
+    module: &Module<'_>,
+    lhs: ValType,
+    rhs: ValType,
+    seen: &mut BTreeSet<(u32, u32)>,
+) -> bool {
+    match (lhs, rhs) {
+        (ValType::Ref(lhs), ValType::Ref(rhs)) => reftype_equivalent_inner(module, lhs, rhs, seen),
+        _ => lhs == rhs,
+    }
+}
+
+fn reftype_equivalent_inner(
+    module: &Module<'_>,
+    lhs: RefType,
+    rhs: RefType,
+    seen: &mut BTreeSet<(u32, u32)>,
+) -> bool {
+    lhs.is_nullable() == rhs.is_nullable()
+        && match (lhs.heap_type(), rhs.heap_type()) {
+            (crate::types::HeapType::Type(lhs), crate::types::HeapType::Type(rhs)) => {
+                func_type_indices_equivalent_inner(module, lhs, rhs, seen)
+            }
+            (lhs, rhs) => lhs == rhs,
+        }
+}
+
+fn normalize_reftype(module: &Module<'_>, ty: RefType) -> RefType {
+    match ty.heap_type() {
+        crate::types::HeapType::Type(idx) => RefType::from_parts(
+            ty.is_nullable(),
+            crate::types::HeapType::Type(canonicalize_func_type_idx(module, idx)),
+        ),
+        _ => ty,
+    }
+}
+
+fn normalize_valtype(module: &Module<'_>, ty: ValType) -> ValType {
+    match ty {
+        ValType::Ref(ref_type) => ValType::Ref(normalize_reftype(module, ref_type)),
+        _ => ty,
+    }
+}
+
+fn normalize_func_type(module: &Module<'_>, ty: &FuncType) -> FuncType {
+    FuncType {
+        params: ty
+            .params
+            .iter()
+            .copied()
+            .map(|ty| normalize_valtype(module, ty))
+            .collect(),
+        results: ty
+            .results
+            .iter()
+            .copied()
+            .map(|ty| normalize_valtype(module, ty))
+            .collect(),
+    }
+}
+
+fn normalize_global_type(
+    module: &Module<'_>,
+    ty: crate::types::GlobalType,
+) -> crate::types::GlobalType {
+    crate::types::GlobalType {
+        val_type: normalize_valtype(module, ty.val_type),
+        mutability: ty.mutability,
+    }
+}
+
+fn normalize_table_type(
+    module: &Module<'_>,
+    ty: crate::types::TableType,
+) -> crate::types::TableType {
+    crate::types::TableType {
+        elem: normalize_reftype(module, ty.elem),
+        limits: ty.limits,
+    }
 }
 
 fn reftype_matches(found: RefType, expected: RefType) -> bool {
@@ -2831,10 +2993,10 @@ fn pop_any(
         .ok_or_else(|| underflow_error(function, state, op, &[], offset))
 }
 
-fn expand_locals(locals: &mut Vec<ValType>, local_decls: &[LocalDecl]) {
+fn expand_locals(module: &Module<'_>, locals: &mut Vec<ValType>, local_decls: &[LocalDecl]) {
     for decl in local_decls {
         for _ in 0..decl.count {
-            locals.push(decl.val_type);
+            locals.push(normalize_valtype(module, decl.val_type));
         }
     }
 }
@@ -4189,12 +4351,36 @@ mod tests {
     }
 
     #[test]
+    fn validate_call_ref_with_equivalent_concrete_type() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0B, 0x02, 0x60, 0x01, 0x7F,
+            0x01, 0x7F, 0x60, 0x01, 0x7F, 0x01, 0x7F, 0x03, 0x03, 0x02, 0x00, 0x00, 0x07, 0x05,
+            0x01, 0x01, 0x66, 0x00, 0x00, 0x0A, 0x0F, 0x02, 0x04, 0x00, 0x20, 0x00, 0x0B, 0x08,
+            0x00, 0x20, 0x00, 0xD2, 0x00, 0x14, 0x01, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
     fn validate_typed_ref_global_init_from_ref_func() {
         let bytes = [
             0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7F,
             0x01, 0x7F, 0x03, 0x02, 0x01, 0x00, 0x06, 0x07, 0x01, 0x63, 0x00, 0x00, 0xD2, 0x00,
             0x0B, 0x07, 0x05, 0x01, 0x01, 0x66, 0x00, 0x00, 0x0A, 0x06, 0x01, 0x04, 0x00, 0x20,
             0x00, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_typed_ref_global_init_from_equivalent_ref_func() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0B, 0x02, 0x60, 0x01, 0x7F,
+            0x01, 0x7F, 0x60, 0x01, 0x7F, 0x01, 0x7F, 0x03, 0x02, 0x01, 0x00, 0x06, 0x07, 0x01,
+            0x63, 0x01, 0x00, 0xD2, 0x00, 0x0B, 0x07, 0x05, 0x01, 0x01, 0x66, 0x00, 0x00, 0x0A,
+            0x06, 0x01, 0x04, 0x00, 0x20, 0x00, 0x0B,
         ];
         let module = Module::decode(&bytes).unwrap();
         module.validate().unwrap();
@@ -4214,12 +4400,37 @@ mod tests {
     }
 
     #[test]
+    fn validate_typed_table_set_get_with_equivalent_concrete_type() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x10, 0x03, 0x60, 0x01, 0x7F,
+            0x01, 0x7F, 0x60, 0x01, 0x7F, 0x01, 0x7F, 0x60, 0x00, 0x01, 0x63, 0x01, 0x03, 0x03,
+            0x02, 0x00, 0x02, 0x04, 0x05, 0x01, 0x63, 0x01, 0x00, 0x01, 0x07, 0x05, 0x01, 0x01,
+            0x66, 0x00, 0x00, 0x0A, 0x13, 0x02, 0x04, 0x00, 0x20, 0x00, 0x0B, 0x0C, 0x00, 0x41,
+            0x00, 0xD2, 0x00, 0x26, 0x00, 0x41, 0x00, 0x25, 0x00, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
     fn validate_return_call_ref() {
         let bytes = [
             0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7F,
             0x01, 0x7F, 0x03, 0x03, 0x02, 0x00, 0x00, 0x07, 0x05, 0x01, 0x01, 0x66, 0x00, 0x00,
             0x0A, 0x0F, 0x02, 0x04, 0x00, 0x20, 0x00, 0x0B, 0x08, 0x00, 0x20, 0x00, 0xD2, 0x00,
             0x15, 0x00, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_return_call_ref_with_equivalent_concrete_type() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0B, 0x02, 0x60, 0x01, 0x7F,
+            0x01, 0x7F, 0x60, 0x01, 0x7F, 0x01, 0x7F, 0x03, 0x03, 0x02, 0x00, 0x00, 0x07, 0x05,
+            0x01, 0x01, 0x66, 0x00, 0x00, 0x0A, 0x0F, 0x02, 0x04, 0x00, 0x20, 0x00, 0x0B, 0x08,
+            0x00, 0x20, 0x00, 0xD2, 0x00, 0x15, 0x01, 0x0B,
         ];
         let module = Module::decode(&bytes).unwrap();
         module.validate().unwrap();

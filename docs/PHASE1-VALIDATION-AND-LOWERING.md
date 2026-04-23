@@ -328,12 +328,14 @@ Function-reference call support now also includes `call_ref` and `return_call_re
 an initial typed-reference groundwork pass: `RefType` now models nullable vs non-null references
 and concrete function type indices, binary parsing accepts typed-reference encodings across
 function types / globals / tables / locals / block results, and validation accepts concrete
-function refs as subtypes of abstract `funcref` where appropriate. Grounding now includes
-`call-ref-subset`, `return-call-ref-subset`, `typed-call-ref-subset`,
-`typed-return-call-ref-subset`, `typed-table-ref-subset`, and
+function refs as subtypes of abstract `funcref` where appropriate. Validation now also
+canonicalizes structurally equivalent concrete function types for the currently supported typed-
+function-reference surface, so equivalent signatures no longer mismatch solely because their raw
+`TypeIdx` values differ. Grounding now includes `call-ref-subset`, `return-call-ref-subset`,
+`typed-call-ref-subset`, `typed-return-call-ref-subset`, `typed-table-ref-subset`, and
 `typed-reference-types-subset`, along with raw valid fixtures for typed global init / typed
-`call_ref` / typed table flows and raw invalid fixtures for non-`funcref` references,
-concrete-type mismatches, and result-mismatch cases.
+`call_ref` / typed table flows, equivalent-signature function-reference flows, and raw invalid
+fixtures for non-`funcref` references, concrete-type mismatches, and result-mismatch cases.
 
 `ref.as_non_null` now also has dedicated grounding via `ref-as-non-null-subset`, along with raw
 valid fixture `ref-as-non-null-call-ref.wasm` and raw invalid fixture

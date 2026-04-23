@@ -261,14 +261,19 @@ interpreter-first with AOT as a future layer.
     plus the first typed-reference groundwork pass: `RefType` now models nullable vs non-null
     references and concrete function type indices, binary parsing accepts typed-reference encodings
     across types/tables/globals/locals/block results, and validation accepts concrete function refs
-    as subtypes of abstract `funcref` where appropriate. Grounding now includes new
-    `call-ref-subset`, `return-call-ref-subset`, `typed-call-ref-subset`,
-    `typed-return-call-ref-subset`, `typed-table-ref-subset`, and
-    `typed-reference-types-subset` upstream files, new raw valid fixtures
-    `valid/call-ref-minimal.wasm`, `valid/return-call-ref-minimal.wasm`,
+    as subtypes of abstract `funcref` where appropriate. Validation now also canonicalizes
+    structurally equivalent concrete function types for the currently supported typed-function-
+    reference surface, so equivalent signatures no longer mismatch solely because their raw
+    `TypeIdx` values differ. Grounding now includes new `call-ref-subset`,
+    `return-call-ref-subset`, `typed-call-ref-subset`, `typed-return-call-ref-subset`,
+    `typed-table-ref-subset`, and `typed-reference-types-subset` upstream files, new raw valid
+    fixtures `valid/call-ref-minimal.wasm`, `valid/return-call-ref-minimal.wasm`,
     `valid/typed-ref-global-init-from-ref-func.wasm`, `valid/typed-call-ref-null-concrete.wasm`,
-    and `valid/typed-table-set-get-concrete.wasm`, plus raw invalid fixtures for non-`funcref`
-    references, concrete-type mismatches, and result-mismatch cases.
+    `valid/typed-table-set-get-concrete.wasm`, `valid/typed-call-ref-equivalent-signature.wasm`,
+    `valid/typed-return-call-ref-equivalent-signature.wasm`,
+    `valid/typed-table-set-get-equivalent-signature.wasm`, and
+    `valid/typed-ref-global-init-equivalent-signature.wasm`, plus raw invalid fixtures for
+    non-`funcref` references, concrete-type mismatches, and result-mismatch cases.
   - `ref.as_non_null` support now also includes decoding plus validation grounding via new
     `ref-as-non-null-subset` upstream coverage, raw valid
     `valid/ref-as-non-null-call-ref.wasm`, and raw invalid
@@ -362,7 +367,7 @@ More concretely, Phase 1 is done when all of the following are true:
 - `cargo test -p baedeker-core --test spec_node`
 - `cargo test -p baedeker-core`
 - `cargo clippy -p baedeker-core --all-targets -- -D warnings`
-- Current `baedeker-core` unit test count: **229 passing**
+- Current `baedeker-core` unit test count: **233 passing**
 - Current spec-harness integration tests: **8 passing** (`spec`: 3, `spec_wast`: 2, `spec_node`: 3)
 - `spec_node` adds a Node/V8 compile-time cross-check over the raw fixture corpus plus the active
   upstream-derived `wast-upstream` subset lane. Custom `spec/wast` cases remain Baedeker-shaped
