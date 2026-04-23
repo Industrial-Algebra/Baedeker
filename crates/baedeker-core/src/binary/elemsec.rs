@@ -7,6 +7,7 @@ use alloc::vec::Vec;
 
 use crate::binary::leb128::{self, Cursor};
 use crate::binary::section::RawSection;
+use crate::binary::typeparser::parse_ref_type as parse_binary_ref_type;
 use crate::error::{ByteOffset, DecodeContext, DecodeError, DecodeErrorKind};
 use crate::types::{
     ElementExpr, ElementInit, ElementMode, ElementSegment, FuncIdx, RefType, TableIdx,
@@ -216,22 +217,7 @@ fn parse_elemkind(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<RefType
 }
 
 fn parse_ref_type(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<RefType, DecodeError> {
-    let offset = cursor.position();
-    let byte = cursor.read_byte().map_err(|_| DecodeError {
-        offset: ByteOffset(base_offset + offset),
-        context: DecodeContext::ElementSection,
-        kind: DecodeErrorKind::UnexpectedEof,
-    })?;
-
-    match byte {
-        0x70 => Ok(RefType::FuncRef),
-        0x6F => Ok(RefType::ExternRef),
-        _ => Err(DecodeError {
-            offset: ByteOffset(base_offset + offset),
-            context: DecodeContext::ElementSection,
-            kind: DecodeErrorKind::UnknownRefType { byte },
-        }),
-    }
+    parse_binary_ref_type(cursor, base_offset, DecodeContext::ElementSection)
 }
 
 fn decode_u32_in_section(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<u32, DecodeError> {

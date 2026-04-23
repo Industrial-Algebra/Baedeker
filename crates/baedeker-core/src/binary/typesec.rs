@@ -7,6 +7,7 @@ use alloc::vec::Vec;
 
 use crate::binary::leb128::{self, Cursor};
 use crate::binary::section::RawSection;
+use crate::binary::typeparser::parse_val_type;
 use crate::error::{ByteOffset, DecodeContext, DecodeError, DecodeErrorKind};
 use crate::types::{FuncType, ValType};
 
@@ -77,20 +78,11 @@ fn parse_valtype_vec(
 
     let mut types = Vec::with_capacity(count as usize);
     for _ in 0..count {
-        let offset = cursor.position();
-        let byte = cursor.read_byte().map_err(|_| DecodeError {
-            offset: ByteOffset(base_offset + offset),
-            context: DecodeContext::TypeSection,
-            kind: DecodeErrorKind::UnexpectedEof,
-        })?;
-
-        let val_type = ValType::from_encoding(byte).ok_or(DecodeError {
-            offset: ByteOffset(base_offset + offset),
-            context: DecodeContext::TypeSection,
-            kind: DecodeErrorKind::UnknownValType { byte },
-        })?;
-
-        types.push(val_type);
+        types.push(parse_val_type(
+            cursor,
+            base_offset,
+            DecodeContext::TypeSection,
+        )?);
     }
 
     Ok(types)
@@ -100,7 +92,7 @@ fn parse_valtype_vec(
 mod tests {
     use super::*;
     use crate::binary::section::SectionId;
-    use crate::types::{NumType, RefType, VecType};
+    use crate::types::{NumType, RefType, TypeIdx, VecType};
 
     fn raw_type_section(data: &[u8]) -> RawSection<'_> {
         RawSection {
@@ -145,6 +137,25 @@ mod tests {
         assert_eq!(types[0].params[2], ValType::Vec(VecType::V128));
         assert_eq!(types[0].results[0], ValType::Num(NumType::F64));
         assert_eq!(types[0].results[1], ValType::Ref(RefType::FuncRef));
+    }
+
+    #[test]
+    fn parse_typed_reference_func_type() {
+        let section = raw_type_section(&[
+            0x01, // one type
+            0x60, // functype
+            0x01, // one param
+            0x63, 0x00, // (ref null type 0)
+            0x01, // one result
+            0x64, 0x70, // (ref func)
+        ]);
+        let types = parse_type_section(&section).unwrap();
+
+        assert_eq!(
+            types[0].params[0],
+            ValType::Ref(RefType::concrete(true, TypeIdx(0)))
+        );
+        assert_eq!(types[0].results[0], ValType::Ref(RefType::func(false)));
     }
 
     #[test]

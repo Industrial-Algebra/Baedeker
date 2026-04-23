@@ -9,6 +9,9 @@
 use alloc::vec::Vec;
 
 use crate::binary::leb128::{self, Cursor};
+use crate::binary::typeparser::{
+    parse_heap_type, parse_val_type as parse_binary_val_type, parse_val_type_with_first_byte,
+};
 use crate::error::{ByteOffset, DecodeContext, DecodeError, DecodeErrorKind};
 use crate::types::{
     BlockType, CodeBody, ElemIdx, FuncIdx, GlobalIdx, LabelIdx, LocalIdx, MemArg, MemIdx, RefType,
@@ -34,6 +37,8 @@ pub enum Instr {
     End,
     Br(LabelIdx),
     BrIf(LabelIdx),
+    BrOnNull(LabelIdx),
+    BrOnNonNull(LabelIdx),
     BrTable {
         targets: Vec<LabelIdx>,
         default: LabelIdx,
@@ -441,9 +446,14 @@ pub fn decode_instr_with_offset(
         0x42 => Instr::I64Const(decode_i64(cursor, base_offset)?),
         0x43 => Instr::F32Const(decode_f32(cursor, base_offset)?),
         0x44 => Instr::F64Const(decode_f64(cursor, base_offset)?),
-        0xD0 => Instr::RefNull(parse_ref_type(cursor, base_offset)?),
+        0xD0 => Instr::RefNull(RefType::from_parts(
+            true,
+            parse_heap_type(cursor, base_offset, DecodeContext::CodeSection)?,
+        )),
         0xD1 => Instr::RefIsNull,
         0xD2 => Instr::RefFunc(FuncIdx(decode_u32(cursor, base_offset)?)),
+        0xD5 => Instr::BrOnNull(LabelIdx(decode_u32(cursor, base_offset)?)),
+        0xD6 => Instr::BrOnNonNull(LabelIdx(decode_u32(cursor, base_offset)?)),
         0x45 => Instr::I32Eqz,
         0x46 => Instr::I32Eq,
         0x47 => Instr::I32Ne,
@@ -742,25 +752,6 @@ fn parse_table_idx(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<TableI
     Ok(TableIdx(decode_u32(cursor, base_offset)?))
 }
 
-fn parse_ref_type(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<RefType, DecodeError> {
-    let pos = cursor.position();
-    let byte = cursor.read_byte().map_err(|_| DecodeError {
-        offset: ByteOffset(base_offset + pos),
-        context: DecodeContext::CodeSection,
-        kind: DecodeErrorKind::UnexpectedEof,
-    })?;
-
-    match byte {
-        0x70 => Ok(RefType::FuncRef),
-        0x6F => Ok(RefType::ExternRef),
-        _ => Err(DecodeError {
-            offset: ByteOffset(base_offset + pos),
-            context: DecodeContext::CodeSection,
-            kind: DecodeErrorKind::UnknownRefType { byte },
-        }),
-    }
-}
-
 fn parse_result_types(
     cursor: &mut Cursor<'_>,
     base_offset: usize,
@@ -768,18 +759,11 @@ fn parse_result_types(
     let count = decode_u32(cursor, base_offset)?;
     let mut types = Vec::with_capacity(count as usize);
     for _ in 0..count {
-        let pos = cursor.position();
-        let byte = cursor.read_byte().map_err(|_| DecodeError {
-            offset: ByteOffset(base_offset + pos),
-            context: DecodeContext::CodeSection,
-            kind: DecodeErrorKind::UnexpectedEof,
-        })?;
-        let ty = ValType::from_encoding(byte).ok_or(DecodeError {
-            offset: ByteOffset(base_offset + pos),
-            context: DecodeContext::CodeSection,
-            kind: DecodeErrorKind::UnknownValType { byte },
-        })?;
-        types.push(ty);
+        types.push(parse_binary_val_type(
+            cursor,
+            base_offset,
+            DecodeContext::CodeSection,
+        )?);
     }
     Ok(types)
 }
@@ -796,8 +780,13 @@ fn parse_block_type(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Block
         return Ok(BlockType::Empty);
     }
 
-    if let Some(val_type) = ValType::from_encoding(first) {
-        return Ok(BlockType::Val(val_type));
+    if matches!(first, 0x7B..=0x7F | 0x70 | 0x6F | 0x63 | 0x64) {
+        return Ok(BlockType::Val(parse_val_type_with_first_byte(
+            cursor,
+            first,
+            base_offset + start,
+            DecodeContext::CodeSection,
+        )?));
     }
 
     let type_idx = decode_block_type_idx(cursor, first, base_offset + start)?;
@@ -1055,13 +1044,31 @@ mod tests {
 
     #[test]
     fn decode_ref_instructions() {
-        let instrs = decode_instr_sequence(&[0xD0, 0x70, 0xD1, 0xD2, 0x00, 0x0B], 90).unwrap();
+        let instrs = decode_instr_sequence(
+            &[0xD0, 0x70, 0xD1, 0xD2, 0x00, 0xD5, 0x01, 0xD6, 0x02, 0x0B],
+            90,
+        )
+        .unwrap();
         assert_eq!(
             instrs,
             vec![
                 Instr::RefNull(RefType::FuncRef),
                 Instr::RefIsNull,
                 Instr::RefFunc(FuncIdx(0)),
+                Instr::BrOnNull(LabelIdx(1)),
+                Instr::BrOnNonNull(LabelIdx(2)),
+                Instr::End
+            ]
+        );
+    }
+
+    #[test]
+    fn decode_typed_ref_null_instruction() {
+        let instrs = decode_instr_sequence(&[0xD0, 0x00, 0x0B], 92).unwrap();
+        assert_eq!(
+            instrs,
+            vec![
+                Instr::RefNull(RefType::concrete(true, TypeIdx(0))),
                 Instr::End
             ]
         );

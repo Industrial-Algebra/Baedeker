@@ -89,6 +89,10 @@ pub enum ValidationErrorKind {
         expected: Vec<ValType>,
         found: Vec<ValType>,
     },
+    InvalidBrOnNonNullTarget {
+        label: LabelIdx,
+        found: Vec<ValType>,
+    },
     InconsistentBranchTypes {
         expected: Vec<ValType>,
         found: Vec<ValType>,
@@ -276,6 +280,13 @@ impl fmt::Display for ValidationErrorKind {
                     f,
                     "branch to label {} has type mismatch: expected {:?}, found {:?}",
                     label.0, expected, found
+                )
+            }
+            ValidationErrorKind::InvalidBrOnNonNullTarget { label, found } => {
+                write!(
+                    f,
+                    "br_on_non_null target label {} must end in a reference type, found {:?}",
+                    label.0, found
                 )
             }
             ValidationErrorKind::InconsistentBranchTypes { expected, found } => {

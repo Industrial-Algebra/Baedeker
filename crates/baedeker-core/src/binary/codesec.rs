@@ -8,6 +8,7 @@ use alloc::vec::Vec;
 
 use crate::binary::leb128::{self, Cursor};
 use crate::binary::section::RawSection;
+use crate::binary::typeparser::parse_val_type as parse_binary_val_type;
 use crate::error::{ByteOffset, DecodeContext, DecodeError, DecodeErrorKind};
 use crate::types::{CodeBody, LocalDecl, ValType};
 
@@ -67,18 +68,7 @@ fn parse_code_body<'a>(
 }
 
 fn parse_val_type(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<ValType, DecodeError> {
-    let offset = cursor.position();
-    let byte = cursor.read_byte().map_err(|_| DecodeError {
-        offset: ByteOffset(base_offset + offset),
-        context: DecodeContext::CodeSection,
-        kind: DecodeErrorKind::UnexpectedEof,
-    })?;
-
-    ValType::from_encoding(byte).ok_or(DecodeError {
-        offset: ByteOffset(base_offset + offset),
-        context: DecodeContext::CodeSection,
-        kind: DecodeErrorKind::UnknownValType { byte },
-    })
+    parse_binary_val_type(cursor, base_offset, DecodeContext::CodeSection)
 }
 
 fn decode_u32_in_code_section(

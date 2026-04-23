@@ -80,6 +80,7 @@ fn validation_kind_name(kind: &ValidationErrorKind) -> &'static str {
         ValidationErrorKind::ImmutableGlobalSet { .. } => "ImmutableGlobalSet",
         ValidationErrorKind::GlobalInitTypeMismatch { .. } => "GlobalInitTypeMismatch",
         ValidationErrorKind::BranchTypeMismatch { .. } => "BranchTypeMismatch",
+        ValidationErrorKind::InvalidBrOnNonNullTarget { .. } => "InvalidBrOnNonNullTarget",
         ValidationErrorKind::InconsistentBranchTypes { .. } => "InconsistentBranchTypes",
         ValidationErrorKind::UnexpectedElse => "UnexpectedElse",
         ValidationErrorKind::UnexpectedEnd => "UnexpectedEnd",

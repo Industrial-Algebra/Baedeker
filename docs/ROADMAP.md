@@ -152,9 +152,13 @@ interpreter-first with AOT as a future layer.
     - `wast-upstream/call-subset.wast`
     - `wast-upstream/call-indirect-subset.wast`
     - `wast-upstream/call-ref-subset.wast`
+    - `wast-upstream/typed-call-ref-subset.wast`
     - `wast-upstream/return-call-subset.wast`
     - `wast-upstream/return-call-indirect-subset.wast`
     - `wast-upstream/return-call-ref-subset.wast`
+    - `wast-upstream/typed-return-call-ref-subset.wast`
+    - `wast-upstream/br-on-null-subset.wast`
+    - `wast-upstream/br-on-non-null-subset.wast`
     - `wast-upstream/return-subset.wast`
     - `wast-upstream/block-subset.wast`
     - `wast-upstream/if-subset.wast`
@@ -171,6 +175,8 @@ interpreter-first with AOT as a future layer.
     - `wast-upstream/table-ref-flow-subset.wast`
     - `wast-upstream/table-grow-ref-subset.wast`
     - `wast-upstream/ref-func-table-call-subset.wast`
+    - `wast-upstream/typed-table-ref-subset.wast`
+    - `wast-upstream/typed-reference-types-subset.wast`
     - `wast-upstream/table-init-subset.wast`
     - `wast-upstream/table-copy-subset.wast`
     - `wast-upstream/table-fill-subset.wast`
@@ -250,16 +256,25 @@ interpreter-first with AOT as a future layer.
     `valid/return-call-minimal.wasm` and `valid/return-call-indirect-funcref-table.wasm`, and new
     raw invalid fixtures for result-mismatch and non-`funcref`-table cases.
   - Function-reference call support now also includes `call_ref` and `return_call_ref` decoding
-    plus current funcref-based validation grounding via new `call-ref-subset` and
-    `return-call-ref-subset` upstream files, new raw valid fixtures
-    `valid/call-ref-minimal.wasm` and `valid/return-call-ref-minimal.wasm`, and raw invalid
-    fixtures for non-`funcref` references and result-mismatch cases.
-  - Proposal-boundary scouting now pins the remaining unsupported null-branch operators through raw
-    `invalid-validate` fixtures: `proposal-br-on-null-unsupported` and
-    `proposal-br-on-non-null-unsupported`. These remain future implementation targets rather than
-    active upstream subsets; today they surface as decode-preserving
-    `ValidationErrorKind::Decode` failures with `context=CodeSection` and
-    `decode_kind=UnknownOpcode`.
+    plus the first typed-reference groundwork pass: `RefType` now models nullable vs non-null
+    references and concrete function type indices, binary parsing accepts typed-reference encodings
+    across types/tables/globals/locals/block results, and validation accepts concrete function refs
+    as subtypes of abstract `funcref` where appropriate. Grounding now includes new
+    `call-ref-subset`, `return-call-ref-subset`, `typed-call-ref-subset`,
+    `typed-return-call-ref-subset`, `typed-table-ref-subset`, and
+    `typed-reference-types-subset` upstream files, new raw valid fixtures
+    `valid/call-ref-minimal.wasm`, `valid/return-call-ref-minimal.wasm`,
+    `valid/typed-ref-global-init-from-ref-func.wasm`, `valid/typed-call-ref-null-concrete.wasm`,
+    and `valid/typed-table-set-get-concrete.wasm`, plus raw invalid fixtures for non-`funcref`
+    references, concrete-type mismatches, and result-mismatch cases.
+  - Null-branch support now also includes `br_on_null` and `br_on_non_null` decoding plus
+    validation grounding via new `br-on-null-subset` and `br-on-non-null-subset` upstream files.
+    Raw fixtures now include valid `valid/br-on-null-fallthrough-narrow.wasm` and
+    `valid/br-on-non-null-branch-result.wasm`, plus invalid
+    `invalid-validate/br-on-null-non-ref-input.wasm` and
+    `invalid-validate/br-on-non-null-non-ref-target.wasm`. `br_on_null` now narrows the
+    fallthrough reference to non-null, while `br_on_non_null` requires the target label to end in a
+    reference type and routes the tested value through that branch target.
   - Raw invalid body-fixture metadata is now tighter for decode-preserving validation failures:
     the current wrapped `ValidationErrorKind::Decode` cases for truncated bulk-memory, truncated
     memarg, and unknown SIMD opcode bodies now pin exact `offset=` alongside `context=` and
@@ -336,10 +351,14 @@ More concretely, Phase 1 is done when all of the following are true:
 - `cargo fmt -- --check`
 - `cargo test -p baedeker-core --test spec`
 - `cargo test -p baedeker-core --test spec_wast`
+- `cargo test -p baedeker-core --test spec_node`
 - `cargo test -p baedeker-core`
 - `cargo clippy -p baedeker-core --all-targets -- -D warnings`
-- Current `baedeker-core` unit test count: **213 passing**
-- Current spec-harness integration tests: **5 passing** (`spec`: 3, `spec_wast`: 2)
+- Current `baedeker-core` unit test count: **227 passing**
+- Current spec-harness integration tests: **8 passing** (`spec`: 3, `spec_wast`: 2, `spec_node`: 3)
+- `spec_node` adds a Node/V8 compile-time cross-check over the raw fixture corpus plus the active
+  upstream-derived `wast-upstream` subset lane. Custom `spec/wast` cases remain Baedeker-shaped
+  boundary coverage and are not enforced against Node/V8.
 
 ### Current branch snapshot
 Current Phase 1 closure work continues on `feat/phase-1-part-2-closures`, with the validator and

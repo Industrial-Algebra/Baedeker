@@ -250,6 +250,8 @@ scalar memory, and call argument-flow validation via:
 - `crates/baedeker-testdata/spec/wast-upstream/table-ref-flow-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/table-grow-ref-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/ref-func-table-call-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/typed-table-ref-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/typed-reference-types-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/table-init-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/table-copy-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/table-fill-subset.wast`
@@ -273,9 +275,13 @@ scalar memory, and call argument-flow validation via:
 - `crates/baedeker-testdata/spec/wast-upstream/call-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/call-indirect-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/call-ref-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/typed-call-ref-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/return-call-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/return-call-indirect-subset.wast`
 - `crates/baedeker-testdata/spec/wast-upstream/return-call-ref-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/typed-return-call-ref-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/br-on-null-subset.wast`
+- `crates/baedeker-testdata/spec/wast-upstream/br-on-non-null-subset.wast`
 
 The `call-indirect-subset` lane now also includes broader multi-table / explicit-table-index
 interaction coverage rather than only a narrow single-table argument-flow slice.
@@ -317,15 +323,22 @@ decoding plus validation grounding via `return-call-subset` and
 shapes and raw invalid fixtures for result-mismatch and non-`funcref`-table cases.
 
 Function-reference call support now also includes `call_ref` and `return_call_ref` decoding plus
-current funcref-based validation grounding via `call-ref-subset` and
-`return-call-ref-subset`, along with raw valid fixtures for minimal direct tail-reference calls
-and raw invalid fixtures for non-`funcref` references and result-mismatch cases.
+an initial typed-reference groundwork pass: `RefType` now models nullable vs non-null references
+and concrete function type indices, binary parsing accepts typed-reference encodings across
+function types / globals / tables / locals / block results, and validation accepts concrete
+function refs as subtypes of abstract `funcref` where appropriate. Grounding now includes
+`call-ref-subset`, `return-call-ref-subset`, `typed-call-ref-subset`,
+`typed-return-call-ref-subset`, `typed-table-ref-subset`, and
+`typed-reference-types-subset`, along with raw valid fixtures for typed global init / typed
+`call_ref` / typed table flows and raw invalid fixtures for non-`funcref` references,
+concrete-type mismatches, and result-mismatch cases.
 
-Proposal-boundary scouting now pins the remaining unsupported null-branch operators through raw
-`invalid-validate` fixtures: `proposal-br-on-null-unsupported` and
-`proposal-br-on-non-null-unsupported`. These remain future implementation targets rather than
-active upstream subsets; today they surface as
-`ValidationErrorKind::Decode { context: CodeSection, kind: UnknownOpcode { .. } }`.
+Null-branch support now also includes `br_on_null` and `br_on_non_null` decoding plus validation
+via `br-on-null-subset` and `br-on-non-null-subset`, along with raw valid fixtures
+`br-on-null-fallthrough-narrow.wasm` and `br-on-non-null-branch-result.wasm` and raw invalid
+fixtures `br-on-null-non-ref-input.wasm` and `br-on-non-null-non-ref-target.wasm`.
+`br_on_null` now narrows the fallthrough reference to non-null, while `br_on_non_null` requires a
+reference-typed target label suffix and routes the tested value through that branch.
 
 Historical active upstream files have also been normalized to `-subset.wast` names; for example,
 `ref-func-undeclared-reference-subset.wast` is active coverage rather than a deferred skip.

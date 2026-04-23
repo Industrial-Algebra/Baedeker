@@ -5,6 +5,24 @@
 
 use alloc::{string::String, vec::Vec};
 
+/// Newtype index wrappers to prevent mixing up different index spaces.
+macro_rules! define_idx {
+    ($name:ident) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub struct $name(pub u32);
+    };
+}
+
+define_idx!(TypeIdx);
+define_idx!(FuncIdx);
+define_idx!(TableIdx);
+define_idx!(MemIdx);
+define_idx!(GlobalIdx);
+define_idx!(ElemIdx);
+define_idx!(DataIdx);
+define_idx!(LocalIdx);
+define_idx!(LabelIdx);
+
 /// Number types.
 /// See [Spec §2.3.1](https://webassembly.github.io/spec/core/syntax/types.html#number-types).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -22,12 +40,110 @@ pub enum VecType {
     V128,
 }
 
+/// Heap types used by reference types.
+/// See [Spec §2.3.3](https://webassembly.github.io/spec/core/syntax/types.html#reference-types).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HeapType {
+    Func,
+    Extern,
+    Type(TypeIdx),
+}
+
+impl HeapType {
+    pub fn is_subtype_of(self, expected: Self) -> bool {
+        match (self, expected) {
+            (found, expected) if found == expected => true,
+            (HeapType::Type(_), HeapType::Func) => true,
+            _ => false,
+        }
+    }
+}
+
 /// Reference types.
 /// See [Spec §2.3.3](https://webassembly.github.io/spec/core/syntax/types.html#reference-types).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RefType {
     FuncRef,
     ExternRef,
+    Typed { nullable: bool, heap: HeapType },
+}
+
+impl RefType {
+    pub fn func(nullable: bool) -> Self {
+        if nullable {
+            Self::FuncRef
+        } else {
+            Self::Typed {
+                nullable: false,
+                heap: HeapType::Func,
+            }
+        }
+    }
+
+    pub fn extern_(nullable: bool) -> Self {
+        if nullable {
+            Self::ExternRef
+        } else {
+            Self::Typed {
+                nullable: false,
+                heap: HeapType::Extern,
+            }
+        }
+    }
+
+    pub fn concrete(nullable: bool, type_idx: TypeIdx) -> Self {
+        Self::Typed {
+            nullable,
+            heap: HeapType::Type(type_idx),
+        }
+    }
+
+    pub fn from_parts(nullable: bool, heap: HeapType) -> Self {
+        match heap {
+            HeapType::Func => Self::func(nullable),
+            HeapType::Extern => Self::extern_(nullable),
+            HeapType::Type(type_idx) => Self::concrete(nullable, type_idx),
+        }
+    }
+
+    pub fn is_nullable(self) -> bool {
+        match self {
+            Self::FuncRef | Self::ExternRef => true,
+            Self::Typed { nullable, .. } => nullable,
+        }
+    }
+
+    pub fn heap_type(self) -> HeapType {
+        match self {
+            Self::FuncRef => HeapType::Func,
+            Self::ExternRef => HeapType::Extern,
+            Self::Typed { heap, .. } => heap,
+        }
+    }
+
+    pub fn with_nullability(self, nullable: bool) -> Self {
+        Self::from_parts(nullable, self.heap_type())
+    }
+
+    pub fn as_non_null(self) -> Self {
+        self.with_nullability(false)
+    }
+
+    pub fn as_nullable(self) -> Self {
+        self.with_nullability(true)
+    }
+
+    pub fn is_subtype_of(self, expected: Self) -> bool {
+        if self == expected {
+            return true;
+        }
+
+        if self.is_nullable() && !expected.is_nullable() {
+            return false;
+        }
+
+        self.heap_type().is_subtype_of(expected.heap_type())
+    }
 }
 
 /// Value types — the union of number, vector, and reference types.
@@ -40,21 +156,11 @@ pub enum ValType {
 }
 
 impl ValType {
-    /// Binary encoding byte for this value type.
-    /// See [Spec §5.3.1](https://webassembly.github.io/spec/core/binary/types.html#value-types).
-    pub fn encoding(self) -> u8 {
-        match self {
-            ValType::Num(NumType::I32) => 0x7F,
-            ValType::Num(NumType::I64) => 0x7E,
-            ValType::Num(NumType::F32) => 0x7D,
-            ValType::Num(NumType::F64) => 0x7C,
-            ValType::Vec(VecType::V128) => 0x7B,
-            ValType::Ref(RefType::FuncRef) => 0x70,
-            ValType::Ref(RefType::ExternRef) => 0x6F,
-        }
-    }
-
-    /// Decode a value type from its binary encoding byte.
+    /// Decode a single-byte value type encoding.
+    ///
+    /// This only covers number/vector types plus the legacy short reference-type
+    /// encodings for nullable `funcref` / `externref`. Multi-byte typed-reference
+    /// encodings are handled by the binary parsers.
     pub fn from_encoding(byte: u8) -> Option<Self> {
         match byte {
             0x7F => Some(ValType::Num(NumType::I32)),
@@ -65,6 +171,13 @@ impl ValType {
             0x70 => Some(ValType::Ref(RefType::FuncRef)),
             0x6F => Some(ValType::Ref(RefType::ExternRef)),
             _ => None,
+        }
+    }
+
+    pub fn is_subtype_of(self, expected: Self) -> bool {
+        match (self, expected) {
+            (ValType::Ref(found), ValType::Ref(expected)) => found.is_subtype_of(expected),
+            _ => self == expected,
         }
     }
 }
@@ -254,30 +367,12 @@ pub enum BlockType {
     TypeIdx(u32),
 }
 
-/// Newtype index wrappers to prevent mixing up different index spaces.
-macro_rules! define_idx {
-    ($name:ident) => {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-        pub struct $name(pub u32);
-    };
-}
-
-define_idx!(TypeIdx);
-define_idx!(FuncIdx);
-define_idx!(TableIdx);
-define_idx!(MemIdx);
-define_idx!(GlobalIdx);
-define_idx!(ElemIdx);
-define_idx!(DataIdx);
-define_idx!(LocalIdx);
-define_idx!(LabelIdx);
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn valtype_encoding_roundtrip() {
+    fn valtype_single_byte_encoding_roundtrip() {
         let types = [
             ValType::Num(NumType::I32),
             ValType::Num(NumType::I64),
@@ -287,14 +382,26 @@ mod tests {
             ValType::Ref(RefType::FuncRef),
             ValType::Ref(RefType::ExternRef),
         ];
-        for ty in &types {
-            assert_eq!(ValType::from_encoding(ty.encoding()), Some(*ty));
+        let encodings = [0x7F, 0x7E, 0x7D, 0x7C, 0x7B, 0x70, 0x6F];
+        for (ty, encoding) in types.iter().zip(encodings) {
+            assert_eq!(ValType::from_encoding(encoding), Some(*ty));
         }
     }
 
     #[test]
     fn valtype_invalid_encoding() {
         assert_eq!(ValType::from_encoding(0x00), None);
+        assert_eq!(ValType::from_encoding(0x63), None);
+        assert_eq!(ValType::from_encoding(0x64), None);
         assert_eq!(ValType::from_encoding(0xFF), None);
+    }
+
+    #[test]
+    fn typed_reference_subtyping() {
+        let concrete = RefType::concrete(false, TypeIdx(3));
+        assert!(concrete.is_subtype_of(RefType::func(false)));
+        assert!(concrete.is_subtype_of(RefType::FuncRef));
+        assert!(!RefType::FuncRef.is_subtype_of(RefType::func(false)));
+        assert!(!RefType::ExternRef.is_subtype_of(RefType::FuncRef));
     }
 }
