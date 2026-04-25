@@ -353,6 +353,17 @@ expanded `typed-reference-types-subset`, `elem-subset`, and `table-init-subset`,
 fixtures for imported/defined typed-global initializers, typed element/global flows, passive typed
 element segments, and typed `table.init` equivalent-signature and wrong-concrete-type boundaries.
 
+Typed-reference index-validity / malformed-boundary saturation now also validates concrete typed-
+reference `TypeIdx` operands across the bounded Phase 1 surface: function-type params/results,
+imported typed globals, defined tables, defined globals, element segment types, locals,
+`ref.null` immediates, and reference-valued block results. New raw invalid fixtures now pin
+`UnknownTypeIdx` for those contexts, and official grounding expanded with
+`typed-invalid-typeidx-subset.wast`. Malformed-boundary coverage also now includes raw
+unknown-heaptype bytes in import/global/element/local decoding plus decode-preserving body cases
+for `ref.null` and block-result immediates. Since Node/V8 supports a broader GC-era heap-type
+space than Baedeker currently models, those raw unknown-ref-type byte fixtures are skipped in
+strict Node parity while remaining active Baedeker boundary assertions.
+
 `ref.as_non_null` now also has dedicated grounding via `ref-as-non-null-subset`, along with raw
 valid fixture `ref-as-non-null-call-ref.wasm` and raw invalid fixture
 `ref-as-non-null-non-ref-input.wasm`. Within the current bounded typed-reference model it accepts

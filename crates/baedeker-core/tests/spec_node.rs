@@ -225,7 +225,14 @@ fn raw_expectation(path: &Path) -> RawExpectation {
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or_default();
-            if matches!(stem, "unknown-ref-type-in-table") {
+            if matches!(
+                stem,
+                "unknown-ref-type-in-table"
+                    | "unknown-ref-type-in-import-global"
+                    | "unknown-ref-type-in-global-type"
+                    | "unknown-ref-type-in-element-type"
+                    | "unknown-ref-type-in-local-type"
+            ) {
                 RawExpectation::Skip
             } else {
                 RawExpectation::Reject
@@ -236,7 +243,12 @@ fn raw_expectation(path: &Path) -> RawExpectation {
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or_default();
-            if stem.contains("unsupported") {
+            if stem.contains("unsupported")
+                || matches!(
+                    stem,
+                    "unknown-ref-type-in-ref-null" | "unknown-ref-type-in-block-result"
+                )
+            {
                 RawExpectation::Skip
             } else {
                 RawExpectation::Reject

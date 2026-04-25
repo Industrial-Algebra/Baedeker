@@ -51,7 +51,9 @@ pub fn validate_module(module: &Module<'_>) -> Result<(), ValidationError> {
         }
     }
 
+    validate_type_definitions(module)?;
     validate_imports(module)?;
+    validate_tables(module)?;
     validate_globals(module)?;
     validate_data_segments(module)?;
     validate_bulk_memory(module)?;
@@ -73,6 +75,19 @@ pub fn validate_module(module: &Module<'_>) -> Result<(), ValidationError> {
     Ok(())
 }
 
+fn validate_type_definitions(module: &Module<'_>) -> Result<(), ValidationError> {
+    let offset = module
+        .section(crate::binary::section::SectionId::Type)
+        .map(|section| section.offset)
+        .unwrap_or(0);
+
+    for ty in &module.types {
+        validate_func_type_type_indices(module, ty, None, offset)?;
+    }
+
+    Ok(())
+}
+
 fn validate_imports(module: &Module<'_>) -> Result<(), ValidationError> {
     let offset = module
         .section(crate::binary::section::SectionId::Import)
@@ -80,22 +95,50 @@ fn validate_imports(module: &Module<'_>) -> Result<(), ValidationError> {
         .unwrap_or(0);
 
     for import in module.imports() {
-        if let ImportDesc::Func(type_idx) = import.desc
-            && module.types.get(type_idx.0 as usize).is_none()
-        {
-            return Err(ValidationError {
-                offset: ByteOffset(offset),
-                function: None,
-                kind: ValidationErrorKind::UnknownTypeIdx { idx: type_idx },
-            });
+        match import.desc {
+            ImportDesc::Func(type_idx) => {
+                if module.types.get(type_idx.0 as usize).is_none() {
+                    return Err(ValidationError {
+                        offset: ByteOffset(offset),
+                        function: None,
+                        kind: ValidationErrorKind::UnknownTypeIdx { idx: type_idx },
+                    });
+                }
+            }
+            ImportDesc::Table(table) => {
+                validate_reftype_type_indices(module, table.elem, None, offset)?;
+            }
+            ImportDesc::Global(global) => {
+                validate_valtype_type_indices(module, global.val_type, None, offset)?;
+            }
+            ImportDesc::Mem(_) => {}
         }
     }
 
     Ok(())
 }
 
+fn validate_tables(module: &Module<'_>) -> Result<(), ValidationError> {
+    let offset = module
+        .section(crate::binary::section::SectionId::Table)
+        .map(|section| section.offset)
+        .unwrap_or(0);
+
+    for table in &module.tables {
+        validate_reftype_type_indices(module, table.elem, None, offset)?;
+    }
+
+    Ok(())
+}
+
 fn validate_globals(module: &Module<'_>) -> Result<(), ValidationError> {
+    let offset = module
+        .section(crate::binary::section::SectionId::Global)
+        .map(|section| section.offset)
+        .unwrap_or(0);
+
     for (defined_globals_available, global) in module.globals().iter().enumerate() {
+        validate_valtype_type_indices(module, global.global_type.val_type, None, offset)?;
         validate_global_init_expr(module, global, defined_globals_available)?;
     }
     Ok(())
@@ -319,6 +362,7 @@ fn validate_const_instr(
             stack.push(ValType::Num(crate::types::NumType::F64));
         }
         Instr::RefNull(ref_type) => {
+            validate_reftype_type_indices(module, ref_type, None, decoded.offset.0)?;
             stack.push(normalize_valtype(module, ValType::Ref(ref_type)));
         }
         Instr::RefFunc(idx) => {
@@ -530,6 +574,8 @@ fn validate_elements(module: &Module<'_>) -> Result<(), ValidationError> {
         .unwrap_or(0);
 
     for element in module.elements() {
+        validate_reftype_type_indices(module, element.elem_type, None, section_offset)?;
+
         if let ElementMode::Active {
             table,
             offset_expr,
@@ -607,7 +653,7 @@ fn validate_function(
 ) -> Result<(), ValidationError> {
     let ty = normalize_func_type(module, ty);
     let mut locals = ty.params.clone();
-    expand_locals(module, &mut locals, local_decls);
+    expand_locals(module, function, &mut locals, local_decls, code.body_offset)?;
 
     let instrs = code
         .instructions_with_offsets()
@@ -956,6 +1002,7 @@ fn validate_instr(
                     kind: ValidationErrorKind::InvalidSelectResultArity { found: types.len() },
                 });
             }
+            validate_valtype_type_indices(module, types[0], Some(function), offset)?;
             let expected = normalize_valtype(module, types[0]);
             pop_expect(
                 function,
@@ -1756,6 +1803,7 @@ fn validate_instr(
             .operands
             .push(ValType::Num(crate::types::NumType::F64)),
         Instr::RefNull(ref_type) => {
+            validate_reftype_type_indices(module, *ref_type, Some(function), offset)?;
             state
                 .operands
                 .push(normalize_valtype(module, ValType::Ref(*ref_type)));
@@ -2384,10 +2432,13 @@ fn resolve_block_type(
             params: Vec::new(),
             results: Vec::new(),
         }),
-        BlockType::Val(val) => Ok(FuncType {
-            params: Vec::new(),
-            results: vec![normalize_valtype(module, val)],
-        }),
+        BlockType::Val(val) => {
+            validate_valtype_type_indices(module, val, Some(function), offset)?;
+            Ok(FuncType {
+                params: Vec::new(),
+                results: vec![normalize_valtype(module, val)],
+            })
+        }
         BlockType::TypeIdx(idx) => module
             .types
             .get(idx as usize)
@@ -2855,6 +2906,52 @@ fn reftype_equivalent_inner(
         }
 }
 
+fn validate_func_type_type_indices(
+    module: &Module<'_>,
+    ty: &FuncType,
+    function: Option<FuncIdx>,
+    offset: usize,
+) -> Result<(), ValidationError> {
+    for &param in &ty.params {
+        validate_valtype_type_indices(module, param, function, offset)?;
+    }
+    for &result in &ty.results {
+        validate_valtype_type_indices(module, result, function, offset)?;
+    }
+    Ok(())
+}
+
+fn validate_valtype_type_indices(
+    module: &Module<'_>,
+    ty: ValType,
+    function: Option<FuncIdx>,
+    offset: usize,
+) -> Result<(), ValidationError> {
+    if let ValType::Ref(ref_type) = ty {
+        validate_reftype_type_indices(module, ref_type, function, offset)?;
+    }
+    Ok(())
+}
+
+fn validate_reftype_type_indices(
+    module: &Module<'_>,
+    ty: RefType,
+    function: Option<FuncIdx>,
+    offset: usize,
+) -> Result<(), ValidationError> {
+    if let crate::types::HeapType::Type(idx) = ty.heap_type()
+        && module.types.get(idx.0 as usize).is_none()
+    {
+        return Err(ValidationError {
+            offset: ByteOffset(offset),
+            function,
+            kind: ValidationErrorKind::UnknownTypeIdx { idx },
+        });
+    }
+
+    Ok(())
+}
+
 fn normalize_reftype(module: &Module<'_>, ty: RefType) -> RefType {
     match ty.heap_type() {
         crate::types::HeapType::Type(idx) => RefType::from_parts(
@@ -3118,12 +3215,20 @@ fn pop_any(
         .ok_or_else(|| underflow_error(function, state, op, &[], offset))
 }
 
-fn expand_locals(module: &Module<'_>, locals: &mut Vec<ValType>, local_decls: &[LocalDecl]) {
+fn expand_locals(
+    module: &Module<'_>,
+    function: FuncIdx,
+    locals: &mut Vec<ValType>,
+    local_decls: &[LocalDecl],
+    offset: usize,
+) -> Result<(), ValidationError> {
     for decl in local_decls {
+        validate_valtype_type_indices(module, decl.val_type, Some(function), offset)?;
         for _ in 0..decl.count {
             locals.push(normalize_valtype(module, decl.val_type));
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -3248,6 +3353,113 @@ mod tests {
             ValidationErrorKind::UnknownTypeIdx {
                 idx: crate::types::TypeIdx(1)
             }
+        ));
+    }
+
+    #[test]
+    fn reject_typed_function_type_with_unknown_concrete_type_idx() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x63,
+            0x01, 0x00, 0x03, 0x02, 0x01, 0x00, 0x0A, 0x07, 0x01, 0x05, 0x00, 0x20, 0x00, 0x1A,
+            0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(10));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::UnknownTypeIdx { idx: TypeIdx(1) }
+        ));
+    }
+
+    #[test]
+    fn reject_imported_typed_global_with_unknown_concrete_type_idx() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x02, 0x0B, 0x01, 0x03, 0x65, 0x6E, 0x76, 0x01, 0x67, 0x03, 0x63, 0x01, 0x00,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(16));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::UnknownTypeIdx { idx: TypeIdx(1) }
+        ));
+    }
+
+    #[test]
+    fn reject_typed_table_with_unknown_concrete_type_idx() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x04, 0x05, 0x01, 0x63, 0x01, 0x00, 0x01,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(16));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::UnknownTypeIdx { idx: TypeIdx(1) }
+        ));
+    }
+
+    #[test]
+    fn reject_typed_element_with_unknown_concrete_type_idx() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x09, 0x08, 0x01, 0x05, 0x63, 0x01, 0x01, 0xD0, 0x01, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(16));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::UnknownTypeIdx { idx: TypeIdx(1) }
+        ));
+    }
+
+    #[test]
+    fn reject_typed_local_with_unknown_concrete_type_idx() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x03, 0x02, 0x01, 0x00, 0x0A, 0x07, 0x01, 0x05, 0x01, 0x01, 0x63, 0x01, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(26));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::UnknownTypeIdx { idx: TypeIdx(1) }
+        ));
+    }
+
+    #[test]
+    fn reject_ref_null_with_unknown_concrete_type_idx() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x03, 0x02, 0x01, 0x00, 0x0A, 0x07, 0x01, 0x05, 0x00, 0xD0, 0x01, 0x1A, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(23));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::UnknownTypeIdx { idx: TypeIdx(1) }
+        ));
+    }
+
+    #[test]
+    fn reject_block_result_with_unknown_concrete_type_idx() {
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x03, 0x02, 0x01, 0x00, 0x0A, 0x0B, 0x01, 0x09, 0x00, 0x02, 0x63, 0x01, 0xD0, 0x01,
+            0x1A, 0x0B, 0x0B,
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(23));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::UnknownTypeIdx { idx: TypeIdx(1) }
         ));
     }
 

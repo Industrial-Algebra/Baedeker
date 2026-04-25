@@ -290,6 +290,16 @@ interpreter-first with AOT as a future layer.
     `table-init-subset`, and added raw fixtures for imported/defined typed-global initializers,
     typed element/global flows, passive typed element segments, and typed `table.init`
     equivalent-signature and wrong-concrete-type boundaries.
+  - Typed-reference index-validity / malformed-boundary saturation now also validates concrete
+    typed-reference `TypeIdx` operands across the bounded Phase 1 surface: function-type params /
+    results, imported typed globals, defined tables, defined globals, element segment types,
+    locals, `ref.null` immediates, and reference-valued block results. New raw invalid fixtures pin
+    `UnknownTypeIdx` at these boundaries. Malformed-boundary coverage also now includes raw
+    unknown-heaptype bytes in import/global/element/local decoding plus decode-preserving body
+    cases for `ref.null` and block-result immediates. Because Node/V8 supports a broader GC-era
+    heap-type space than Baedeker currently models, those raw unknown-ref-type byte fixtures are
+    explicitly skipped in strict Node parity while remaining active Baedeker boundary assertions.
+    Official grounding expanded via new `typed-invalid-typeidx-subset.wast`.
   - `ref.as_non_null` support now also includes decoding plus validation grounding via new
     `ref-as-non-null-subset` upstream coverage, raw valid
     `valid/ref-as-non-null-call-ref.wasm`, and raw invalid
@@ -383,7 +393,7 @@ More concretely, Phase 1 is done when all of the following are true:
 - `cargo test -p baedeker-core --test spec_node`
 - `cargo test -p baedeker-core`
 - `cargo clippy -p baedeker-core --all-targets -- -D warnings`
-- Current `baedeker-core` unit test count: **248 passing**
+- Current `baedeker-core` unit test count: **255 passing**
 - Current spec-harness integration tests: **8 passing** (`spec`: 3, `spec_wast`: 2, `spec_node`: 3)
 - `spec_node` adds a Node/V8 compile-time cross-check over the raw fixture corpus plus the active
   upstream-derived `wast-upstream` subset lane. Custom `spec/wast` cases remain Baedeker-shaped
