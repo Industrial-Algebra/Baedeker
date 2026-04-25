@@ -17,6 +17,33 @@
           (return (i32.const 31))))
       (i32.const 32))))
 
+(module
+  (type $t0 (func (param i32) (result i32)))
+  (type $t1 (func (param i32) (result i32)))
+  (func $f (type $t0)
+    (local.get 0))
+  (export "f" (func $f))
+  (func (result (ref null $t1))
+    (block (result (ref null $t1))
+      (ref.func $f)
+      (i32.const 0)
+      (br_table 0 0))))
+
+(assert_invalid
+  (module
+    (type $t0 (func (param i64) (result i64)))
+    (type $t1 (func (param i32) (result i32)))
+    (func $f (type $t0)
+      (local.get 0))
+    (export "f" (func $f))
+    (func (result (ref null $t1))
+      (block (result (ref null $t1))
+        (ref.func $f)
+        (i32.const 0)
+        (br_table 0 0))))
+  "type mismatch"
+)
+
 (assert_invalid
   (module (func $type-arg-void-vs-num (result i32)
     (block (br_table 0 (i32.const 1)) (i32.const 1))))

@@ -309,6 +309,13 @@ interpreter-first with AOT as a future layer.
     propagation. New raw valid fixtures cover those equivalent-signature cases, and new raw invalid
     fixtures pin representative wrong-concrete-type boundaries for typed `select`, imported typed-
     global -> imported typed-table flow, and typed `if` result propagation.
+  - Typed-reference table/control saturation now also covers `br_if`, `br_table`, and typed
+    loop-result forms. Grounding expanded `br-if-subset`, `br-table-subset`, and `loop-subset`
+    with representative equivalent-signature typed-function-reference branches/results plus wrong-
+    concrete-type invalids. New raw valid fixtures cover typed `br_if`, typed `br_table`, and
+    typed loop-result equivalent-signature flows, and new raw invalid fixtures pin
+    `BranchTypeMismatch` / `ControlResultTypeMismatch` boundaries for wrong-concrete-type branch
+    operands and loop fallthrough results.
   - `ref.as_non_null` support now also includes decoding plus validation grounding via new
     `ref-as-non-null-subset` upstream coverage, raw valid
     `valid/ref-as-non-null-call-ref.wasm`, and raw invalid
@@ -402,7 +409,7 @@ More concretely, Phase 1 is done when all of the following are true:
 - `cargo test -p baedeker-core --test spec_node`
 - `cargo test -p baedeker-core`
 - `cargo clippy -p baedeker-core --all-targets -- -D warnings`
-- Current `baedeker-core` unit test count: **264 passing**
+- Current `baedeker-core` unit test count: **270 passing**
 - Current spec-harness integration tests: **8 passing** (`spec`: 3, `spec_wast`: 2, `spec_node`: 3)
 - `spec_node` adds a Node/V8 compile-time cross-check over the raw fixture corpus plus the active
   upstream-derived `wast-upstream` subset lane. Custom `spec/wast` cases remain Baedeker-shaped

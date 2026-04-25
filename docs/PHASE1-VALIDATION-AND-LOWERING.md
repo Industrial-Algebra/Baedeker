@@ -374,6 +374,14 @@ New raw valid fixtures cover those equivalent-signature cases, and new raw inval
 representative wrong-concrete-type boundaries for typed `select`, imported typed-global ->
 imported typed-table flow, and typed `if` result propagation.
 
+Typed-reference table/control saturation now also covers `br_if`, `br_table`, and typed
+loop-result forms. Grounding expanded `br-if-subset`, `br-table-subset`, and `loop-subset` with
+representative equivalent-signature typed-function-reference branches/results plus wrong-concrete-
+type invalids. New raw valid fixtures cover typed `br_if`, typed `br_table`, and typed loop-
+result equivalent-signature flows, and new raw invalid fixtures pin `BranchTypeMismatch` /
+`ControlResultTypeMismatch` boundaries for wrong-concrete-type branch operands and loop
+fallthrough results.
+
 `ref.as_non_null` now also has dedicated grounding via `ref-as-non-null-subset`, along with raw
 valid fixture `ref-as-non-null-call-ref.wasm` and raw invalid fixture
 `ref-as-non-null-non-ref-input.wasm`. Within the current bounded typed-reference model it accepts

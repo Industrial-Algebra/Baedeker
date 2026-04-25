@@ -35,6 +35,29 @@
     (global.set $a (loop (result i32) (i32.const 1)))
     (global.get $a)))
 
+(module
+  (type $t0 (func (param i32) (result i32)))
+  (type $t1 (func (param i32) (result i32)))
+  (func $f (type $t0)
+    (local.get 0))
+  (export "f" (func $f))
+  (func (result (ref null $t1))
+    (loop (result (ref null $t1))
+      (ref.func $f))))
+
+(assert_invalid
+  (module
+    (type $t0 (func (param i64) (result i64)))
+    (type $t1 (func (param i32) (result i32)))
+    (func $f (type $t0)
+      (local.get 0))
+    (export "f" (func $f))
+    (func (result (ref null $t1))
+      (loop (result (ref null $t1))
+        (ref.func $f))))
+  "type mismatch"
+)
+
 (assert_invalid
   (module (func $type-value-empty-vs-num (result i32)
     (loop (result i32))))
