@@ -236,9 +236,7 @@ fn raw_expectation(path: &Path) -> RawExpectation {
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or_default();
-            if stem.contains("unsupported")
-                || matches!(stem, "global-init-references-defined-global")
-            {
+            if stem.contains("unsupported") {
                 RawExpectation::Skip
             } else {
                 RawExpectation::Reject

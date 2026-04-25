@@ -297,6 +297,13 @@ Const-expression / initialization grounding now also includes `global-ref-init-s
 new global-initializer positions, explicit-memory active data syntax, and nonzero-table element
 initialization with imported-global offsets and ref-valued expressions.
 
+Const-expression / initialization / extended-const hardening now also accepts defined immutable
+globals in later constant-expression contexts where the spec allows them and supports the current
+extended-const arithmetic subset exercised by the official tests (`i32.add/sub/mul`,
+`i64.add/sub/mul`). Grounding now includes additional raw valid fixtures for defined-global and
+arithmetic-based global initializers, data offsets, and element offsets, and expanded
+`global-subset`, `data-subset`, and `elem-subset` coverage for those cases.
+
 Control-expression grounding now also includes `loop-subset`, `unreachable-subset`, and
 `switch-subset`, covering loop-valued expression positions, stack-polymorphic unreachable use in
 control/call/memory contexts, and additional `br_table`-driven structured-control nesting.

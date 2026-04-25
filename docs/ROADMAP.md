@@ -201,6 +201,13 @@ interpreter-first with AOT as a future layer.
     `global-subset`, `data-subset`, and `elem-subset` files, including imported-const-global
     offsets, reference-valued constant initializers, immutable-global writes, and representative
     invalid constant-expression forms.
+  - Const-expression / initialization / extended-const hardening now also accepts defined immutable
+    globals in later constant-expression contexts where the spec allows them and supports the
+    current extended-const arithmetic subset used by the official tests (`i32.add/sub/mul`,
+    `i64.add/sub/mul`). Grounding now includes additional valid raw fixtures for defined-global and
+    arithmetic-based global initializers, data offsets, and element offsets, while upstream-derived
+    `global-subset`, `data-subset`, and `elem-subset` now include representative defined-global and
+    arithmetic constant-expression cases.
   - Recent upstream grounding has also broadened const-expression / initialization coverage via new
     `global-ref-init-subset`, `data-memory-subset`, and `elem-table-init-subset` files, including
     imported immutable ref globals in global initializers, explicit memory selection in active data
@@ -367,7 +374,7 @@ More concretely, Phase 1 is done when all of the following are true:
 - `cargo test -p baedeker-core --test spec_node`
 - `cargo test -p baedeker-core`
 - `cargo clippy -p baedeker-core --all-targets -- -D warnings`
-- Current `baedeker-core` unit test count: **233 passing**
+- Current `baedeker-core` unit test count: **239 passing**
 - Current spec-harness integration tests: **8 passing** (`spec`: 3, `spec_wast`: 2, `spec_node`: 3)
 - `spec_node` adds a Node/V8 compile-time cross-check over the raw fixture corpus plus the active
   upstream-derived `wast-upstream` subset lane. Custom `spec/wast` cases remain Baedeker-shaped
