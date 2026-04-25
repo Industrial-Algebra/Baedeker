@@ -316,6 +316,10 @@ interpreter-first with AOT as a future layer.
     typed loop-result equivalent-signature flows, and new raw invalid fixtures pin
     `BranchTypeMismatch` / `ControlResultTypeMismatch` boundaries for wrong-concrete-type branch
     operands and loop fallthrough results.
+  - Typed branch-target consistency is now also grounded across broader multi-target `br_table`
+    combinations. `br-table-subset` now includes equivalent-signature and wrong-concrete-type
+    cases for nested block/block targets and mixed loop/block targets, and new raw fixtures pin
+    `InconsistentBranchTypes` for mismatched typed multi-target label sets.
   - `ref.as_non_null` support now also includes decoding plus validation grounding via new
     `ref-as-non-null-subset` upstream coverage, raw valid
     `valid/ref-as-non-null-call-ref.wasm`, and raw invalid
@@ -409,7 +413,7 @@ More concretely, Phase 1 is done when all of the following are true:
 - `cargo test -p baedeker-core --test spec_node`
 - `cargo test -p baedeker-core`
 - `cargo clippy -p baedeker-core --all-targets -- -D warnings`
-- Current `baedeker-core` unit test count: **270 passing**
+- Current `baedeker-core` unit test count: **274 passing**
 - Current spec-harness integration tests: **8 passing** (`spec`: 3, `spec_wast`: 2, `spec_node`: 3)
 - `spec_node` adds a Node/V8 compile-time cross-check over the raw fixture corpus plus the active
   upstream-derived `wast-upstream` subset lane. Custom `spec/wast` cases remain Baedeker-shaped

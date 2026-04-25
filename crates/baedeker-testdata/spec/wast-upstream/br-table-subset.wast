@@ -44,6 +44,70 @@
   "type mismatch"
 )
 
+(module
+  (type $t0 (func (param i32) (result i32)))
+  (type $t1 (func (param i32) (result i32)))
+  (func $f (type $t0)
+    (local.get 0))
+  (export "f" (func $f))
+  (func (param i32) (result (ref null $t1))
+    (block (result (ref null $t1))
+      (block (result (ref null $t0))
+        (ref.func $f)
+        (local.get 0)
+        (br_table 0 1 1)))))
+
+(assert_invalid
+  (module
+    (type $t0 (func (param i64) (result i64)))
+    (type $t1 (func (param i32) (result i32)))
+    (func $f (type $t0)
+      (local.get 0))
+    (export "f" (func $f))
+    (func (param i32) (result (ref null $t1))
+      (block (result (ref null $t1))
+        (block (result (ref null $t0))
+          (ref.func $f)
+          (local.get 0)
+          (br_table 0 1 1)))))
+  "type mismatch"
+)
+
+(module
+  (type $t0 (func (param i32) (result i32)))
+  (type $t1 (func (param i32) (result i32)))
+  (func $f (type $t0)
+    (local.get 0))
+  (export "f" (func $f))
+  (func (param i32) (result (ref null $t1))
+    (block (result (ref null $t1))
+      (ref.null $t0)
+      (loop (param (ref null $t0)) (result (ref null $t0))
+        (drop)
+        (ref.func $f)
+        (local.get 0)
+        (br_table 0 1 1)
+        (ref.null $t0)))))
+
+(assert_invalid
+  (module
+    (type $t0 (func (param i64) (result i64)))
+    (type $t1 (func (param i32) (result i32)))
+    (func $f (type $t0)
+      (local.get 0))
+    (export "f" (func $f))
+    (func (param i32) (result (ref null $t1))
+      (block (result (ref null $t1))
+        (ref.null $t0)
+        (loop (param (ref null $t0)) (result (ref null $t0))
+          (drop)
+          (ref.func $f)
+          (local.get 0)
+          (br_table 0 1 1)
+          (ref.null $t0)))))
+  "type mismatch"
+)
+
 (assert_invalid
   (module (func $type-arg-void-vs-num (result i32)
     (block (br_table 0 (i32.const 1)) (i32.const 1))))

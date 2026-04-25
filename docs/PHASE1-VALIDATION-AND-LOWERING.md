@@ -382,6 +382,11 @@ result equivalent-signature flows, and new raw invalid fixtures pin `BranchTypeM
 `ControlResultTypeMismatch` boundaries for wrong-concrete-type branch operands and loop
 fallthrough results.
 
+Typed branch-target consistency is now also grounded across broader multi-target `br_table`
+combinations. `br-table-subset` now includes equivalent-signature and wrong-concrete-type cases
+for nested block/block targets and mixed loop/block targets, and new raw fixtures pin
+`InconsistentBranchTypes` for mismatched typed multi-target label sets.
+
 `ref.as_non_null` now also has dedicated grounding via `ref-as-non-null-subset`, along with raw
 valid fixture `ref-as-non-null-call-ref.wasm` and raw invalid fixture
 `ref-as-non-null-non-ref-input.wasm`. Within the current bounded typed-reference model it accepts
