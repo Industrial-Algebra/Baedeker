@@ -50,6 +50,30 @@
     funcref
     (ref.func $f)))
 
+(module
+  (type $t0 (func (param i32) (result i32)))
+  (type $t1 (func (param i32) (result i32)))
+  (import "env" "g" (global (ref null $t0)))
+  (table 1 (ref null $t1))
+  (elem (i32.const 0) (ref null $t1) (global.get 0)))
+
+(module
+  (type $t0 (func (param i32) (result i32)))
+  (type $t1 (func (param i32) (result i32)))
+  (func $f (type $t0)
+    (local.get 0))
+  (export "f" (func $f))
+  (table 1 (ref null $t1))
+  (elem (i32.const 0) (ref null $t1) (ref.func $f)))
+
+(module
+  (type $t0 (func (param i32) (result i32)))
+  (type $t1 (func (param i32) (result i32)))
+  (func $f (type $t0)
+    (local.get 0))
+  (export "f" (func $f))
+  (elem (ref null $t1) (ref.func $f)))
+
 (assert_invalid
   (module
     (func)
@@ -84,6 +108,16 @@
     (import "test" "r" (global externref))
     (table 1 funcref)
     (elem (i32.const 0) funcref (global.get 0)))
+  "type mismatch"
+)
+
+(assert_invalid
+  (module
+    (type $t0 (func (param i32) (result i32)))
+    (type $t1 (func (param i64) (result i64)))
+    (import "env" "g" (global (ref null $t0)))
+    (table 1 (ref null $t1))
+    (elem (i32.const 0) (ref null $t1) (global.get 0)))
   "type mismatch"
 )
 

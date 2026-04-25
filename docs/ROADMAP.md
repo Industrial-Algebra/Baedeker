@@ -281,6 +281,15 @@ interpreter-first with AOT as a future layer.
     `valid/typed-table-set-get-equivalent-signature.wasm`, and
     `valid/typed-ref-global-init-equivalent-signature.wasm`, plus raw invalid fixtures for
     non-`funcref` references, concrete-type mismatches, and result-mismatch cases.
+  - Typed-reference / const-init / table-element saturation now also covers typed `global.get`
+    flows in constant initializers, typed element expressions sourced from typed globals and
+    `ref.func`, and typed `table.init` against passive typed element segments. Validation now
+    normalizes element-segment reference types during `table.init`, so structurally equivalent
+    concrete function signatures no longer mismatch there solely because their raw `TypeIdx`
+    values differ. Grounding expanded `typed-reference-types-subset`, `elem-subset`, and
+    `table-init-subset`, and added raw fixtures for imported/defined typed-global initializers,
+    typed element/global flows, passive typed element segments, and typed `table.init`
+    equivalent-signature and wrong-concrete-type boundaries.
   - `ref.as_non_null` support now also includes decoding plus validation grounding via new
     `ref-as-non-null-subset` upstream coverage, raw valid
     `valid/ref-as-non-null-call-ref.wasm`, and raw invalid
@@ -374,7 +383,7 @@ More concretely, Phase 1 is done when all of the following are true:
 - `cargo test -p baedeker-core --test spec_node`
 - `cargo test -p baedeker-core`
 - `cargo clippy -p baedeker-core --all-targets -- -D warnings`
-- Current `baedeker-core` unit test count: **239 passing**
+- Current `baedeker-core` unit test count: **248 passing**
 - Current spec-harness integration tests: **8 passing** (`spec`: 3, `spec_wast`: 2, `spec_node`: 3)
 - `spec_node` adds a Node/V8 compile-time cross-check over the raw fixture corpus plus the active
   upstream-derived `wast-upstream` subset lane. Custom `spec/wast` cases remain Baedeker-shaped

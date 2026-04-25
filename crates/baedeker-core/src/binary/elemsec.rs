@@ -281,6 +281,35 @@ mod tests {
     }
 
     #[test]
+    fn parse_typed_active_expr_elements() {
+        let section = raw_element_section(&[
+            0x01, 0x06, 0x00, 0x41, 0x00, 0x0B, 0x63, 0x01, 0x01, 0xD2, 0x00, 0x0B,
+        ]);
+        let elems = parse_element_section(&section).unwrap();
+        assert_eq!(elems.len(), 1);
+        match &elems[0].mode {
+            ElementMode::Active {
+                table, offset_expr, ..
+            } => {
+                assert_eq!(*table, TableIdx(0));
+                assert_eq!(*offset_expr, &[0x41, 0x00, 0x0B]);
+            }
+            _ => panic!("expected active element segment"),
+        }
+        assert_eq!(
+            elems[0].elem_type,
+            RefType::concrete(true, crate::types::TypeIdx(1))
+        );
+        match &elems[0].init {
+            ElementInit::Expressions(exprs) => {
+                assert_eq!(exprs.len(), 1);
+                assert_eq!(exprs[0].expr, &[0xD2, 0x00, 0x0B]);
+            }
+            _ => panic!("expected expression initializers"),
+        }
+    }
+
+    #[test]
     fn reject_unknown_reference_type() {
         let section = raw_element_section(&[0x01, 0x05, 0x6E, 0x00]);
         let err = parse_element_section(&section).unwrap_err();

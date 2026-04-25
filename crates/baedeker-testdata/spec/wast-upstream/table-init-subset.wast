@@ -14,6 +14,17 @@
   (func (export "drop-elem")
     (elem.drop 1)))
 
+(module
+  (type $t0 (func (param i32) (result i32)))
+  (type $t1 (func (param i32) (result i32)))
+  (func $f (type $t0)
+    (local.get 0))
+  (export "f" (func $f))
+  (table 4 (ref null $t0))
+  (elem (ref null $t1) (ref.func $f))
+  (func (export "init")
+    (table.init 0 0 (i32.const 0) (i32.const 0) (i32.const 1))))
+
 (assert_invalid
   (module
     (func (export "test")
@@ -47,5 +58,19 @@
     (func $f0)
     (func (export "test")
       (table.init 0 (i32.const 1) (f32.const 1) (i32.const 1))))
+  "type mismatch"
+)
+
+(assert_invalid
+  (module
+    (type $t0 (func (param i32) (result i32)))
+    (type $t1 (func (param i64) (result i64)))
+    (func $f (type $t0)
+      (local.get 0))
+    (export "f" (func $f))
+    (table 4 (ref null $t1))
+    (elem (ref null $t0) (ref.func $f))
+    (func (export "init")
+      (table.init 0 0 (i32.const 0) (i32.const 0) (i32.const 1))))
   "type mismatch"
 )

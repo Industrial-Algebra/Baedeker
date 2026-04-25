@@ -344,6 +344,15 @@ function-reference surface, so equivalent signatures no longer mismatch solely b
 `call_ref` / typed table flows, equivalent-signature function-reference flows, and raw invalid
 fixtures for non-`funcref` references, concrete-type mismatches, and result-mismatch cases.
 
+Typed-reference / const-init / table-element saturation now also covers typed `global.get` flows
+in constant initializers, typed element expressions sourced from typed globals and `ref.func`, and
+typed `table.init` against passive typed element segments. Validation now normalizes
+element-segment reference types during `table.init`, so structurally equivalent concrete function
+signatures no longer mismatch there solely because their raw `TypeIdx` values differ. Grounding
+expanded `typed-reference-types-subset`, `elem-subset`, and `table-init-subset`, and added raw
+fixtures for imported/defined typed-global initializers, typed element/global flows, passive typed
+element segments, and typed `table.init` equivalent-signature and wrong-concrete-type boundaries.
+
 `ref.as_non_null` now also has dedicated grounding via `ref-as-non-null-subset`, along with raw
 valid fixture `ref-as-non-null-call-ref.wasm` and raw invalid fixture
 `ref-as-non-null-non-ref-input.wasm`. Within the current bounded typed-reference model it accepts
