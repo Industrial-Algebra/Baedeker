@@ -300,6 +300,15 @@ interpreter-first with AOT as a future layer.
     heap-type space than Baedeker currently models, those raw unknown-ref-type byte fixtures are
     explicitly skipped in strict Node parity while remaining active Baedeker boundary assertions.
     Official grounding expanded via new `typed-invalid-typeidx-subset.wast`.
+  - Typed-reference proposal-surface saturation now also broadens three adjacent supported areas:
+    typed `select`, table/global import mixes, and additional block/control/result forms.
+    Grounding expanded `ref-select-subset`, `ref-control-subset`, `typed-table-ref-subset`, and
+    `typed-reference-types-subset` with representative equivalent-signature typed-reference cases:
+    typed `select` over concrete function refs, imported typed-global -> defined/imported typed-
+    table flows, `ref.func` -> imported mutable typed-global flows, and typed block/if result
+    propagation. New raw valid fixtures cover those equivalent-signature cases, and new raw invalid
+    fixtures pin representative wrong-concrete-type boundaries for typed `select`, imported typed-
+    global -> imported typed-table flow, and typed `if` result propagation.
   - `ref.as_non_null` support now also includes decoding plus validation grounding via new
     `ref-as-non-null-subset` upstream coverage, raw valid
     `valid/ref-as-non-null-call-ref.wasm`, and raw invalid
@@ -393,7 +402,7 @@ More concretely, Phase 1 is done when all of the following are true:
 - `cargo test -p baedeker-core --test spec_node`
 - `cargo test -p baedeker-core`
 - `cargo clippy -p baedeker-core --all-targets -- -D warnings`
-- Current `baedeker-core` unit test count: **255 passing**
+- Current `baedeker-core` unit test count: **264 passing**
 - Current spec-harness integration tests: **8 passing** (`spec`: 3, `spec_wast`: 2, `spec_node`: 3)
 - `spec_node` adds a Node/V8 compile-time cross-check over the raw fixture corpus plus the active
   upstream-derived `wast-upstream` subset lane. Custom `spec/wast` cases remain Baedeker-shaped

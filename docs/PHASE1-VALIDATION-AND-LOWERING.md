@@ -364,6 +364,16 @@ for `ref.null` and block-result immediates. Since Node/V8 supports a broader GC-
 space than Baedeker currently models, those raw unknown-ref-type byte fixtures are skipped in
 strict Node parity while remaining active Baedeker boundary assertions.
 
+Typed-reference proposal-surface saturation now also broadens three adjacent supported areas:
+typed `select`, table/global import mixes, and additional block/control/result forms. Grounding
+expanded `ref-select-subset`, `ref-control-subset`, `typed-table-ref-subset`, and
+`typed-reference-types-subset` with representative equivalent-signature typed-reference cases:
+typed `select` over concrete function refs, imported typed-global -> defined/imported typed-table
+flows, `ref.func` -> imported mutable typed-global flows, and typed block/if result propagation.
+New raw valid fixtures cover those equivalent-signature cases, and new raw invalid fixtures pin
+representative wrong-concrete-type boundaries for typed `select`, imported typed-global ->
+imported typed-table flow, and typed `if` result propagation.
+
 `ref.as_non_null` now also has dedicated grounding via `ref-as-non-null-subset`, along with raw
 valid fixture `ref-as-non-null-call-ref.wasm` and raw invalid fixture
 `ref-as-non-null-non-ref-input.wasm`. Within the current bounded typed-reference model it accepts

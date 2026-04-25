@@ -25,6 +25,18 @@
         (ref.null func)
         (local.get 0)))))
 
+(module
+  (type $t0 (func (param i32) (result i32)))
+  (type $t1 (func (param i32) (result i32)))
+  (func $f (type $t0)
+    (local.get 0))
+  (export "f" (func $f))
+  (func (param i32) (result (ref null $t1))
+    (select (result (ref null $t1))
+      (ref.func $f)
+      (ref.null $t1)
+      (local.get 0))))
+
 (assert_invalid
   (module
     (func (param externref funcref i32) (result externref)
@@ -36,5 +48,20 @@
   (module
     (func (param externref externref externref) (result externref)
       (select (result externref) (local.get 0) (local.get 1) (local.get 2))))
+  "type mismatch"
+)
+
+(assert_invalid
+  (module
+    (type $t0 (func (param i32) (result i32)))
+    (type $t1 (func (param i64) (result i64)))
+    (func $f (type $t0)
+      (local.get 0))
+    (export "f" (func $f))
+    (func (param i32) (result (ref null $t1))
+      (select (result (ref null $t1))
+        (ref.func $f)
+        (ref.null $t1)
+        (local.get 0))))
   "type mismatch"
 )

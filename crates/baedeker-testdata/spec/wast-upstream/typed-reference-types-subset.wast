@@ -47,6 +47,16 @@
   (global (ref null $t1)
     (global.get $g0)))
 
+(module
+  (type $t0 (func (param i32) (result i32)))
+  (type $t1 (func (param i32) (result i32)))
+  (import "env" "g" (global (mut (ref null $t1))))
+  (func $f (type $t0)
+    (local.get 0))
+  (export "f" (func $f))
+  (func
+    (global.set 0 (ref.func $f))))
+
 (assert_invalid
   (module
     (type $ii (func (param i32) (result i32)))
