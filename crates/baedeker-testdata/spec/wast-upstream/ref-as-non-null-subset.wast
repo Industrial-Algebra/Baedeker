@@ -1,4 +1,6 @@
-;; Source: https://github.com/WebAssembly/spec/blob/main/test/core/ref_as_non_null.wast
+;; Source fragments:
+;; - https://github.com/WebAssembly/spec/blob/main/test/core/ref_as_non_null.wast
+;; - https://github.com/WebAssembly/spec/blob/main/test/core/ref_null.wast
 
 (module
   (type $t (func (result i32)))
@@ -16,6 +18,23 @@
       (drop (ref.as_non_null (local.get $r))))
     (func
       (call $g (ref.null $t))))
+  "type mismatch"
+)
+
+(module
+  (type $t0 (func (param i32) (result i32)))
+  (type $t1 (func (param i32) (result i32)))
+  (import "env" "g" (global (mut (ref null $t1))))
+  (func (param $r (ref null $t0))
+    (global.set 0 (ref.as_non_null (local.get $r)))))
+
+(assert_invalid
+  (module
+    (type $t0 (func (param i32) (result i32)))
+    (type $t1 (func (param i64) (result i32)))
+    (import "env" "g" (global (mut (ref null $t1))))
+    (func (param $r (ref null $t0))
+      (global.set 0 (ref.as_non_null (local.get $r)))))
   "type mismatch"
 )
 

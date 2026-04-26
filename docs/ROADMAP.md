@@ -357,6 +357,16 @@ interpreter-first with AOT as a future layer.
     those composed storage/dataflow paths, and new raw invalid fixtures pin `TypeMismatch` on
     `global.set` plus `ElementExprTypeMismatch` on wrong-concrete-type passive element
     expressions.
+  - Typed nullability-flow saturation is now also grounded across `br_on_null`,
+    `br_on_non_null`, `ref.as_non_null`, and typed nullable joins. Grounding expanded
+    `br-on-null-subset`, `br-on-non-null-subset`, `ref-as-non-null-subset`, and
+    `ref-control-subset` with representative equivalent-signature typed-function-reference cases
+    for `br_on_null` fallthrough feeding `call_ref`, `br_on_non_null` taken branches feeding typed
+    block results and `call_ref`, `ref.as_non_null` feeding mutable typed globals, and typed `if`
+    joins combining `ref.as_non_null` with `ref.null`. New raw valid fixtures cover those
+    nullability-flow compositions, and new raw invalid fixtures pin `TypeMismatch` at
+    `call_ref`, `br_on_non_null`, and `global.set` plus `ControlResultTypeMismatch` at typed null
+    joins with wrong concrete function types.
   - `ref.as_non_null` support now also includes decoding plus validation grounding via new
     `ref-as-non-null-subset` upstream coverage, raw valid
     `valid/ref-as-non-null-call-ref.wasm`, and raw invalid
@@ -450,7 +460,7 @@ More concretely, Phase 1 is done when all of the following are true:
 - `cargo test -p baedeker-core --test spec_node`
 - `cargo test -p baedeker-core`
 - `cargo clippy -p baedeker-core --all-targets -- -D warnings`
-- Current `baedeker-core` unit test count: **308 passing**
+- Current `baedeker-core` unit test count: **316 passing**
 - Current spec-harness integration tests: **8 passing** (`spec`: 3, `spec_wast`: 2, `spec_node`: 3)
 - `spec_node` adds a Node/V8 compile-time cross-check over the raw fixture corpus plus the active
   upstream-derived `wast-upstream` subset lane. Custom `spec/wast` cases remain Baedeker-shaped

@@ -31,6 +31,35 @@
     (block $l (result i32)
       (return (call_ref $t (br_on_null $l (local.get $n) (local.get $r)))))))
 
+(module
+  (type $t0 (func (param i32) (result i32)))
+  (type $t1 (func (param i32) (result i32)))
+  (func $f (type $t0)
+    (local.get 0))
+  (export "f" (func $f))
+  (func (param $x i32) (param $r (ref null $t0)) (result i32)
+    (block $l (result i32)
+      (return
+        (call_ref $t1
+          (local.get $x)
+          (br_on_null $l (i32.const -1) (local.get $r)))))))
+
+(assert_invalid
+  (module
+    (type $t0 (func (param i32) (result i32)))
+    (type $t1 (func (param i64) (result i32)))
+    (func $f (type $t0)
+      (local.get 0))
+    (export "f" (func $f))
+    (func (param $x i64) (param $r (ref null $t0)) (result i32)
+      (block $l (result i32)
+        (return
+          (call_ref $t1
+            (local.get $x)
+            (br_on_null $l (i32.const -1) (local.get $r)))))))
+  "type mismatch"
+)
+
 (assert_invalid
   (module
     (type $t (func))

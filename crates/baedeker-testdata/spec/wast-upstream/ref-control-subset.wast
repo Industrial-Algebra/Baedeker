@@ -2,6 +2,7 @@
 ;; - https://github.com/WebAssembly/spec/blob/main/test/core/block.wast
 ;; - https://github.com/WebAssembly/spec/blob/main/test/core/if.wast
 ;; - https://github.com/WebAssembly/spec/blob/main/test/core/ref_func.wast
+;; - https://github.com/WebAssembly/spec/blob/main/test/core/ref_as_non_null.wast
 
 (module
   (func $f)
@@ -58,6 +59,27 @@
       (local.get 0)
       (then (return (ref.func $f)))
       (else (ref.null $t1)))))
+
+(module
+  (type $t0 (func (param i32) (result i32)))
+  (type $t1 (func (param i32) (result i32)))
+  (func (param $c i32) (param $r (ref null $t0)) (result (ref null $t1))
+    (if (result (ref null $t1))
+      (local.get $c)
+      (then (ref.as_non_null (local.get $r)))
+      (else (ref.null $t1)))))
+
+(assert_invalid
+  (module
+    (type $t0 (func (param i32) (result i32)))
+    (type $t1 (func (param i64) (result i32)))
+    (func (param $c i32) (param $r (ref null $t0)) (result (ref null $t1))
+      (if (result (ref null $t1))
+        (local.get $c)
+        (then (ref.as_non_null (local.get $r)))
+        (else (ref.null $t1)))))
+  "type mismatch"
+)
 
 (assert_invalid
   (module

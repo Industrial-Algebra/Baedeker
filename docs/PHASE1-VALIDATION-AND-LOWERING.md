@@ -426,6 +426,17 @@ those composed storage/dataflow paths, and new raw invalid fixtures pin `TypeMis
 `global.set` plus `ElementExprTypeMismatch` on wrong-concrete-type passive element
 expressions.
 
+Typed nullability-flow saturation is now also grounded across `br_on_null`, `br_on_non_null`,
+`ref.as_non_null`, and typed nullable joins. Grounding expanded `br-on-null-subset`,
+`br-on-non-null-subset`, `ref-as-non-null-subset`, and `ref-control-subset` with representative
+equivalent-signature typed-function-reference cases for `br_on_null` fallthrough feeding
+`call_ref`, `br_on_non_null` taken branches feeding typed block results and `call_ref`,
+`ref.as_non_null` feeding mutable typed globals, and typed `if` joins combining
+`ref.as_non_null` with `ref.null`. New raw valid fixtures cover those nullability-flow
+compositions, and new raw invalid fixtures pin `TypeMismatch` at `call_ref`,
+`br_on_non_null`, and `global.set` plus `ControlResultTypeMismatch` at typed null joins with
+wrong concrete function types.
+
 `ref.as_non_null` now also has dedicated grounding via `ref-as-non-null-subset`, along with raw
 valid fixture `ref-as-non-null-call-ref.wasm` and raw invalid fixture
 `ref-as-non-null-non-ref-input.wasm`. Within the current bounded typed-reference model it accepts

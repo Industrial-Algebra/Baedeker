@@ -3665,6 +3665,68 @@ mod tests {
     }
 
     #[test]
+    fn validate_typed_ref_as_non_null_global_set_with_equivalent_signature() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/typed-ref-as-non-null-global-set-equivalent-signature.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn reject_typed_ref_as_non_null_global_set_with_wrong_concrete_type() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/typed-ref-as-non-null-global-set-wrong-concrete-type.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(51));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::TypeMismatch { op, expected, found }
+                if op == "global.set"
+                    && expected == ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(1)),
+                    })
+                    && found == ValType::Ref(RefType::Typed {
+                        nullable: false,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })
+        ));
+    }
+
+    #[test]
+    fn validate_typed_ref_as_non_null_if_join_with_equivalent_signature() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/typed-ref-as-non-null-if-join-equivalent-signature.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn reject_typed_ref_as_non_null_if_join_with_wrong_concrete_type() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/typed-ref-as-non-null-if-join-wrong-concrete-type.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(46));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::ControlResultTypeMismatch { expected, found }
+                if expected == vec![ValType::Ref(RefType::Typed {
+                    nullable: true,
+                    heap: crate::types::HeapType::Type(TypeIdx(1)),
+                })] && found == vec![ValType::Ref(RefType::Typed {
+                    nullable: false,
+                    heap: crate::types::HeapType::Type(TypeIdx(0)),
+                })]
+        ));
+    }
+
+    #[test]
     fn validate_br_on_null() {
         let bytes = [
             0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x6F,
@@ -3696,6 +3758,38 @@ mod tests {
     }
 
     #[test]
+    fn validate_typed_br_on_null_fallthrough_to_call_ref_with_equivalent_signature() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/typed-br-on-null-call-ref-equivalent-signature.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn reject_typed_br_on_null_fallthrough_to_call_ref_with_wrong_concrete_type() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/typed-br-on-null-call-ref-wrong-concrete-type.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(60));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::TypeMismatch { op, expected, found }
+                if op == "call_ref"
+                    && expected == ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(1)),
+                    })
+                    && found == ValType::Ref(RefType::Typed {
+                        nullable: false,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })
+        ));
+    }
+
+    #[test]
     fn validate_br_on_non_null() {
         let bytes = [
             0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x6F,
@@ -3722,6 +3816,38 @@ mod tests {
                 label: crate::types::LabelIdx(0),
                 found,
             } if found == vec![ValType::Num(crate::types::NumType::I32)]
+        ));
+    }
+
+    #[test]
+    fn validate_typed_br_on_non_null_branch_to_call_ref_with_equivalent_signature() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/typed-br-on-non-null-call-ref-equivalent-signature.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn reject_typed_br_on_non_null_branch_to_call_ref_with_wrong_concrete_type() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/typed-br-on-non-null-call-ref-wrong-concrete-type.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(53));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::TypeMismatch { op, expected, found }
+                if op == "br_on_non_null"
+                    && expected == ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(1)),
+                    })
+                    && found == ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })
         ));
     }
 
