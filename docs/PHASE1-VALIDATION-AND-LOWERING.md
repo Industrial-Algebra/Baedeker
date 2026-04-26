@@ -445,6 +445,16 @@ block-result heap types. Grounding added the upstream-derived
 `ValidationErrorKind::Decode` with exact `CodeSection` / `UnexpectedEof` metadata at the
 instruction-boundary offsets for these typed control/reference body-decode failures.
 
+Official spec grounding is now also broadened across additional upstream validation-only and
+malformed-binary files that fit Baedeker’s current supported surface. Grounding added the
+upstream-derived `forward-subset.wast`, `unreached-invalid-subset.wast`,
+`func-ptrs-invalid-subset.wast`, `binary-leb128-subset.wast`, `utf8-import-module-subset.wast`,
+and `utf8-import-field-subset.wast`. These extend external grounding for forward mutual
+recursion, unreachable-code invalids, classic function-pointer/table/type invalids, non-minimal
+vs malformed LEB128 encodings, and malformed UTF-8 import names. Raw fixtures and unit tests now
+also pin valid `forward-mutual-recursion.wasm` and `unreached-call-ref.wasm` acceptance plus
+unreachable unknown-local/global/function/label failures with exact offsets.
+
 `ref.as_non_null` now also has dedicated grounding via `ref-as-non-null-subset`, along with raw
 valid fixture `ref-as-non-null-call-ref.wasm` and raw invalid fixture
 `ref-as-non-null-non-ref-input.wasm`. Within the current bounded typed-reference model it accepts

@@ -374,6 +374,15 @@ interpreter-first with AOT as a future layer.
     `typed-malformed-control-subset` plus raw invalid fixtures pinning decode-preserving
     `ValidationErrorKind::Decode` with exact `CodeSection` / `UnexpectedEof` metadata at the
     instruction boundary offsets for these typed control/reference body-decode failures.
+  - Official spec grounding is now also broadened across additional upstream validation-only and
+    malformed-binary files that fit Baedeker’s current supported surface. Grounding added new
+    upstream-derived `forward-subset`, `unreached-invalid-subset`, `func-ptrs-invalid-subset`,
+    `binary-leb128-subset`, `utf8-import-module-subset`, and `utf8-import-field-subset` files.
+    These expand coverage for forward mutual recursion, unreachable-code invalids, classic
+    function-pointer/table/type invalids, non-minimal vs malformed LEB128 encodings, and malformed
+    UTF-8 import names. Raw fixtures and unit tests now also pin valid `forward-mutual-recursion`
+    and `unreached-call-ref` acceptance plus unreachable unknown-local/global/function/label
+    failures with exact offsets.
   - `ref.as_non_null` support now also includes decoding plus validation grounding via new
     `ref-as-non-null-subset` upstream coverage, raw valid
     `valid/ref-as-non-null-call-ref.wasm`, and raw invalid
@@ -467,15 +476,16 @@ More concretely, Phase 1 is done when all of the following are true:
 - `cargo test -p baedeker-core --test spec_node`
 - `cargo test -p baedeker-core`
 - `cargo clippy -p baedeker-core --all-targets -- -D warnings`
-- Current `baedeker-core` unit test count: **322 passing**
+- Current `baedeker-core` unit test count: **328 passing**
 - Current spec-harness integration tests: **8 passing** (`spec`: 3, `spec_wast`: 2, `spec_node`: 3)
 - `spec_node` adds a Node/V8 compile-time cross-check over the raw fixture corpus plus the active
   upstream-derived `wast-upstream` subset lane. Custom `spec/wast` cases remain Baedeker-shaped
   boundary coverage and are not enforced against Node/V8.
 
 ### Current branch snapshot
-Current Phase 1 closure work continues on `feat/phase-1-part-2-closures`, with the validator and
-fixture/docs support matrix kept in sync as upstream-derived skips are narrowed or retired.
+Current Phase 1 closure work continues on `feat/phase-1-part-3-larger-test-batches`, with the
+validator and fixture/docs support matrix kept in sync as upstream-derived skips are narrowed or
+retired.
 
 ### Phase 1 note
 The validator stack remains the spec-facing abstract operand/control stack used for proof of

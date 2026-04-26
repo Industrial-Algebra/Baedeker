@@ -3235,6 +3235,7 @@ fn expand_locals(
 mod tests {
     use super::*;
     use crate::binary::module::Module;
+    use crate::types::{LabelIdx, LocalIdx};
 
     #[test]
     fn validate_simple_add_module() {
@@ -3260,6 +3261,80 @@ mod tests {
             ValidationErrorKind::UnknownLocalIdx { .. }
         ));
         assert_eq!(err.offset, ByteOffset(24));
+    }
+
+    #[test]
+    fn validate_forward_mutual_recursion() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/forward-mutual-recursion.wasm");
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_unreached_call_ref() {
+        let bytes = include_bytes!("../../../baedeker-testdata/spec/valid/unreached-call-ref.wasm");
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn reject_unknown_local_index_in_unreachable_code() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/unreached-unknown-local-index.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(24));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::UnknownLocalIdx { idx: LocalIdx(0) }
+        ));
+    }
+
+    #[test]
+    fn reject_unknown_global_index_in_unreachable_code() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/unreached-unknown-global-index.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(24));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::UnknownGlobalIdx {
+                idx: GlobalIdx(0),
+                available: 0,
+            }
+        ));
+    }
+
+    #[test]
+    fn reject_unknown_function_index_in_unreachable_code() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/unreached-unknown-function-index.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(24));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::UnknownFuncIdx { idx: FuncIdx(1) }
+        ));
+    }
+
+    #[test]
+    fn reject_unknown_label_index_in_unreachable_code() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/unreached-unknown-label-index.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(24));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::UnknownLabelIdx { idx: LabelIdx(1) }
+        ));
     }
 
     #[test]
