@@ -18,6 +18,31 @@
       (then (block (result i32) (i32.const 1)))
       (else (i32.const 2)))))
 
+(module
+  (type $t0 (func (param i32) (result i32)))
+  (type $t1 (func (param i32) (result i32)))
+  (func $f (type $t0)
+    (local.get 0))
+  (export "f" (func $f))
+  (func (result (ref null $t1))
+    (block (result (ref null $t1))
+      (loop (result (ref null $t0))
+        (ref.func $f)))))
+
+(assert_invalid
+  (module
+    (type $t0 (func (param i64) (result i64)))
+    (type $t1 (func (param i32) (result i32)))
+    (func $f (type $t0)
+      (local.get 0))
+    (export "f" (func $f))
+    (func (result (ref null $t1))
+      (block (result (ref null $t1))
+        (loop (result (ref null $t0))
+          (ref.func $f)))))
+  "type mismatch"
+)
+
 (assert_invalid
   (module
     (type $sig (func))

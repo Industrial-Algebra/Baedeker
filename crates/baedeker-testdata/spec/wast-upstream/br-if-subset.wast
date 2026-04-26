@@ -46,6 +46,35 @@
   "type mismatch"
 )
 
+(module
+  (type $t0 (func (param i32) (result i32)))
+  (type $t1 (func (param i32) (result i32)))
+  (func $f (type $t1)
+    (local.get 0))
+  (export "f" (func $f))
+  (func (result (ref null $t0))
+    (block (result (ref null $t0))
+      (ref.null $t0)
+      (loop (param (ref null $t0)) (result (ref null $t0))
+        (drop)
+        (br_if 0 (ref.func $f) (i32.const 1))))))
+
+(assert_invalid
+  (module
+    (type $t0 (func (param i64) (result i64)))
+    (type $t1 (func (param i32) (result i32)))
+    (func $f (type $t1)
+      (local.get 0))
+    (export "f" (func $f))
+    (func (result (ref null $t0))
+      (block (result (ref null $t0))
+        (ref.null $t0)
+        (loop (param (ref null $t0)) (result (ref null $t0))
+          (drop)
+          (br_if 0 (ref.func $f) (i32.const 1))))))
+  "type mismatch"
+)
+
 (assert_invalid
   (module (func $type-false-i32 (block (i32.ctz (br_if 0 (i32.const 0))))))
   "type mismatch"

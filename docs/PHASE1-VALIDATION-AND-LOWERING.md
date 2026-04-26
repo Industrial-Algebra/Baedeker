@@ -387,6 +387,15 @@ combinations. `br-table-subset` now includes equivalent-signature and wrong-conc
 for nested block/block targets and mixed loop/block targets, and new raw fixtures pin
 `InconsistentBranchTypes` for mismatched typed multi-target label sets.
 
+Typed control-signature interaction is now also grounded as a broader campaign across block /
+loop parameter-result composition and branch-to-loop targets. Grounding expanded `block-subset`,
+`loop-subset`, `br-subset`, and `br-if-subset` with representative equivalent-signature typed
+function-reference cases for block-result -> loop-param flow, loop-result -> block-result flow,
+`br` to param-bearing loops, and `br_if` to param-bearing loops. New raw valid fixtures cover
+those composed control-signature flows, and new raw invalid fixtures pin `TypeMismatch`,
+`BranchTypeMismatch`, and `ControlResultTypeMismatch` boundaries for wrong-concrete-type loop
+entry, branch targets, and enclosing block/result joins.
+
 `ref.as_non_null` now also has dedicated grounding via `ref-as-non-null-subset`, along with raw
 valid fixture `ref-as-non-null-call-ref.wasm` and raw invalid fixture
 `ref-as-non-null-non-ref-input.wasm`. Within the current bounded typed-reference model it accepts

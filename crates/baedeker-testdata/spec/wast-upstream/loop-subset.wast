@@ -58,6 +58,32 @@
   "type mismatch"
 )
 
+(module
+  (type $t0 (func (param i32) (result i32)))
+  (type $t1 (func (param i32) (result i32)))
+  (func $f (type $t0)
+    (local.get 0))
+  (export "f" (func $f))
+  (func (result (ref null $t1))
+    (block (result (ref null $t0))
+      (ref.func $f))
+    (loop (param (ref null $t1)) (result (ref null $t1))))
+)
+
+(assert_invalid
+  (module
+    (type $t0 (func (param i64) (result i64)))
+    (type $t1 (func (param i32) (result i32)))
+    (func $f (type $t0)
+      (local.get 0))
+    (export "f" (func $f))
+    (func (result (ref null $t1))
+      (block (result (ref null $t0))
+        (ref.func $f))
+      (loop (param (ref null $t1)) (result (ref null $t1)))))
+  "type mismatch"
+)
+
 (assert_invalid
   (module (func $type-value-empty-vs-num (result i32)
     (loop (result i32))))
