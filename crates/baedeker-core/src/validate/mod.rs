@@ -5280,6 +5280,24 @@ mod tests {
     }
 
     #[test]
+    fn validate_typed_table_get_to_defined_mut_global_with_equivalent_signature() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/typed-table-to-defined-mut-global-equivalent-signature.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_imported_typed_table_get_to_defined_mut_global_with_equivalent_signature() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/imported-typed-table-to-defined-mut-global-equivalent-signature.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
     fn validate_typed_table_set_get() {
         let bytes = [
             0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0B, 0x02, 0x60, 0x01, 0x7F,
@@ -5352,6 +5370,44 @@ mod tests {
             0x0A, 0x06, 0x01, 0x04, 0x00, 0x20, 0x00, 0x0B,
         ];
         let module = Module::decode(&bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_typed_passive_element_from_defined_typed_global_with_equivalent_signature() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/defined-typed-global-passive-element-equivalent-signature.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_typed_passive_element_from_imported_typed_global_with_equivalent_signature() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/imported-typed-global-passive-element-equivalent-signature.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_typed_table_init_from_defined_typed_global_passive_element_with_equivalent_signature()
+     {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/defined-typed-global-passive-element-table-init-equivalent-signature.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_typed_table_init_from_imported_typed_global_passive_element_with_equivalent_signature()
+     {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/imported-typed-global-passive-element-table-init-equivalent-signature.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
         module.validate().unwrap();
     }
 
@@ -5737,6 +5793,52 @@ mod tests {
     }
 
     #[test]
+    fn reject_typed_table_get_to_defined_mut_global_with_wrong_concrete_type() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/typed-table-to-defined-mut-global-wrong-concrete-type.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(74));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::TypeMismatch { op, expected, found }
+                if op == "global.set"
+                    && expected == ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(1)),
+                    })
+                    && found == ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })
+        ));
+    }
+
+    #[test]
+    fn reject_imported_typed_table_get_to_defined_mut_global_with_wrong_concrete_type() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/imported-typed-table-to-defined-mut-global-wrong-concrete-type.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(62));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::TypeMismatch { op, expected, found }
+                if op == "global.set"
+                    && expected == ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(1)),
+                    })
+                    && found == ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })
+        ));
+    }
+
+    #[test]
     fn reject_typed_element_expr_from_imported_typed_global_with_wrong_concrete_type() {
         let bytes = [
             0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0B, 0x02, 0x60, 0x01, 0x7F,
@@ -5787,6 +5889,50 @@ mod tests {
                     heap: crate::types::HeapType::Type(TypeIdx(0)),
                 }),
             }
+        ));
+    }
+
+    #[test]
+    fn reject_typed_passive_element_from_defined_typed_global_with_wrong_concrete_type() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/defined-typed-global-passive-element-wrong-concrete-type.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(48));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::ElementExprTypeMismatch { expected, found }
+                if expected == ValType::Ref(RefType::Typed {
+                    nullable: true,
+                    heap: crate::types::HeapType::Type(TypeIdx(1)),
+                })
+                    && found == ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })
+        ));
+    }
+
+    #[test]
+    fn reject_typed_passive_element_from_imported_typed_global_with_wrong_concrete_type() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/imported-typed-global-passive-element-wrong-concrete-type.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(41));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::ElementExprTypeMismatch { expected, found }
+                if expected == ValType::Ref(RefType::Typed {
+                    nullable: true,
+                    heap: crate::types::HeapType::Type(TypeIdx(1)),
+                })
+                    && found == ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })
         ));
     }
 

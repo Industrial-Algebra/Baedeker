@@ -416,6 +416,16 @@ if-result -> typed `return_call_indirect` parameter. New raw invalid fixtures pi
 `TypeMismatch` boundaries for wrong-concrete-type call-site convergence rather than earlier
 control-frame failure.
 
+Typed table/global/element flow closure is now also grounded across typed table reads feeding
+mutable typed globals and typed globals feeding passive element segments that later initialize
+typed tables. Grounding expanded `typed-reference-types-subset`, `typed-table-ref-subset`,
+`elem-subset`, and `table-init-subset` with representative equivalent-signature cases for
+defined/imported typed `table.get -> global.set` flows plus defined/imported typed
+`global.get -> passive elem -> table.init -> table.get` chains. New raw valid fixtures cover
+those composed storage/dataflow paths, and new raw invalid fixtures pin `TypeMismatch` on
+`global.set` plus `ElementExprTypeMismatch` on wrong-concrete-type passive element
+expressions.
+
 `ref.as_non_null` now also has dedicated grounding via `ref-as-non-null-subset`, along with raw
 valid fixture `ref-as-non-null-call-ref.wasm` and raw invalid fixture
 `ref-as-non-null-non-ref-input.wasm`. Within the current bounded typed-reference model it accepts

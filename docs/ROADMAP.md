@@ -348,6 +348,15 @@ interpreter-first with AOT as a future layer.
     typed `call_indirect` parameter, and if-result -> typed `return_call_indirect` parameter.
     New raw invalid fixtures pin `TypeMismatch` boundaries for wrong-concrete-type call-site
     convergence rather than earlier control-frame failure.
+  - Typed table/global/element flow closure is now also grounded across typed table reads feeding
+    mutable typed globals and typed globals feeding passive element segments that later initialize
+    typed tables. Grounding expanded `typed-reference-types-subset`, `typed-table-ref-subset`,
+    `elem-subset`, and `table-init-subset` with representative equivalent-signature cases for
+    defined/imported typed `table.get -> global.set` flows plus defined/imported typed
+    `global.get -> passive elem -> table.init -> table.get` chains. New raw valid fixtures cover
+    those composed storage/dataflow paths, and new raw invalid fixtures pin `TypeMismatch` on
+    `global.set` plus `ElementExprTypeMismatch` on wrong-concrete-type passive element
+    expressions.
   - `ref.as_non_null` support now also includes decoding plus validation grounding via new
     `ref-as-non-null-subset` upstream coverage, raw valid
     `valid/ref-as-non-null-call-ref.wasm`, and raw invalid
@@ -441,7 +450,7 @@ More concretely, Phase 1 is done when all of the following are true:
 - `cargo test -p baedeker-core --test spec_node`
 - `cargo test -p baedeker-core`
 - `cargo clippy -p baedeker-core --all-targets -- -D warnings`
-- Current `baedeker-core` unit test count: **298 passing**
+- Current `baedeker-core` unit test count: **308 passing**
 - Current spec-harness integration tests: **8 passing** (`spec`: 3, `spec_wast`: 2, `spec_node`: 3)
 - `spec_node` adds a Node/V8 compile-time cross-check over the raw fixture corpus plus the active
   upstream-derived `wast-upstream` subset lane. Custom `spec/wast` cases remain Baedeker-shaped

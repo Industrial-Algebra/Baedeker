@@ -74,6 +74,44 @@
   (export "f" (func $f))
   (elem (ref null $t1) (ref.func $f)))
 
+(module
+  (type $t0 (func (param i32) (result i32)))
+  (type $t1 (func (param i32) (result i32)))
+  (func $f (type $t0)
+    (local.get 0))
+  (export "f" (func $f))
+  (global $g0 (ref null $t0)
+    (ref.func $f))
+  (elem (ref null $t1) (global.get $g0)))
+
+(module
+  (type $t0 (func (param i32) (result i32)))
+  (type $t1 (func (param i32) (result i32)))
+  (import "env" "g" (global (ref null $t0)))
+  (elem (ref null $t1) (global.get 0)))
+
+(assert_invalid
+  (module
+    (type $t0 (func (param i32) (result i32)))
+    (type $t1 (func (param i64) (result i32)))
+    (func $f (type $t0)
+      (local.get 0))
+    (export "f" (func $f))
+    (global $g0 (ref null $t0)
+      (ref.func $f))
+    (elem (ref null $t1) (global.get $g0)))
+  "type mismatch"
+)
+
+(assert_invalid
+  (module
+    (type $t0 (func (param i32) (result i32)))
+    (type $t1 (func (param i64) (result i32)))
+    (import "env" "g" (global (ref null $t0)))
+    (elem (ref null $t1) (global.get 0)))
+  "type mismatch"
+)
+
 (assert_invalid
   (module
     (func)
