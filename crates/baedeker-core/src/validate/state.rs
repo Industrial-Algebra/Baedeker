@@ -7,6 +7,13 @@ use alloc::{vec, vec::Vec};
 
 use crate::types::{BlockType, ValType};
 
+/// Operand-stack entry used during validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperandType {
+    Typed(ValType),
+    Bottom,
+}
+
 /// Reachability state of the current validation point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reachability {
@@ -39,7 +46,7 @@ pub struct ControlFrame {
 /// Operand stack state.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TypeStack {
-    values: Vec<ValType>,
+    values: Vec<OperandType>,
 }
 
 impl TypeStack {
@@ -60,14 +67,18 @@ impl TypeStack {
     }
 
     pub fn push(&mut self, value: ValType) {
-        self.values.push(value);
+        self.values.push(OperandType::Typed(value));
     }
 
-    pub fn pop(&mut self) -> Option<ValType> {
+    pub fn push_bottom(&mut self) {
+        self.values.push(OperandType::Bottom);
+    }
+
+    pub fn pop(&mut self) -> Option<OperandType> {
         self.values.pop()
     }
 
-    pub fn as_slice(&self) -> &[ValType] {
+    pub fn as_slice(&self) -> &[OperandType] {
         &self.values
     }
 }

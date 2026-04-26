@@ -24,12 +24,12 @@ use crate::types::{
     GlobalIdx, ImportDesc, LocalDecl, MemIdx, Mutability, RefType, TableIdx, TypeIdx, ValType,
 };
 use crate::validate::error::{ValidationError, ValidationErrorKind};
-use crate::validate::state::{ControlKind::*, Reachability, ValidationState};
+use crate::validate::state::{ControlKind::*, OperandType, Reachability, ValidationState};
 
 pub use error::{ValidationError as Error, ValidationErrorKind as ErrorKind};
 pub use state::{
-    ControlFrame, Reachability as ValidationReachability, TypeStack,
-    ValidationState as FunctionValidationState,
+    ControlFrame, OperandType as ValidationOperandType, Reachability as ValidationReachability,
+    TypeStack, ValidationState as FunctionValidationState,
 };
 
 impl<'a> Module<'a> {
@@ -678,12 +678,14 @@ fn validate_function(
         });
     }
 
-    if state.reachability == Reachability::Unreachable {
-        return Ok(());
-    }
-
-    let full_stack = state.operands.as_slice().to_vec();
-    if !valtype_vec_matches(&full_stack, &ty.results) {
+    if ensure_frame_end_types(
+        &state,
+        state.controls[0].outer_height,
+        &state.controls[0].end_types,
+    )
+    .is_err()
+    {
+        let full_stack = concrete_stack(&state);
         let found_len = core::cmp::min(full_stack.len(), ty.results.len());
         let found = full_stack[full_stack.len().saturating_sub(found_len)..].to_vec();
         return Err(ValidationError {
@@ -822,7 +824,10 @@ fn validate_instr(
             for ty in label_types {
                 state.operands.push(ty);
             }
-            state.operands.push(ValType::Ref(found.as_non_null()));
+            match found {
+                Some(found) => state.operands.push(ValType::Ref(found.as_non_null())),
+                None => state.operands.push_bottom(),
+            }
         }
         Instr::BrOnNonNull(label) => {
             let label_types = validate_label(function, state, *label, offset)?.to_vec();
@@ -838,7 +843,9 @@ fn validate_instr(
             };
             let found = pop_ref_type(function, state, offset, "br_on_non_null")?;
             let expected_input = expected.as_nullable();
-            if !reftype_matches(found, expected_input) {
+            if let Some(found) = found
+                && !reftype_matches(found, expected_input)
+            {
                 return Err(ValidationError {
                     offset: ByteOffset(offset),
                     function: Some(function),
@@ -863,17 +870,41 @@ fn validate_instr(
                 "br_table",
             )?;
             let default_types = validate_label(function, state, *default, offset)?.to_vec();
-            for label in targets {
-                let label_types = validate_label(function, state, *label, offset)?;
-                if label_types != default_types.as_slice() {
-                    return Err(ValidationError {
+            if state.reachability == Reachability::Reachable {
+                for label in targets {
+                    let label_types = validate_label(function, state, *label, offset)?;
+                    if label_types != default_types.as_slice() {
+                        return Err(ValidationError {
+                            offset: ByteOffset(offset),
+                            function: Some(function),
+                            kind: ValidationErrorKind::InconsistentBranchTypes {
+                                expected: default_types.clone(),
+                                found: label_types.to_vec(),
+                            },
+                        });
+                    }
+                }
+            } else {
+                ensure_stack_types(state, &default_types).map_err(|found| ValidationError {
+                    offset: ByteOffset(offset),
+                    function: Some(function),
+                    kind: ValidationErrorKind::BranchTypeMismatch {
+                        label: *default,
+                        expected: default_types.clone(),
+                        found,
+                    },
+                })?;
+                for label in targets {
+                    let label_types = validate_label(function, state, *label, offset)?;
+                    ensure_stack_types(state, label_types).map_err(|found| ValidationError {
                         offset: ByteOffset(offset),
                         function: Some(function),
-                        kind: ValidationErrorKind::InconsistentBranchTypes {
-                            expected: default_types.clone(),
-                            found: label_types.to_vec(),
+                        kind: ValidationErrorKind::BranchTypeMismatch {
+                            label: *label,
+                            expected: label_types.to_vec(),
+                            found,
                         },
-                    });
+                    })?;
                 }
             }
             pop_branch_types(function, state, *default, &default_types, offset)?;
@@ -1000,17 +1031,24 @@ fn validate_instr(
             )?;
             let rhs = pop_operand_type(function, state, offset, "select")?;
             let lhs = pop_operand_type(function, state, offset, "select")?;
-            if lhs != rhs {
-                return Err(ValidationError {
-                    offset: ByteOffset(offset),
-                    function: Some(function),
-                    kind: ValidationErrorKind::SelectOperandTypeMismatch {
-                        expected: lhs,
-                        found: vec![lhs, rhs],
-                    },
-                });
+            match (lhs, rhs) {
+                (OperandType::Bottom, OperandType::Bottom) => state.operands.push_bottom(),
+                (OperandType::Bottom, OperandType::Typed(rhs))
+                | (OperandType::Typed(rhs), OperandType::Bottom) => state.operands.push(rhs),
+                (OperandType::Typed(lhs), OperandType::Typed(rhs)) => {
+                    if lhs != rhs {
+                        return Err(ValidationError {
+                            offset: ByteOffset(offset),
+                            function: Some(function),
+                            kind: ValidationErrorKind::SelectOperandTypeMismatch {
+                                expected: lhs,
+                                found: vec![lhs, rhs],
+                            },
+                        });
+                    }
+                    state.operands.push(lhs);
+                }
             }
-            state.operands.push(lhs);
         }
         Instr::SelectTyped(types) => {
             if types.len() != 1 {
@@ -1031,13 +1069,16 @@ fn validate_instr(
             )?;
             let rhs = pop_operand_type(function, state, offset, "select_typed")?;
             let lhs = pop_operand_type(function, state, offset, "select_typed")?;
-            if !valtype_matches(lhs, expected) || !valtype_matches(rhs, expected) {
+            if !operand_matches(lhs, expected) || !operand_matches(rhs, expected) {
                 return Err(ValidationError {
                     offset: ByteOffset(offset),
                     function: Some(function),
                     kind: ValidationErrorKind::SelectOperandTypeMismatch {
                         expected,
-                        found: vec![lhs, rhs],
+                        found: vec![
+                            operand_to_valtype(lhs, expected),
+                            operand_to_valtype(rhs, expected),
+                        ],
                     },
                 });
             }
@@ -2285,7 +2326,10 @@ fn validate_ref_as_non_null(
     offset: usize,
 ) -> Result<(), ValidationError> {
     let found = pop_ref_type(function, state, offset, "ref.as_non_null")?;
-    state.operands.push(ValType::Ref(found.as_non_null()));
+    match found {
+        Some(found) => state.operands.push(ValType::Ref(found.as_non_null())),
+        None => state.operands.push_bottom(),
+    }
     Ok(())
 }
 
@@ -2827,23 +2871,15 @@ fn finish_frame(
         });
     }
 
-    if state.reachability == Reachability::Reachable {
-        let operands = state.operands.as_slice();
-        let found = if operands.len() >= frame.outer_height {
-            operands[frame.outer_height..].to_vec()
-        } else {
-            Vec::new()
-        };
-        if operands.len() < frame.outer_height || !valtype_vec_matches(&found, &frame.end_types) {
-            return Err(ValidationError {
-                offset: ByteOffset(offset),
-                function: Some(function),
-                kind: ValidationErrorKind::ControlResultTypeMismatch {
-                    expected: frame.end_types.clone(),
-                    found,
-                },
-            });
-        }
+    if let Err(found) = ensure_frame_end_types(state, frame.outer_height, &frame.end_types) {
+        return Err(ValidationError {
+            offset: ByteOffset(offset),
+            function: Some(function),
+            kind: ValidationErrorKind::ControlResultTypeMismatch {
+                expected: frame.end_types.clone(),
+                found,
+            },
+        });
     }
 
     pop_control_result_types(function, state, &frame.end_types, offset)?;
@@ -3055,6 +3091,92 @@ fn valtype_vec_matches(found: &[ValType], expected: &[ValType]) -> bool {
             .all(|(found, expected)| valtype_matches(*found, *expected))
 }
 
+fn is_stack_polymorphic(state: &ValidationState) -> bool {
+    state.reachability == Reachability::Unreachable
+        && state.operands.len() == state.current_frame().stack_floor
+}
+
+fn operand_matches(found: OperandType, expected: ValType) -> bool {
+    match found {
+        OperandType::Typed(found) => valtype_matches(found, expected),
+        OperandType::Bottom => true,
+    }
+}
+
+fn operand_to_valtype(found: OperandType, fallback: ValType) -> ValType {
+    match found {
+        OperandType::Typed(found) => found,
+        OperandType::Bottom => fallback,
+    }
+}
+
+fn concrete_stack(state: &ValidationState) -> Vec<ValType> {
+    state
+        .operands
+        .as_slice()
+        .iter()
+        .filter_map(|operand| match operand {
+            OperandType::Typed(ty) => Some(*ty),
+            OperandType::Bottom => None,
+        })
+        .collect()
+}
+
+fn stack_found(actual: &[OperandType], expected: &[ValType]) -> Vec<ValType> {
+    let expected_start = expected.len().saturating_sub(actual.len());
+    actual
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, operand)| match operand {
+            OperandType::Typed(ty) => Some(*ty),
+            OperandType::Bottom => expected.get(expected_start + idx).copied(),
+        })
+        .collect()
+}
+
+fn ensure_frame_end_types(
+    state: &ValidationState,
+    outer_height: usize,
+    expected: &[ValType],
+) -> Result<(), Vec<ValType>> {
+    let operands = state.operands.as_slice();
+    if operands.len() < outer_height {
+        return Err(Vec::new());
+    }
+    let actual = &operands[outer_height..];
+    let found = stack_found(actual, expected);
+
+    if actual.len() > expected.len() {
+        return Err(found);
+    }
+
+    let expected_suffix = &expected[expected.len().saturating_sub(actual.len())..];
+    if actual
+        .iter()
+        .zip(expected_suffix)
+        .all(|(found, expected)| operand_matches(*found, *expected))
+        && (state.reachability == Reachability::Unreachable || actual.len() == expected.len())
+    {
+        Ok(())
+    } else {
+        Err(found)
+    }
+}
+
+fn pop_operand(
+    function: FuncIdx,
+    state: &mut ValidationState,
+    offset: usize,
+    op: &'static str,
+    expected: &[ValType],
+) -> Result<OperandType, ValidationError> {
+    match state.operands.pop() {
+        Some(found) => Ok(found),
+        None if is_stack_polymorphic(state) => Ok(OperandType::Bottom),
+        None => Err(underflow_error(function, state, op, expected, offset)),
+    }
+}
+
 fn underflow_error(
     function: FuncIdx,
     state: &ValidationState,
@@ -3068,7 +3190,7 @@ fn underflow_error(
         kind: ValidationErrorKind::StackUnderflow {
             op,
             expected: expected.to_vec(),
-            available: state.operands.as_slice().to_vec(),
+            available: concrete_stack(state),
         },
     }
 }
@@ -3080,24 +3202,15 @@ fn pop_expect(
     offset: usize,
     op: &'static str,
 ) -> Result<(), ValidationError> {
-    if state.reachability == Reachability::Unreachable
-        && state.operands.len() == state.current_frame().stack_floor
-    {
-        return Ok(());
-    }
-
-    let found = state
-        .operands
-        .pop()
-        .ok_or_else(|| underflow_error(function, state, op, &[expected], offset))?;
-    if !valtype_matches(found, expected) {
+    let found = pop_operand(function, state, offset, op, &[expected])?;
+    if !operand_matches(found, expected) {
         return Err(ValidationError {
             offset: ByteOffset(offset),
             function: Some(function),
             kind: ValidationErrorKind::TypeMismatch {
                 op,
                 expected,
-                found,
+                found: operand_to_valtype(found, expected),
             },
         });
     }
@@ -3174,23 +3287,26 @@ fn pop_control_result_types(
 }
 
 fn ensure_stack_types(state: &ValidationState, expected: &[ValType]) -> Result<(), Vec<ValType>> {
-    if state.reachability == Reachability::Unreachable
-        && state.operands.len() == state.current_frame().stack_floor
-    {
+    if is_stack_polymorphic(state) {
         return Ok(());
     }
 
     let operands = state.operands.as_slice();
     let found_len = core::cmp::min(operands.len(), expected.len());
-    let found = operands[operands.len().saturating_sub(found_len)..].to_vec();
+    let found = &operands[operands.len().saturating_sub(found_len)..];
+    let expected_suffix = &expected[expected.len() - found_len..];
 
-    if operands.len() < expected.len()
+    if (state.reachability == Reachability::Reachable && operands.len() < expected.len())
         || !found
             .iter()
-            .zip(&expected[expected.len() - found_len..])
-            .all(|(found, expected)| valtype_matches(*found, *expected))
+            .zip(expected_suffix)
+            .all(|(found, expected)| operand_matches(*found, *expected))
     {
-        return Err(found);
+        return Err(found
+            .iter()
+            .zip(expected_suffix)
+            .map(|(found, expected)| operand_to_valtype(*found, *expected))
+            .collect());
     }
 
     Ok(())
@@ -3201,11 +3317,8 @@ fn pop_operand_type(
     state: &mut ValidationState,
     offset: usize,
     op: &'static str,
-) -> Result<ValType, ValidationError> {
-    state
-        .operands
-        .pop()
-        .ok_or_else(|| underflow_error(function, state, op, &[], offset))
+) -> Result<OperandType, ValidationError> {
+    pop_operand(function, state, offset, op, &[])
 }
 
 fn pop_ref_type(
@@ -3213,11 +3326,12 @@ fn pop_ref_type(
     state: &mut ValidationState,
     offset: usize,
     op: &'static str,
-) -> Result<RefType, ValidationError> {
+) -> Result<Option<RefType>, ValidationError> {
     let found = pop_operand_type(function, state, offset, op)?;
     match found {
-        ValType::Ref(ref_type) => Ok(ref_type),
-        _ => Err(ValidationError {
+        OperandType::Bottom => Ok(None),
+        OperandType::Typed(ValType::Ref(ref_type)) => Ok(Some(ref_type)),
+        OperandType::Typed(found) => Err(ValidationError {
             offset: ByteOffset(offset),
             function: Some(function),
             kind: ValidationErrorKind::TypeMismatch {
@@ -3235,17 +3349,7 @@ fn pop_any(
     offset: usize,
     op: &'static str,
 ) -> Result<(), ValidationError> {
-    if state.reachability == Reachability::Unreachable
-        && state.operands.len() == state.current_frame().stack_floor
-    {
-        return Ok(());
-    }
-
-    state
-        .operands
-        .pop()
-        .map(|_| ())
-        .ok_or_else(|| underflow_error(function, state, op, &[], offset))
+    pop_operand(function, state, offset, op, &[]).map(|_| ())
 }
 
 fn expand_locals(
@@ -3390,6 +3494,70 @@ mod tests {
         let bytes = include_bytes!("../../../baedeker-testdata/spec/valid/unreached-call-ref.wasm");
         let module = Module::decode(bytes).unwrap();
         module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_select_after_unreachable_with_bottom_operands() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/unreached-valid-select-after-unreachable.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_unreached_core_stack_polymorphism_cases() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/unreached-valid-core.wasm");
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_unreached_bottom_heap_type_cases() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/unreached-bottom-heap-type.wasm");
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_unreached_meet_bottom_br_table() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/unreached-meet-bottom.wasm");
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn reject_unreached_select_result_mismatch() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/unreached-select-result-mismatch.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(30));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::FunctionResultTypeMismatch { expected, found, .. }
+                if expected == vec![ValType::Num(crate::types::NumType::I32)]
+                    && found == vec![ValType::Num(crate::types::NumType::I64)]
+        ));
+    }
+
+    #[test]
+    fn reject_unreached_unconsumed_const() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/unreached-unconsumed-const.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(26));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::FunctionResultTypeMismatch { expected, .. }
+                if expected.is_empty()
+        ));
     }
 
     #[test]
