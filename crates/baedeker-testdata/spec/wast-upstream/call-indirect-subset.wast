@@ -1,4 +1,6 @@
-;; Source: https://github.com/WebAssembly/spec/blob/main/test/core/call_indirect.wast
+;; Source fragments:
+;; - https://github.com/WebAssembly/spec/blob/main/test/core/call_indirect.wast
+;; - https://github.com/WebAssembly/spec/blob/main/test/core/ref_null.wast
 
 (module
   (type $over-i32 (func (param i32) (result i32)))
@@ -36,6 +38,49 @@
     (call_indirect $t2 (type $ii-i) (local.get 0) (local.get 1) (local.get 2)))
   (func (export "call-3") (param i32 i32 i32) (result i32)
     (call_indirect $t3 (type $ii-i) (local.get 0) (local.get 1) (local.get 2))))
+
+(module
+  (type $t0 (func (param i32) (result i32)))
+  (type $t1 (func (param i32) (result i32)))
+  (type $callee (func (param (ref null $t1)) (result i32)))
+
+  (func $f (type $t0)
+    (local.get 0))
+  (export "f" (func $f))
+
+  (func $use (type $callee)
+    (local.get 0)
+    drop
+    (i32.const 1))
+
+  (table funcref (elem $use))
+
+  (func (result i32)
+    (call_indirect (type $callee)
+      (block (result (ref null $t0))
+        (ref.func $f))
+      (i32.const 0))))
+
+(assert_invalid
+  (module
+    (type $t0 (func (param i32) (result i32)))
+    (type $t1 (func (param i64) (result i32)))
+    (type $callee (func (param (ref null $t1)) (result i32)))
+    (func $f (type $t0)
+      (local.get 0))
+    (export "f" (func $f))
+    (func $use (type $callee)
+      (local.get 0)
+      drop
+      (i32.const 1))
+    (table funcref (elem $use))
+    (func (result i32)
+      (call_indirect (type $callee)
+        (block (result (ref null $t0))
+          (ref.func $f))
+        (i32.const 0))))
+  "type mismatch"
+)
 
 (assert_invalid
   (module

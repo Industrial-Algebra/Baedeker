@@ -5056,6 +5056,38 @@ mod tests {
     }
 
     #[test]
+    fn validate_typed_block_result_to_call_indirect_ref_param_with_equivalent_signature() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/typed-block-to-call-indirect-ref-param-equivalent-signature.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn reject_typed_block_result_to_call_indirect_ref_param_with_wrong_concrete_type() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/typed-block-to-call-indirect-ref-param-wrong-concrete-type.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(88));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::TypeMismatch { op, expected, found }
+                if op == "stack"
+                    && expected == ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(1)),
+                    })
+                    && found == ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })
+        ));
+    }
+
+    #[test]
     fn validate_return_call() {
         let bytes = [
             0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01,
@@ -5099,6 +5131,38 @@ mod tests {
     }
 
     #[test]
+    fn validate_typed_if_result_to_return_call_indirect_ref_param_with_equivalent_signature() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/typed-if-to-return-call-indirect-ref-param-equivalent-signature.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn reject_typed_if_result_to_return_call_indirect_ref_param_with_wrong_concrete_type() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/typed-if-to-return-call-indirect-ref-param-wrong-concrete-type.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(89));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::TypeMismatch { op, expected, found }
+                if op == "stack"
+                    && expected == ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(1)),
+                    })
+                    && found == ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })
+        ));
+    }
+
+    #[test]
     fn validate_call_ref() {
         let bytes = [
             0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7F,
@@ -5120,6 +5184,38 @@ mod tests {
         ];
         let module = Module::decode(&bytes).unwrap();
         module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_typed_block_result_to_call_ref_with_equivalent_signature() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/typed-block-to-call-ref-equivalent-signature.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn reject_typed_block_result_to_call_ref_with_wrong_concrete_type() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/typed-block-to-call-ref-wrong-concrete-type.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(51));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::TypeMismatch { op, expected, found }
+                if op == "call_ref"
+                    && expected == ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(1)),
+                    })
+                    && found == ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })
+        ));
     }
 
     #[test]
@@ -5509,6 +5605,38 @@ mod tests {
         ];
         let module = Module::decode(&bytes).unwrap();
         module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_typed_if_result_to_return_call_ref_with_equivalent_signature() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/typed-if-to-return-call-ref-equivalent-signature.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn reject_typed_if_result_to_return_call_ref_with_wrong_concrete_type() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/typed-if-to-return-call-ref-wrong-concrete-type.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(62));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::TypeMismatch { op, expected, found }
+                if op == "return_call_ref"
+                    && expected == ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(1)),
+                    })
+                    && found == ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })
+        ));
     }
 
     #[test]

@@ -405,6 +405,17 @@ exits via `return`. New raw valid fixtures cover those reachability closures, an
 fixtures pin `ControlResultTypeMismatch` boundaries for wrong-concrete-type dead-code tails,
 wrong-concrete-type returns, and mismatched typed joins after early exit.
 
+Typed call/control convergence is now also grounded across control-produced typed-function-
+references flowing into `call_ref`, `return_call_ref`, `call_indirect`, and
+`return_call_indirect`. Grounding expanded `typed-call-ref-subset`,
+`typed-return-call-ref-subset`, `call-indirect-subset`, and `return-call-indirect-subset` with
+representative equivalent-signature typed cases where block/if results feed direct reference
+calls and typed indirect-call parameters. New raw valid fixtures cover block-result ->
+`call_ref`, if-result -> `return_call_ref`, block-result -> typed `call_indirect` parameter, and
+if-result -> typed `return_call_indirect` parameter. New raw invalid fixtures pin
+`TypeMismatch` boundaries for wrong-concrete-type call-site convergence rather than earlier
+control-frame failure.
+
 `ref.as_non_null` now also has dedicated grounding via `ref-as-non-null-subset`, along with raw
 valid fixture `ref-as-non-null-call-ref.wasm` and raw invalid fixture
 `ref-as-non-null-non-ref-input.wasm`. Within the current bounded typed-reference model it accepts

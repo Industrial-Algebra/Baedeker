@@ -338,6 +338,16 @@ interpreter-first with AOT as a future layer.
     closures, and new raw invalid fixtures pin `ControlResultTypeMismatch` boundaries for wrong-
     concrete-type dead-code tails, wrong-concrete-type returns, and mismatched typed joins after
     early exit.
+  - Typed call/control convergence is now also grounded across control-produced typed-function-
+    references flowing into `call_ref`, `return_call_ref`, `call_indirect`, and
+    `return_call_indirect`. Grounding expanded `typed-call-ref-subset`,
+    `typed-return-call-ref-subset`, `call-indirect-subset`, and
+    `return-call-indirect-subset` with representative equivalent-signature typed cases where
+    block/if results feed direct reference calls and typed indirect-call parameters. New raw valid
+    fixtures cover block-result -> `call_ref`, if-result -> `return_call_ref`, block-result ->
+    typed `call_indirect` parameter, and if-result -> typed `return_call_indirect` parameter.
+    New raw invalid fixtures pin `TypeMismatch` boundaries for wrong-concrete-type call-site
+    convergence rather than earlier control-frame failure.
   - `ref.as_non_null` support now also includes decoding plus validation grounding via new
     `ref-as-non-null-subset` upstream coverage, raw valid
     `valid/ref-as-non-null-call-ref.wasm`, and raw invalid
@@ -431,7 +441,7 @@ More concretely, Phase 1 is done when all of the following are true:
 - `cargo test -p baedeker-core --test spec_node`
 - `cargo test -p baedeker-core`
 - `cargo clippy -p baedeker-core --all-targets -- -D warnings`
-- Current `baedeker-core` unit test count: **290 passing**
+- Current `baedeker-core` unit test count: **298 passing**
 - Current spec-harness integration tests: **8 passing** (`spec`: 3, `spec_wast`: 2, `spec_node`: 3)
 - `spec_node` adds a Node/V8 compile-time cross-check over the raw fixture corpus plus the active
   upstream-derived `wast-upstream` subset lane. Custom `spec/wast` cases remain Baedeker-shaped
