@@ -4419,6 +4419,108 @@ mod tests {
     }
 
     #[test]
+    fn map_truncated_call_ref_immediate_into_validation_error() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/body-decode-truncated-call-ref-typeidx.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(24));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::Decode {
+                context: crate::error::DecodeContext::CodeSection,
+                kind: crate::error::DecodeErrorKind::UnexpectedEof,
+            }
+        ));
+    }
+
+    #[test]
+    fn map_truncated_return_call_ref_immediate_into_validation_error() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/body-decode-truncated-return-call-ref-typeidx.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(24));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::Decode {
+                context: crate::error::DecodeContext::CodeSection,
+                kind: crate::error::DecodeErrorKind::UnexpectedEof,
+            }
+        ));
+    }
+
+    #[test]
+    fn map_truncated_br_on_null_immediate_into_validation_error() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/body-decode-truncated-br-on-null-labelidx.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(24));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::Decode {
+                context: crate::error::DecodeContext::CodeSection,
+                kind: crate::error::DecodeErrorKind::UnexpectedEof,
+            }
+        ));
+    }
+
+    #[test]
+    fn map_truncated_br_on_non_null_immediate_into_validation_error() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/body-decode-truncated-br-on-non-null-labelidx.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(24));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::Decode {
+                context: crate::error::DecodeContext::CodeSection,
+                kind: crate::error::DecodeErrorKind::UnexpectedEof,
+            }
+        ));
+    }
+
+    #[test]
+    fn map_truncated_ref_null_heaptype_into_validation_error() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/body-decode-truncated-ref-null-heaptype.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(24));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::Decode {
+                context: crate::error::DecodeContext::CodeSection,
+                kind: crate::error::DecodeErrorKind::UnexpectedEof,
+            }
+        ));
+    }
+
+    #[test]
+    fn map_truncated_typed_block_result_heaptype_into_validation_error() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/body-decode-truncated-block-result-heaptype.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(25));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::Decode {
+                context: crate::error::DecodeContext::CodeSection,
+                kind: crate::error::DecodeErrorKind::UnexpectedEof,
+            }
+        ));
+    }
+
+    #[test]
     fn report_branch_type_mismatch_with_label_types() {
         let bytes = [
             0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,

@@ -437,6 +437,14 @@ compositions, and new raw invalid fixtures pin `TypeMismatch` at `call_ref`,
 `br_on_non_null`, and `global.set` plus `ControlResultTypeMismatch` at typed null joins with
 wrong concrete function types.
 
+Malformed/decode boundary completion for typed control/reference encodings is now also grounded
+across truncated `call_ref` / `return_call_ref` type immediates, truncated `br_on_null` /
+`br_on_non_null` label immediates, truncated `ref.null` heap types, and truncated typed
+block-result heap types. Grounding added the upstream-derived
+`typed-malformed-control-subset.wast` plus raw invalid fixtures pinning decode-preserving
+`ValidationErrorKind::Decode` with exact `CodeSection` / `UnexpectedEof` metadata at the
+instruction-boundary offsets for these typed control/reference body-decode failures.
+
 `ref.as_non_null` now also has dedicated grounding via `ref-as-non-null-subset`, along with raw
 valid fixture `ref-as-non-null-call-ref.wasm` and raw invalid fixture
 `ref-as-non-null-non-ref-input.wasm`. Within the current bounded typed-reference model it accepts

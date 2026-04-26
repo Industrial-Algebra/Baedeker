@@ -367,6 +367,13 @@ interpreter-first with AOT as a future layer.
     nullability-flow compositions, and new raw invalid fixtures pin `TypeMismatch` at
     `call_ref`, `br_on_non_null`, and `global.set` plus `ControlResultTypeMismatch` at typed null
     joins with wrong concrete function types.
+  - Malformed/decode boundary completion for typed control/reference encodings is now also
+    grounded across truncated `call_ref` / `return_call_ref` type immediates, truncated
+    `br_on_null` / `br_on_non_null` label immediates, truncated `ref.null` heap types, and
+    truncated typed block-result heap types. Grounding added a new upstream-derived
+    `typed-malformed-control-subset` plus raw invalid fixtures pinning decode-preserving
+    `ValidationErrorKind::Decode` with exact `CodeSection` / `UnexpectedEof` metadata at the
+    instruction boundary offsets for these typed control/reference body-decode failures.
   - `ref.as_non_null` support now also includes decoding plus validation grounding via new
     `ref-as-non-null-subset` upstream coverage, raw valid
     `valid/ref-as-non-null-call-ref.wasm`, and raw invalid
@@ -460,7 +467,7 @@ More concretely, Phase 1 is done when all of the following are true:
 - `cargo test -p baedeker-core --test spec_node`
 - `cargo test -p baedeker-core`
 - `cargo clippy -p baedeker-core --all-targets -- -D warnings`
-- Current `baedeker-core` unit test count: **316 passing**
+- Current `baedeker-core` unit test count: **322 passing**
 - Current spec-harness integration tests: **8 passing** (`spec`: 3, `spec_wast`: 2, `spec_node`: 3)
 - `spec_node` adds a Node/V8 compile-time cross-check over the raw fixture corpus plus the active
   upstream-derived `wast-upstream` subset lane. Custom `spec/wast` cases remain Baedeker-shaped
