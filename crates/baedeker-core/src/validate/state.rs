@@ -32,6 +32,7 @@ pub struct ControlFrame {
     pub stack_floor: usize,
     pub start_types: Vec<ValType>,
     pub end_types: Vec<ValType>,
+    pub local_inits: Vec<bool>,
     pub has_else: bool,
 }
 
@@ -77,11 +78,12 @@ pub struct ValidationState {
     pub operands: TypeStack,
     pub controls: Vec<ControlFrame>,
     pub locals: Vec<ValType>,
+    pub local_inits: Vec<bool>,
     pub reachability: Reachability,
 }
 
 impl ValidationState {
-    pub fn new(locals: Vec<ValType>, result_types: Vec<ValType>) -> Self {
+    pub fn new(locals: Vec<ValType>, local_inits: Vec<bool>, result_types: Vec<ValType>) -> Self {
         Self {
             operands: TypeStack::new(),
             controls: vec![ControlFrame {
@@ -91,9 +93,11 @@ impl ValidationState {
                 stack_floor: 0,
                 start_types: Vec::new(),
                 end_types: result_types,
+                local_inits: local_inits.clone(),
                 has_else: false,
             }],
             locals,
+            local_inits,
             reachability: Reachability::Reachable,
         }
     }
@@ -130,6 +134,7 @@ impl ValidationState {
             stack_floor,
             start_types,
             end_types,
+            local_inits: self.local_inits.clone(),
             has_else: false,
         });
     }

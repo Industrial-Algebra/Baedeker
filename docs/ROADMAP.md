@@ -383,6 +383,13 @@ interpreter-first with AOT as a future layer.
     UTF-8 import names. Raw fixtures and unit tests now also pin valid `forward-mutual-recursion`
     and `unreached-call-ref` acceptance plus unreachable unknown-local/global/function/label
     failures with exact offsets.
+  - Non-defaultable local initialization tracking is now implemented for function validation.
+    Parameters and defaultable locals start initialized, non-defaultable locals must be initialized
+    before `local.get`, and initialization established inside structured control does not escape
+    the enclosing block/if/loop frame. Grounding added new upstream-derived
+    `local-init-subset` plus raw valid fixtures for `local.set` / `local.tee` / block-internal
+    flows and raw invalid fixtures pinning `UninitializedLocal` for direct use, post-block use,
+    `else`-arm use, and post-`if` use of non-defaultable locals.
   - `ref.as_non_null` support now also includes decoding plus validation grounding via new
     `ref-as-non-null-subset` upstream coverage, raw valid
     `valid/ref-as-non-null-call-ref.wasm`, and raw invalid
@@ -445,28 +452,44 @@ More concretely, Phase 1 is done when all of the following are true:
    - The validator remains a spec-facing proof/type layer, clearly separated from the future
      register-based IR and interpreter core.
 
-#### Still to do before Phase 1 can be called complete
-- [ ] Cover the remaining major instruction families and backfill gaps, especially additional
-  reference-type/proposal-era validation paths, any still-missing niche numeric/proposal
-  variants, and official spec-suite-driven completeness gaps.
-- [ ] Continue broadening reference-type, const-expression, and proposal-era validation coverage in
-  line with the WebAssembly 3.0 target surface, building beyond the current `ref.null` /
-  `ref.func` / `ref.is_null` and imported-const-`global.get` subset.
-- [ ] Integrate more official spec-suite `assert_invalid` / `assert_malformed` style coverage and
-  keep compliance/defer status explicit.
-- [ ] Continue converting any newly discovered upstream friction points into either explicit tracked
-  deferred cases (`.meta` `skip=...`) or implemented support, so Phase 2 builds on a crisp
-  semantic contract rather than assumptions.
+#### Checkpoint 8 — Phase 1 closure audit
+
+**Audit verdict:** Phase 1 is materially advanced and well-grounded, but **not yet complete** under
+Baedeker’s own revised definition.
+
+**What the audit says is already true**
+- Validation diagnostics are now precise and regression-pinned across a broad raw corpus with exact
+  `offset=` metadata and decode-vs-validate separation.
+- The active upstream-derived lane remains **zero-skip** while covering **86** curated
+  `wast-upstream` files and **472** upstream directives.
+- Compile-time external parity is in the regular loop via Node/V8 for the active supported raw and
+  upstream-derived surface.
+- Typed function references, tail calls, null branches, `ref.as_non_null`, const/init flows, and a
+  large control/table/global/reference matrix are grounded well enough that remaining work is now
+  mostly closure-oriented rather than foundational.
+
+**What the audit found is still missing**
+- [ ] **Bottom-type / unreachable-valid closure is still incomplete.** Representative official
+  `unreached-valid.wast` cases are still rejected, including `select` after `unreachable`,
+  `ref.as_non_null` on bottom-typed unreachable flow, and a `meet-bottom` style `br_table` join.
+  These currently fail with `StackUnderflow` or mismatched branch-join behavior rather than being
+  accepted under stack-polymorphic bottom semantics.
+- [ ] **Official validation-only grounding can still broaden after the remaining semantic fix
+  lands.** The current lane is strong, but additional official files like more of
+  `unreached-valid.wast` should become active once Baedeker’s semantics match the spec surface they
+  exercise.
+- [ ] **Some broader WebAssembly 3.0 validation surface still remains beyond the current bounded
+  typed-reference model.** The current model is intentionally sufficient for the active supported
+  subsets, but Phase 1 closure still requires continued audit against remaining proposal-era and
+  niche validation cases.
 
 ### Recommended next steps
-1. Prioritize the highest-leverage remaining semantic gaps for both full validation and future
-   lowering: remaining numeric coverage/variants, broader reference-type/proposal-era
-   validation, and external spec-suite integration.
-2. Keep expanding the fixture corpus in lockstep with each new instruction family, including exact
-   `.meta` assertions for representative diagnostics.
-3. Begin wiring in official spec-suite inputs so Phase 1 progress is measured against external
-   ground truth as well as internal fixtures.
-4. Keep the architectural boundary explicit: validation state remains proof/type state; register IR
+1. Fix **bottom-type and stack-polymorphic unreachable closure** for representative
+   `unreached-valid.wast` cases, especially `select`, `ref.as_non_null`, and mixed-join control
+   cases.
+2. Resume the **official spec grounding lane immediately after that semantic fix**, adding active
+   curated subsets rather than reintroducing skips.
+3. Keep the architectural boundary explicit: validation state remains proof/type state; register IR
    design and lowering stay in Phase 2.
 
 ### Current verification snapshot
@@ -476,8 +499,14 @@ More concretely, Phase 1 is done when all of the following are true:
 - `cargo test -p baedeker-core --test spec_node`
 - `cargo test -p baedeker-core`
 - `cargo clippy -p baedeker-core --all-targets -- -D warnings`
-- Current `baedeker-core` unit test count: **328 passing**
+- Current `baedeker-core` unit test count: **335 passing**
 - Current spec-harness integration tests: **8 passing** (`spec`: 3, `spec_wast`: 2, `spec_node`: 3)
+- Current corpus snapshot:
+  - `wast-upstream`: **86** active files / **472** directives
+  - raw `valid`: **104** fixtures
+  - raw `invalid-validate`: **114** fixtures
+  - raw `invalid-decode`: **34** fixtures
+  - custom `spec/wast`: **17** files
 - `spec_node` adds a Node/V8 compile-time cross-check over the raw fixture corpus plus the active
   upstream-derived `wast-upstream` subset lane. Custom `spec/wast` cases remain Baedeker-shaped
   boundary coverage and are not enforced against Node/V8.

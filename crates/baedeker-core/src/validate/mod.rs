@@ -663,7 +663,8 @@ fn validate_function(
             kind: e.into(),
         })?;
 
-    let mut state = ValidationState::new(locals, ty.results.clone());
+    let local_inits = initial_local_inits(&locals, ty.params.len());
+    let mut state = ValidationState::new(locals, local_inits, ty.results.clone());
 
     for decoded in &instrs {
         validate_instr(module, function, decoded, &mut state)?;
@@ -706,6 +707,21 @@ fn final_result_offset(code: &crate::types::CodeBody<'_>, instrs: &[DecodedInstr
         .unwrap_or(ByteOffset(code.body_offset))
 }
 
+fn initial_local_inits(locals: &[ValType], param_count: usize) -> Vec<bool> {
+    locals
+        .iter()
+        .enumerate()
+        .map(|(idx, ty)| idx < param_count || valtype_is_defaultable(*ty))
+        .collect()
+}
+
+fn valtype_is_defaultable(ty: ValType) -> bool {
+    match ty {
+        ValType::Num(_) | ValType::Vec(_) => true,
+        ValType::Ref(ref_type) => ref_type.is_nullable(),
+    }
+}
+
 fn validate_instr(
     module: &Module<'_>,
     function: FuncIdx,
@@ -718,7 +734,7 @@ fn validate_instr(
         Instr::Unreachable => state.enter_unreachable(),
         Instr::Nop => {}
         Instr::Else => {
-            let (outer_height, start_types, end_types) = {
+            let (outer_height, start_types, end_types, local_inits) = {
                 let frame = state.current_frame_mut();
                 if frame.kind != If {
                     return Err(ValidationError {
@@ -739,10 +755,12 @@ fn validate_instr(
                     frame.outer_height,
                     frame.start_types.clone(),
                     frame.end_types.clone(),
+                    frame.local_inits.clone(),
                 )
             };
             pop_control_result_types(function, state, &end_types, offset)?;
             state.operands.truncate(outer_height);
+            state.local_inits = local_inits;
             for ty in start_types {
                 state.operands.push(ty);
             }
@@ -1031,6 +1049,18 @@ fn validate_instr(
                 function: Some(function),
                 kind: ValidationErrorKind::UnknownLocalIdx { idx: *idx },
             })?;
+            if !state
+                .local_inits
+                .get(idx.0 as usize)
+                .copied()
+                .unwrap_or(false)
+            {
+                return Err(ValidationError {
+                    offset: ByteOffset(offset),
+                    function: Some(function),
+                    kind: ValidationErrorKind::UninitializedLocal { idx: *idx },
+                });
+            }
             state.operands.push(ty);
         }
         Instr::LocalSet(idx) => {
@@ -1040,6 +1070,7 @@ fn validate_instr(
                 kind: ValidationErrorKind::UnknownLocalIdx { idx: *idx },
             })?;
             pop_expect(function, state, ty, offset, "local.set")?;
+            state.local_inits[idx.0 as usize] = true;
         }
         Instr::LocalTee(idx) => {
             let ty = *state.locals.get(idx.0 as usize).ok_or(ValidationError {
@@ -1048,6 +1079,7 @@ fn validate_instr(
                 kind: ValidationErrorKind::UnknownLocalIdx { idx: *idx },
             })?;
             pop_expect(function, state, ty, offset, "local.tee")?;
+            state.local_inits[idx.0 as usize] = true;
             state.operands.push(ty);
         }
         Instr::GlobalGet(idx) => {
@@ -2816,6 +2848,7 @@ fn finish_frame(
 
     pop_control_result_types(function, state, &frame.end_types, offset)?;
     state.operands.truncate(frame.outer_height);
+    state.local_inits = frame.local_inits;
     for ty in frame.end_types {
         state.operands.push(ty);
     }
@@ -3269,6 +3302,87 @@ mod tests {
             include_bytes!("../../../baedeker-testdata/spec/valid/forward-mutual-recursion.wasm");
         let module = Module::decode(bytes).unwrap();
         module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_local_get_after_set_for_non_defaultable_local() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/local-init-get-after-set.wasm");
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_local_get_after_tee_for_non_defaultable_local() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/local-init-get-after-tee.wasm");
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_local_get_in_block_after_set_for_non_defaultable_local() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/local-init-get-in-block-after-set.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn reject_uninitialized_non_defaultable_local() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/local-init-uninitialized-local.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(26));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::UninitializedLocal { idx: LocalIdx(0) }
+        ));
+    }
+
+    #[test]
+    fn reject_non_defaultable_local_initialized_only_inside_block() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/local-init-uninitialized-after-end.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(40));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::UninitializedLocal { idx: LocalIdx(1) }
+        ));
+    }
+
+    #[test]
+    fn reject_non_defaultable_local_get_in_else_without_prior_init() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/local-init-uninitialized-in-else.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(37));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::UninitializedLocal { idx: LocalIdx(1) }
+        ));
+    }
+
+    #[test]
+    fn reject_non_defaultable_local_init_not_escaping_if() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/local-init-uninitialized-from-if.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(42));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::UninitializedLocal { idx: LocalIdx(1) }
+        ));
     }
 
     #[test]

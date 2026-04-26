@@ -35,6 +35,9 @@ pub enum ValidationErrorKind {
     UnknownLocalIdx {
         idx: LocalIdx,
     },
+    UninitializedLocal {
+        idx: LocalIdx,
+    },
     UnknownGlobalIdx {
         idx: GlobalIdx,
         available: u32,
@@ -192,6 +195,9 @@ impl fmt::Display for ValidationErrorKind {
             }
             ValidationErrorKind::UnknownLocalIdx { idx } => {
                 write!(f, "unknown local index {}", idx.0)
+            }
+            ValidationErrorKind::UninitializedLocal { idx } => {
+                write!(f, "uninitialized local {}", idx.0)
             }
             ValidationErrorKind::UnknownGlobalIdx { idx, available } => {
                 write!(

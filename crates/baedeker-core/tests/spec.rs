@@ -65,6 +65,7 @@ fn validation_kind_name(kind: &ValidationErrorKind) -> &'static str {
         ValidationErrorKind::UnknownFuncIdx { .. } => "UnknownFuncIdx",
         ValidationErrorKind::UndeclaredFuncRef { .. } => "UndeclaredFuncRef",
         ValidationErrorKind::UnknownLocalIdx { .. } => "UnknownLocalIdx",
+        ValidationErrorKind::UninitializedLocal { .. } => "UninitializedLocal",
         ValidationErrorKind::UnknownGlobalIdx { .. } => "UnknownGlobalIdx",
         ValidationErrorKind::UnknownTableIdx { .. } => "UnknownTableIdx",
         ValidationErrorKind::UnknownMemIdx { .. } => "UnknownMemIdx",

@@ -455,6 +455,14 @@ vs malformed LEB128 encodings, and malformed UTF-8 import names. Raw fixtures an
 also pin valid `forward-mutual-recursion.wasm` and `unreached-call-ref.wasm` acceptance plus
 unreachable unknown-local/global/function/label failures with exact offsets.
 
+Non-defaultable local initialization tracking is now implemented for function validation.
+Parameters and defaultable locals start initialized, non-defaultable locals must be initialized
+before `local.get`, and initialization established inside structured control does not escape the
+enclosing block/if/loop frame. Grounding added the upstream-derived `local-init-subset.wast` plus
+raw valid fixtures for `local.set` / `local.tee` / block-internal flows and raw invalid fixtures
+pinning `UninitializedLocal` for direct use, post-block use, `else`-arm use, and post-`if` use of
+non-defaultable locals.
+
 `ref.as_non_null` now also has dedicated grounding via `ref-as-non-null-subset`, along with raw
 valid fixture `ref-as-non-null-call-ref.wasm` and raw invalid fixture
 `ref-as-non-null-non-ref-input.wasm`. Within the current bounded typed-reference model it accepts
@@ -469,6 +477,42 @@ reference-typed target label suffix and routes the tested value through that bra
 
 Historical active upstream files have also been normalized to `-subset.wast` names; for example,
 `ref-func-undeclared-reference-subset.wast` is active coverage rather than a deferred skip.
+
+## Phase 1 closure audit snapshot
+
+Current audit verdict: **Phase 1 is not yet complete**, even though the validation front-end is now
+broadly grounded and structurally stable.
+
+### What is already strong enough to carry into Phase 2 later
+- The validator/harness boundary is crisp: raw `invalid-decode` fails at `Module::decode(...)`, raw
+  `invalid-validate` fails after decoding, and decode-preserving body failures are pinned through
+  `ValidationErrorKind::Decode { context, kind }`.
+- The active upstream-derived lane is zero-skip and now covers **86** curated upstream subset files
+  with **472** directives, all enforced in both `spec_wast` and `spec_node`.
+- The raw corpus is now large enough to act as a real regression floor:
+  **104** valid fixtures, **114** invalid-validate fixtures, and **34** invalid-decode fixtures.
+- The typed-function-reference / tail-call / nullability / const-init / table-global-element
+  campaigns all broadened coverage without forcing architecture drift away from the current
+  spec-facing validator model.
+
+### What the audit says still blocks calling Phase 1 complete
+1. **Bottom-type / unreachable-valid closure is still incomplete.**
+   Representative `unreached-valid.wast` cases still fail today, including `select` after
+   `unreachable`, `ref.as_non_null` on bottom-typed unreachable flow, and a `meet-bottom`
+   `br_table` join case. Current failures manifest as `StackUnderflow` or non-bottom join mismatch
+   behavior where the official validation surface expects acceptance.
+2. **Official spec grounding should continue immediately after the remaining semantic fix.**
+   The next high-value official files to activate are the ones still blocked by that issue,
+   especially more of `unreached-valid.wast`.
+3. **Broader WebAssembly 3.0 audit pressure still remains beyond the current bounded typed-ref
+   model.** The current model is appropriate for the active supported subsets, but Phase 1 closure
+   still requires continued auditing against remaining proposal-era and niche validation cases.
+
+### Most direct post-audit path
+1. Fix bottom-type / stack-polymorphic unreachable closure for `select`, `ref.as_non_null`, and
+   representative mixed-join control cases.
+2. Immediately widen the official zero-skip upstream lane with more curated `unreached-valid`
+   subsets after those semantics land.
 
 That bookkeeping matters for Phase 2 because the register-lowering work should inherit a semantic
 front-end with known boundaries, not an ambiguous notion of "probably enough validation."
