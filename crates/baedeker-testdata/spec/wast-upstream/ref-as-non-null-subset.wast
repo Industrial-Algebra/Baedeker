@@ -11,6 +11,17 @@
   (func (param $r (ref null $t)) (result i32)
     (call_ref $t (ref.as_non_null (local.get $r)))))
 
+(module
+  (type $t (func (result i32)))
+  (func $nn (param $r (ref $t)) (result i32)
+    (call_ref $t (ref.as_non_null (local.get $r))))
+  (elem func $f)
+  (func $f (result i32) (i32.const 7))
+  (func (export "unreachable") (result i32)
+    (unreachable)
+    (ref.as_non_null)
+    (call $nn)))
+
 (assert_invalid
   (module
     (type $t (func (result i32)))

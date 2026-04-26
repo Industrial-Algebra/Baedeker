@@ -3,6 +3,24 @@
 (module
   (func $dummy)
 
+  (func (export "as-select-first") (param i32) (result i32)
+    (select
+      (select (i32.const 0) (i32.const 1) (local.get 0))
+      (i32.const 2)
+      (i32.const 3)))
+
+  (func (export "as-select-mid") (param i32) (result i32)
+    (select
+      (i32.const 2)
+      (select (i32.const 0) (i32.const 1) (local.get 0))
+      (i32.const 3)))
+
+  (func (export "as-select-last") (param i32) (result i32)
+    (select
+      (i32.const 2)
+      (i32.const 3)
+      (select (i32.const 0) (i32.const 1) (local.get 0))))
+
   (func (export "as-loop-mid") (param i32) (result i32)
     (loop (result i32)
       (call $dummy)
@@ -15,6 +33,16 @@
       (then (select (i32.const 2) (i32.const 3) (local.get 0)))
       (else (i32.const 4))))
 
+  (func (export "as-if-else") (param i32) (result i32)
+    (if (result i32)
+      (i32.const 0)
+      (then (i32.const 2))
+      (else (select (i32.const 2) (i32.const 3) (local.get 0)))))
+
+  (func (export "as-br_if-first") (param i32) (result i32)
+    (block (result i32)
+      (br_if 0 (select (i32.const 2) (i32.const 3) (local.get 0)) (i32.const 4))))
+
   (func (export "as-br_if-last") (param i32) (result i32)
     (block (result i32)
       (br_if 0 (i32.const 2) (select (i32.const 2) (i32.const 3) (local.get 0)))))
@@ -23,6 +51,12 @@
     (block (result i32)
       (select (i32.const 2) (i32.const 3) (local.get 0))
       (i32.const 2)
+      (br_table 0 0)))
+
+  (func (export "as-br_table-last") (param i32) (result i32)
+    (block (result i32)
+      (i32.const 2)
+      (select (i32.const 2) (i32.const 3) (local.get 0))
       (br_table 0 0))))
 
 (assert_invalid

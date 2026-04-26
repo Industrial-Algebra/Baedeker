@@ -21,6 +21,10 @@
     (unreachable) (i32.add (select))
   )
 
+  (func (result i64)
+    (unreachable) (i64.add (select (i64.const 0) (i32.const 0)))
+  )
+
   (func
     (unreachable)
     (select)

@@ -3434,6 +3434,14 @@ mod tests {
     }
 
     #[test]
+    fn validate_local_tee_init_official_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/local-init-tee-init.wasm");
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
     fn reject_uninitialized_non_defaultable_local() {
         let bytes = include_bytes!(
             "../../../baedeker-testdata/spec/invalid-validate/local-init-uninitialized-local.wasm",
@@ -3525,6 +3533,15 @@ mod tests {
     fn validate_unreached_meet_bottom_br_table() {
         let bytes =
             include_bytes!("../../../baedeker-testdata/spec/valid/unreached-meet-bottom.wasm");
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_unreached_select_i64_result_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/unreached-valid-select-i64-result.wasm",
+        );
         let module = Module::decode(bytes).unwrap();
         module.validate().unwrap();
     }
@@ -3999,6 +4016,15 @@ mod tests {
             0x00, 0x20, 0x00, 0xD4, 0x14, 0x00, 0x0B,
         ];
         let module = Module::decode(&bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_ref_as_non_null_after_unreachable_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/ref-as-non-null-unreachable.wasm"
+        );
+        let module = Module::decode(bytes).unwrap();
         module.validate().unwrap();
     }
 
@@ -4981,6 +5007,14 @@ mod tests {
     }
 
     #[test]
+    fn validate_br_table_type_f64_value_official_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/br-table-type-f64-value.wasm");
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
     fn validate_typed_br_if_with_equivalent_signature() {
         let bytes = [
             0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x11, 0x03, 0x60, 0x01, 0x7f,
@@ -5150,6 +5184,14 @@ mod tests {
             0x41, 0x00, 0x1C, 0x01, 0x7E, 0x0B,
         ];
         let module = Module::decode(&bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_select_as_br_table_last_official_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/select-as-br-table-last.wasm");
+        let module = Module::decode(bytes).unwrap();
         module.validate().unwrap();
     }
 

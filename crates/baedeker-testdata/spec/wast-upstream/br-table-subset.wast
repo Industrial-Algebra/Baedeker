@@ -4,6 +4,15 @@
   (func (export "type-i32-value") (result i32)
     (block (result i32) (i32.ctz (br_table 0 0 (i32.const 1) (i32.const 0)))))
 
+  (func (export "type-i64-value") (result i64)
+    (block (result i64) (i64.ctz (br_table 0 0 (i64.const 2) (i32.const 0)))))
+
+  (func (export "type-f32-value") (result f32)
+    (block (result f32) (f32.neg (br_table 0 0 (f32.const 3) (i32.const 0)))))
+
+  (func (export "type-f64-value") (result f64)
+    (block (result f64) (f64.neg (br_table 0 0 (f64.const 4) (i32.const 0)))))
+
   (func (export "empty-value") (param i32) (result i32)
     (block (result i32)
       (br_table 0 (i32.const 33) (local.get 0))

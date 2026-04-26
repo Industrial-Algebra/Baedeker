@@ -399,6 +399,13 @@ interpreter-first with AOT as a future layer.
     select-heavy unreachable flows, bottom-heap `ref.as_non_null` / `br_on_null` cases, and a
     meet-bottom `br_table` join, along with raw invalid fixtures pinning function-end mismatches
     for concrete unreachable select/result leakage.
+  - Official grounding expansion has resumed now that the concrete post-audit semantic blockers are
+    closed. Curated official additions broadened active coverage in `local-init-subset`,
+    `unreached-valid-subset`, `ref-as-non-null-subset`, `select-subset`, and `br-table-subset`,
+    including extra `local_init.wast` tee-init grounding, additional unreachable-valid select
+    shapes, an official unreachable `ref.as_non_null` case, richer select placement coverage, and
+    additional numeric `br_table` value forms. Representative raw valid fixtures and unit tests now
+    also pin those official shapes directly.
   - `ref.as_non_null` support now also includes decoding plus validation grounding via new
     `ref-as-non-null-subset` upstream coverage, raw valid
     `valid/ref-as-non-null-call-ref.wasm`, and raw invalid
@@ -470,7 +477,7 @@ Baedeker’s own revised definition.
 - Validation diagnostics are now precise and regression-pinned across a broad raw corpus with exact
   `offset=` metadata and decode-vs-validate separation.
 - The active upstream-derived lane remains **zero-skip** while covering **87** curated
-  `wast-upstream` files and **475** upstream directives.
+  `wast-upstream` files and **477** upstream directives.
 - Compile-time external parity is in the regular loop via Node/V8 for the active supported raw and
   upstream-derived surface.
 - Typed function references, tail calls, null branches, `ref.as_non_null`, const/init flows, and a
@@ -488,8 +495,8 @@ Baedeker’s own revised definition.
   niche validation cases.
 
 ### Recommended next steps
-1. Resume the **official spec grounding lane immediately**, widening the active zero-skip upstream
-   surface with additional curated official validation cases rather than reintroducing skips.
+1. Continue the **official spec grounding lane**, widening the active zero-skip upstream surface
+   with additional curated official validation cases rather than reintroducing skips.
 2. Continue the **broader WebAssembly 3.0 audit pass** against remaining proposal-era and niche
    validation cases beyond the current bounded typed-reference model.
 3. Keep the architectural boundary explicit: validation state remains proof/type state; register IR
@@ -502,11 +509,11 @@ Baedeker’s own revised definition.
 - `cargo test -p baedeker-core --test spec_node`
 - `cargo test -p baedeker-core`
 - `cargo clippy -p baedeker-core --all-targets -- -D warnings`
-- Current `baedeker-core` unit test count: **341 passing**
+- Current `baedeker-core` unit test count: **346 passing**
 - Current spec-harness integration tests: **8 passing** (`spec`: 3, `spec_wast`: 2, `spec_node`: 3)
 - Current corpus snapshot:
-  - `wast-upstream`: **87** active files / **475** directives
-  - raw `valid`: **108** fixtures
+  - `wast-upstream`: **87** active files / **477** directives
+  - raw `valid`: **113** fixtures
   - raw `invalid-validate`: **116** fixtures
   - raw `invalid-decode`: **34** fixtures
   - custom `spec/wast`: **17** files
