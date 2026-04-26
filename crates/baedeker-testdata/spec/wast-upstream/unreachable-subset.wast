@@ -35,3 +35,28 @@
 
   (func (export "as-memory.grow-size") (result i32)
     (memory.grow (unreachable))))
+
+(module
+  (type $t0 (func (param i32) (result i32)))
+  (type $t1 (func (param i32) (result i32)))
+  (func $f (type $t0)
+    (local.get 0))
+  (export "f" (func $f))
+  (func (result (ref null $t1))
+    (block (result (ref null $t1))
+      (unreachable)
+      (ref.func $f))))
+
+(assert_invalid
+  (module
+    (type $t0 (func (param i64) (result i64)))
+    (type $t1 (func (param i32) (result i32)))
+    (func $f (type $t0)
+      (local.get 0))
+    (export "f" (func $f))
+    (func (result (ref null $t1))
+      (block (result (ref null $t1))
+        (unreachable)
+        (ref.func $f))))
+  "type mismatch"
+)

@@ -329,6 +329,15 @@ interpreter-first with AOT as a future layer.
     invalid fixtures pin `TypeMismatch`, `BranchTypeMismatch`, and
     `ControlResultTypeMismatch` boundaries for wrong-concrete-type loop entry, branch targets, and
     enclosing block/result joins.
+  - Typed branch/control closure under reachability is now also grounded across `unreachable`,
+    `return`, dead code after `br`, and control joins with early `return` inside typed `if`.
+    Grounding expanded `unreachable-subset`, `return-subset`, `ref-control-subset`, and
+    `br-subset` with representative equivalent-signature typed-function-reference cases for
+    unreachable block ends, direct typed returns, typed dead-code tails after `br`, and typed
+    `if` joins where one arm exits via `return`. New raw valid fixtures cover those reachability
+    closures, and new raw invalid fixtures pin `ControlResultTypeMismatch` boundaries for wrong-
+    concrete-type dead-code tails, wrong-concrete-type returns, and mismatched typed joins after
+    early exit.
   - `ref.as_non_null` support now also includes decoding plus validation grounding via new
     `ref-as-non-null-subset` upstream coverage, raw valid
     `valid/ref-as-non-null-call-ref.wasm`, and raw invalid
@@ -422,7 +431,7 @@ More concretely, Phase 1 is done when all of the following are true:
 - `cargo test -p baedeker-core --test spec_node`
 - `cargo test -p baedeker-core`
 - `cargo clippy -p baedeker-core --all-targets -- -D warnings`
-- Current `baedeker-core` unit test count: **282 passing**
+- Current `baedeker-core` unit test count: **290 passing**
 - Current spec-harness integration tests: **8 passing** (`spec`: 3, `spec_wast`: 2, `spec_node`: 3)
 - `spec_node` adds a Node/V8 compile-time cross-check over the raw fixture corpus plus the active
   upstream-derived `wast-upstream` subset lane. Custom `spec/wast` cases remain Baedeker-shaped

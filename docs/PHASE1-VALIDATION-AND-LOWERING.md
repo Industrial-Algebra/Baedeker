@@ -396,6 +396,15 @@ those composed control-signature flows, and new raw invalid fixtures pin `TypeMi
 `BranchTypeMismatch`, and `ControlResultTypeMismatch` boundaries for wrong-concrete-type loop
 entry, branch targets, and enclosing block/result joins.
 
+Typed branch/control closure under reachability is now also grounded across `unreachable`,
+`return`, dead code after `br`, and control joins with early `return` inside typed `if`.
+Grounding expanded `unreachable-subset`, `return-subset`, `ref-control-subset`, and `br-subset`
+with representative equivalent-signature typed-function-reference cases for unreachable block
+ends, direct typed returns, typed dead-code tails after `br`, and typed `if` joins where one arm
+exits via `return`. New raw valid fixtures cover those reachability closures, and new raw invalid
+fixtures pin `ControlResultTypeMismatch` boundaries for wrong-concrete-type dead-code tails,
+wrong-concrete-type returns, and mismatched typed joins after early exit.
+
 `ref.as_non_null` now also has dedicated grounding via `ref-as-non-null-subset`, along with raw
 valid fixture `ref-as-non-null-call-ref.wasm` and raw invalid fixture
 `ref-as-non-null-non-ref-input.wasm`. Within the current bounded typed-reference model it accepts
