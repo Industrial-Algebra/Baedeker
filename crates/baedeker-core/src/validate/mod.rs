@@ -4996,6 +4996,63 @@ mod tests {
     }
 
     #[test]
+    fn validate_br_if_as_br_if_value_cond_official_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/br-if-as-br-if-value-cond.wasm",);
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_br_if_as_select_cond_official_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/br-if-as-select-cond.wasm");
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_br_if_as_call_indirect_last_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/br-if-as-call-indirect-last.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_br_if_as_local_tee_value_official_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/br-if-as-local-tee-value.wasm",);
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_br_if_as_load_address_official_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/br-if-as-load-address.wasm");
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_br_if_as_store_n_value_official_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/br-if-as-storeN-value.wasm");
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_br_if_as_memory_grow_size_official_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/br-if-as-memory-grow-size.wasm",);
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
     fn validate_br_table_with_matching_label_types() {
         let bytes = [
             0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,

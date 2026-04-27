@@ -421,6 +421,13 @@ interpreter-first with AOT as a future layer.
     tests now pin `br-table-as-br-if-value-cond`, `br-table-as-call-indirect-func`,
     `br-table-as-local-set-value`, `br-table-as-load-address`, `br-table-as-store-value`,
     `br-table-as-compare-left`, and `br-table-as-memory-grow-size`.
+  - A comparable branch-adjacent sweep then broadened `br-if-subset` rather than starting another
+    tiny file. Active official coverage now spans `br_if` result typing, block/loop placements,
+    nested branch consumers, if/select/call/call_indirect consumers, local/global consumers,
+    memory address/value consumers, arithmetic/compare consumers, and `memory.grow`. Representative
+    raw valid fixtures and unit tests now pin `br-if-as-br-if-value-cond`, `br-if-as-select-cond`,
+    `br-if-as-call-indirect-last`, `br-if-as-local-tee-value`, `br-if-as-load-address`,
+    `br-if-as-storeN-value`, and `br-if-as-memory-grow-size`.
   - `ref.as_non_null` support now also includes decoding plus validation grounding via new
     `ref-as-non-null-subset` upstream coverage, raw valid
     `valid/ref-as-non-null-call-ref.wasm`, and raw invalid
@@ -524,11 +531,11 @@ Baedeker’s own revised definition.
 - `cargo test -p baedeker-core --test spec_node`
 - `cargo test -p baedeker-core`
 - `cargo clippy -p baedeker-core --all-targets -- -D warnings`
-- Current `baedeker-core` unit test count: **358 passing**
+- Current `baedeker-core` unit test count: **365 passing**
 - Current spec-harness integration tests: **8 passing** (`spec`: 3, `spec_wast`: 2, `spec_node`: 3)
 - Current corpus snapshot:
   - `wast-upstream`: **87** active files / **477** directives
-  - raw `valid`: **125** fixtures
+  - raw `valid`: **132** fixtures
   - raw `invalid-validate`: **116** fixtures
   - raw `invalid-decode`: **34** fixtures
   - custom `spec/wast`: **17** files
