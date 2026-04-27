@@ -445,6 +445,15 @@ interpreter-first with AOT as a future layer.
     `if-as-call-indirect-last`, `if-as-memory-grow-size`, `block-as-select-cond`,
     `block-as-load-address`, `loop-as-local-tee-value`, `loop-as-memory-grow-size`,
     `return-as-call-value`, and `return-as-br-value`.
+  - The next broader official audit pass selected `call-subset` as the best dense zero-skip target,
+    and the follow-on batch widened it aggressively inside a single existing file. Active official
+    direct-call grounding now spans richer type/result cases plus a broad producer/consumer slice
+    across `select`, `if`, `br_if`, `br_table`, `call_indirect`, stores, `memory.grow`, `return`,
+    `drop`, `br`, local/global writes, loads, unary/binary/test/compare operators, and conversion
+    contexts, alongside additional representative invalid arity/type cases. Representative raw
+    valid fixtures and unit tests now pin `call-as-call-all-operands`, `call-as-br-table-last`,
+    `call-as-call-indirect-last`, `call-as-memory-grow-value`, `call-as-local-tee-value`,
+    `call-as-load-operand`, `call-as-compare-right`, and `call-as-convert-operand`.
   - `ref.as_non_null` support now also includes decoding plus validation grounding via new
     `ref-as-non-null-subset` upstream coverage, raw valid
     `valid/ref-as-non-null-call-ref.wasm`, and raw invalid
@@ -516,7 +525,7 @@ Baedeker’s own revised definition.
 - Validation diagnostics are now precise and regression-pinned across a broad raw corpus with exact
   `offset=` metadata and decode-vs-validate separation.
 - The active upstream-derived lane remains **zero-skip** while covering **87** curated
-  `wast-upstream` files and **478** upstream directives.
+  `wast-upstream` files and **484** upstream directives.
 - Compile-time external parity is in the regular loop via Node/V8 for the active supported raw and
   upstream-derived surface.
 - Typed function references, tail calls, null branches, `ref.as_non_null`, const/init flows, and a
@@ -548,11 +557,11 @@ Baedeker’s own revised definition.
 - `cargo test -p baedeker-core --test spec_node`
 - `cargo test -p baedeker-core`
 - `cargo clippy -p baedeker-core --all-targets -- -D warnings`
-- Current `baedeker-core` unit test count: **380 passing**
+- Current `baedeker-core` unit test count: **388 passing**
 - Current spec-harness integration tests: **8 passing** (`spec`: 3, `spec_wast`: 2, `spec_node`: 3)
 - Current corpus snapshot:
-  - `wast-upstream`: **87** active files / **478** directives
-  - raw `valid`: **147** fixtures
+  - `wast-upstream`: **87** active files / **484** directives
+  - raw `valid`: **155** fixtures
   - raw `invalid-validate`: **116** fixtures
   - raw `invalid-decode`: **34** fixtures
   - custom `spec/wast`: **17** files
