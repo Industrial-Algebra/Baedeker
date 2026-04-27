@@ -466,6 +466,17 @@ interpreter-first with AOT as a future layer.
     `call-indirect-as-store-last`, `call-indirect-as-memory-grow-value`,
     `call-indirect-as-local-tee-value`, `call-indirect-as-load-operand`,
     `call-indirect-as-compare-right`, and `call-indirect-as-convert-operand`.
+  - The next dense sweep then expanded `unreachable-subset` itself rather than leaving the
+    stack-polymorphic lane represented by only a handful of official placements. Active official
+    unreachable grounding now spans result typing, function/block/loop placements, branch/branch-
+    table positions, `if`/`select` consumers, direct and indirect calls, local/global writes,
+    load/store address and value positions, unary/binary/test/compare/conversion consumers, and
+    `memory.grow`, while keeping the typed-reference unreachable join case already grounded in the
+    same file. Representative raw valid fixtures and unit tests now pin
+    `unreachable-as-func-mid`, `unreachable-as-block-value`,
+    `unreachable-as-br-table-value-index`, `unreachable-as-if-then-no-else`,
+    `unreachable-as-call-indirect-first`, `unreachable-as-local-tee-value`,
+    `unreachable-as-storeN-value`, and `unreachable-as-convert-operand`.
   - `ref.as_non_null` support now also includes decoding plus validation grounding via new
     `ref-as-non-null-subset` upstream coverage, raw valid
     `valid/ref-as-non-null-call-ref.wasm`, and raw invalid
@@ -569,11 +580,11 @@ Baedeker’s own revised definition.
 - `cargo test -p baedeker-core --test spec_node`
 - `cargo test -p baedeker-core`
 - `cargo clippy -p baedeker-core --all-targets -- -D warnings`
-- Current `baedeker-core` unit test count: **396 passing**
+- Current `baedeker-core` unit test count: **404 passing**
 - Current spec-harness integration tests: **8 passing** (`spec`: 3, `spec_wast`: 2, `spec_node`: 3)
 - Current corpus snapshot:
   - `wast-upstream`: **87** active files / **492** directives
-  - raw `valid`: **163** fixtures
+  - raw `valid`: **171** fixtures
   - raw `invalid-validate`: **116** fixtures
   - raw `invalid-decode`: **34** fixtures
   - custom `spec/wast`: **17** files

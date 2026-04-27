@@ -5061,6 +5061,77 @@ mod tests {
     }
 
     #[test]
+    fn validate_unreachable_as_func_mid_official_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/unreachable-as-func-mid.wasm");
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_unreachable_as_block_value_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/unreachable-as-block-value.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_unreachable_as_br_table_value_index_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/unreachable-as-br-table-value-index.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_unreachable_as_if_then_no_else_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/unreachable-as-if-then-no-else.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_unreachable_as_call_indirect_first_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/unreachable-as-call-indirect-first.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_unreachable_as_local_tee_value_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/unreachable-as-local-tee-value.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_unreachable_as_store_n_value_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/unreachable-as-storeN-value.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_unreachable_as_convert_operand_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/unreachable-as-convert-operand.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
     fn validate_call_indirect_as_select_last_official_case() {
         let bytes = include_bytes!(
             "../../../baedeker-testdata/spec/valid/call-indirect-as-select-last.wasm",

@@ -549,6 +549,18 @@ arity/type mismatches. Representative raw valid fixtures and unit tests now pin
 `call-indirect-as-load-operand`, `call-indirect-as-compare-right`, and
 `call-indirect-as-convert-operand`.
 
+The next dense sweep then expanded `unreachable-subset` itself rather than leaving the
+stack-polymorphic lane represented by only a handful of official placements. Active official
+unreachable grounding now spans result typing, function/block/loop placements, branch/branch-table
+positions, `if`/`select` consumers, direct and indirect calls, local/global writes, load/store
+address and value positions, unary/binary/test/compare/conversion consumers, and `memory.grow`,
+while keeping the typed-reference unreachable join case already grounded in the same file.
+Representative raw valid fixtures and unit tests now pin `unreachable-as-func-mid`,
+`unreachable-as-block-value`, `unreachable-as-br-table-value-index`,
+`unreachable-as-if-then-no-else`, `unreachable-as-call-indirect-first`,
+`unreachable-as-local-tee-value`, `unreachable-as-storeN-value`, and
+`unreachable-as-convert-operand`.
+
 `ref.as_non_null` now also has dedicated grounding via `ref-as-non-null-subset`, along with raw
 valid fixture `ref-as-non-null-call-ref.wasm` and raw invalid fixture
 `ref-as-non-null-non-ref-input.wasm`. Within the current bounded typed-reference model it accepts
@@ -576,7 +588,7 @@ broadly grounded and structurally stable.
 - The active upstream-derived lane is zero-skip and now covers **87** curated upstream subset files
   with **492** directives, all enforced in both `spec_wast` and `spec_node`.
 - The raw corpus is now large enough to act as a real regression floor:
-  **163** valid fixtures, **116** invalid-validate fixtures, and **34** invalid-decode fixtures.
+  **171** valid fixtures, **116** invalid-validate fixtures, and **34** invalid-decode fixtures.
 - The typed-function-reference / tail-call / nullability / const-init / table-global-element
   campaigns all broadened coverage without forcing architecture drift away from the current
   spec-facing validator model.
