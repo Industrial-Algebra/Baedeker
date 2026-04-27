@@ -5061,6 +5061,78 @@ mod tests {
     }
 
     #[test]
+    fn validate_call_indirect_as_select_last_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/call-indirect-as-select-last.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_call_indirect_as_br_if_first_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/call-indirect-as-br-if-first.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_call_indirect_as_store_last_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/call-indirect-as-store-last.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_call_indirect_as_memory_grow_value_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/call-indirect-as-memory-grow-value.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_call_indirect_as_local_tee_value_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/call-indirect-as-local-tee-value.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_call_indirect_as_load_operand_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/call-indirect-as-load-operand.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_call_indirect_as_compare_right_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/call-indirect-as-compare-right.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_call_indirect_as_convert_operand_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/call-indirect-as-convert-operand.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
     fn validate_block_as_select_cond_official_case() {
         let bytes =
             include_bytes!("../../../baedeker-testdata/spec/valid/block-as-select-cond.wasm");

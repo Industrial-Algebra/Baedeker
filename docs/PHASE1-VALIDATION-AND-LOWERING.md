@@ -536,6 +536,19 @@ Representative raw valid fixtures and unit tests now pin `call-as-call-all-opera
 `call-as-local-tee-value`, `call-as-load-operand`, `call-as-compare-right`, and
 `call-as-convert-operand`.
 
+A comparable dense follow-on then broadened `call-indirect-subset` across its own official
+producer/consumer surface rather than leaving indirect-call coverage comparatively sparse. Active
+official indirect-call grounding now spans richer type/result cases plus placement coverage across
+`select`, `if`, `br_if`, `br_table`, stores, `memory.grow`, `return`, `drop`, `br`, local/global
+writes, loads, unary/binary/test/compare operators, and conversion contexts, while preserving the
+existing multi-table / explicit-table-index and typed-reference call-indirect grounding already
+present in the file. The invalid slice also broadened with more representative official
+arity/type mismatches. Representative raw valid fixtures and unit tests now pin
+`call-indirect-as-select-last`, `call-indirect-as-br-if-first`, `call-indirect-as-store-last`,
+`call-indirect-as-memory-grow-value`, `call-indirect-as-local-tee-value`,
+`call-indirect-as-load-operand`, `call-indirect-as-compare-right`, and
+`call-indirect-as-convert-operand`.
+
 `ref.as_non_null` now also has dedicated grounding via `ref-as-non-null-subset`, along with raw
 valid fixture `ref-as-non-null-call-ref.wasm` and raw invalid fixture
 `ref-as-non-null-non-ref-input.wasm`. Within the current bounded typed-reference model it accepts
@@ -561,9 +574,9 @@ broadly grounded and structurally stable.
   `invalid-validate` fails after decoding, and decode-preserving body failures are pinned through
   `ValidationErrorKind::Decode { context, kind }`.
 - The active upstream-derived lane is zero-skip and now covers **87** curated upstream subset files
-  with **484** directives, all enforced in both `spec_wast` and `spec_node`.
+  with **492** directives, all enforced in both `spec_wast` and `spec_node`.
 - The raw corpus is now large enough to act as a real regression floor:
-  **155** valid fixtures, **116** invalid-validate fixtures, and **34** invalid-decode fixtures.
+  **163** valid fixtures, **116** invalid-validate fixtures, and **34** invalid-decode fixtures.
 - The typed-function-reference / tail-call / nullability / const-init / table-global-element
   campaigns all broadened coverage without forcing architecture drift away from the current
   spec-facing validator model.
