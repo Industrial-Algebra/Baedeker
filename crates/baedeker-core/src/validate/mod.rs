@@ -5015,6 +5015,66 @@ mod tests {
     }
 
     #[test]
+    fn validate_br_table_as_br_if_value_cond_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/br-table-as-br-if-value-cond.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_br_table_as_call_indirect_func_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/br-table-as-call-indirect-func.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_br_table_as_local_set_value_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/br-table-as-local-set-value.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_br_table_as_load_address_official_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/br-table-as-load-address.wasm");
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_br_table_as_store_value_official_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/br-table-as-store-value.wasm");
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_br_table_as_compare_left_official_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/br-table-as-compare-left.wasm");
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_br_table_as_memory_grow_size_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/br-table-as-memory-grow-size.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
     fn validate_typed_br_if_with_equivalent_signature() {
         let bytes = [
             0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x11, 0x03, 0x60, 0x01, 0x7f,
@@ -5191,6 +5251,49 @@ mod tests {
     fn validate_select_as_br_table_last_official_case() {
         let bytes =
             include_bytes!("../../../baedeker-testdata/spec/valid/select-as-br-table-last.wasm");
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_select_as_call_indirect_last_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/select-as-call-indirect-last.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_select_as_memory_grow_value_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/select-as-memory-grow-value.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_select_as_global_set_value_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/select-as-global-set-value.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_select_as_convert_operand_official_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/select-as-convert-operand.wasm",);
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_select_as_if_condition_official_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/select-as-if-condition.wasm");
         let module = Module::decode(bytes).unwrap();
         module.validate().unwrap();
     }

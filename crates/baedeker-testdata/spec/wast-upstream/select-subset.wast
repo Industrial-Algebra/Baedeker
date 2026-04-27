@@ -2,6 +2,7 @@
 
 (module
   (func $dummy)
+  (memory 1)
 
   (func (export "as-select-first") (param i32) (result i32)
     (select
@@ -21,11 +22,27 @@
       (i32.const 3)
       (select (i32.const 0) (i32.const 1) (local.get 0))))
 
+  (func (export "as-loop-first") (param i32) (result i32)
+    (loop (result i32)
+      (select (i32.const 2) (i32.const 3) (local.get 0))
+      (call $dummy)
+      (call $dummy)))
+
   (func (export "as-loop-mid") (param i32) (result i32)
     (loop (result i32)
       (call $dummy)
       (select (i32.const 2) (i32.const 3) (local.get 0))
       (call $dummy)))
+
+  (func (export "as-loop-last") (param i32) (result i32)
+    (loop (result i32)
+      (call $dummy)
+      (call $dummy)
+      (select (i32.const 2) (i32.const 3) (local.get 0))))
+
+  (func (export "as-if-condition") (param i32)
+    (select (i32.const 2) (i32.const 3) (local.get 0))
+    (if (then (call $dummy))))
 
   (func (export "as-if-then") (param i32) (result i32)
     (if (result i32)
@@ -57,7 +74,104 @@
     (block (result i32)
       (i32.const 2)
       (select (i32.const 2) (i32.const 3) (local.get 0))
-      (br_table 0 0))))
+      (br_table 0 0)))
+
+  (type $check (func (param i32 i32) (result i32)))
+  (func $func (param i32 i32) (result i32)
+    (local.get 0))
+  (table $t funcref (elem $func))
+
+  (func (export "as-call_indirect-first") (param i32) (result i32)
+    (block (result i32)
+      (call_indirect $t (type $check)
+        (select (i32.const 2) (i32.const 3) (local.get 0))
+        (i32.const 1)
+        (i32.const 0))))
+
+  (func (export "as-call_indirect-mid") (param i32) (result i32)
+    (block (result i32)
+      (call_indirect $t (type $check)
+        (i32.const 1)
+        (select (i32.const 2) (i32.const 3) (local.get 0))
+        (i32.const 0))))
+
+  (func (export "as-call_indirect-last") (param i32) (result i32)
+    (block (result i32)
+      (call_indirect $t (type $check)
+        (i32.const 1)
+        (i32.const 4)
+        (select (i32.const 2) (i32.const 3) (local.get 0)))))
+
+  (func (export "as-store-first") (param i32)
+    (select (i32.const 0) (i32.const 4) (local.get 0))
+    (i32.const 1)
+    (i32.store))
+
+  (func (export "as-store-last") (param i32)
+    (i32.const 8)
+    (select (i32.const 1) (i32.const 2) (local.get 0))
+    (i32.store))
+
+  (func (export "as-memory.grow-value") (param i32) (result i32)
+    (memory.grow (select (i32.const 1) (i32.const 2) (local.get 0))))
+
+  (func $f (param i32) (result i32)
+    (local.get 0))
+
+  (func (export "as-call-value") (param i32) (result i32)
+    (call $f (select (i32.const 1) (i32.const 2) (local.get 0))))
+
+  (func (export "as-return-value") (param i32) (result i32)
+    (select (i32.const 1) (i32.const 2) (local.get 0))
+    (return))
+
+  (func (export "as-drop-operand") (param i32)
+    (drop (select (i32.const 1) (i32.const 2) (local.get 0))))
+
+  (func (export "as-br-value") (param i32) (result i32)
+    (block (result i32)
+      (br 0 (select (i32.const 1) (i32.const 2) (local.get 0)))))
+
+  (func (export "as-local.set-value") (param i32) (result i32)
+    (local i32)
+    (local.set 0 (select (i32.const 1) (i32.const 2) (local.get 0)))
+    (local.get 0))
+
+  (func (export "as-local.tee-value") (param i32) (result i32)
+    (local.tee 0 (select (i32.const 1) (i32.const 2) (local.get 0))))
+
+  (global $a (mut i32) (i32.const 10))
+
+  (func (export "as-global.set-value") (param i32) (result i32)
+    (global.set $a (select (i32.const 1) (i32.const 2) (local.get 0)))
+    (global.get $a))
+
+  (func (export "as-load-operand") (param i32) (result i32)
+    (i32.load (select (i32.const 0) (i32.const 4) (local.get 0))))
+
+  (func (export "as-unary-operand") (param i32) (result i32)
+    (i32.eqz (select (i32.const 0) (i32.const 1) (local.get 0))))
+
+  (func (export "as-binary-operand") (param i32) (result i32)
+    (i32.mul
+      (select (i32.const 1) (i32.const 2) (local.get 0))
+      (select (i32.const 1) (i32.const 2) (local.get 0))))
+
+  (func (export "as-test-operand") (param i32) (result i32)
+    (block (result i32)
+      (i32.eqz (select (i32.const 0) (i32.const 1) (local.get 0)))))
+
+  (func (export "as-compare-left") (param i32) (result i32)
+    (block (result i32)
+      (i32.le_s (select (i32.const 1) (i32.const 2) (local.get 0)) (i32.const 1))))
+
+  (func (export "as-compare-right") (param i32) (result i32)
+    (block (result i32)
+      (i32.ne (i32.const 1) (select (i32.const 0) (i32.const 1) (local.get 0)))))
+
+  (func (export "as-convert-operand") (param i32) (result i32)
+    (block (result i32)
+      (i32.wrap_i64 (select (i64.const 1) (i64.const 0) (local.get 0))))))
 
 (assert_invalid
   (module (func $arity-0-implicit (select (nop) (nop) (i32.const 1))))

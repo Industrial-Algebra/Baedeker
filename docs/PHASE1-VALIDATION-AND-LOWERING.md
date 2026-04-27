@@ -481,6 +481,23 @@ an official unreachable `ref.as_non_null` case, richer select placement coverage
 numeric `br_table` value forms. Representative raw valid fixtures and unit tests now also pin
 those official shapes directly.
 
+To avoid drifting back into tiny one-off expansions, the next official zero-skip batch widened a
+denser `select.wast` control-consumer slice in one pass. `select-subset` now covers broader
+official placement shapes including loop-first/last, if-condition, call-indirect operand
+positions, store operands, memory.grow, call/return/branch/local/global consumers, load,
+unary/binary/test/compare, and conversion contexts. Representative raw valid fixtures and unit
+tests now pin `select-as-call-indirect-last`, `select-as-memory-grow-value`,
+`select-as-global-set-value`, `select-as-convert-operand`, and `select-as-if-condition`.
+
+The next official sweep kept that denser cadence by broadening `br-table-subset` across a much
+larger official branch-consumer slice rather than a single placement. Active coverage now spans
+block/loop placements, branch consumers (`br`, `br_if`, nested `br_table`), if/select/call /
+call_indirect positions, local/global consumers, memory address/value consumers, arithmetic /
+compare / conversion consumers, and `memory.grow`. Representative raw valid fixtures and unit
+tests now pin `br-table-as-br-if-value-cond`, `br-table-as-call-indirect-func`,
+`br-table-as-local-set-value`, `br-table-as-load-address`, `br-table-as-store-value`,
+`br-table-as-compare-left`, and `br-table-as-memory-grow-size`.
+
 `ref.as_non_null` now also has dedicated grounding via `ref-as-non-null-subset`, along with raw
 valid fixture `ref-as-non-null-call-ref.wasm` and raw invalid fixture
 `ref-as-non-null-non-ref-input.wasm`. Within the current bounded typed-reference model it accepts
@@ -508,7 +525,7 @@ broadly grounded and structurally stable.
 - The active upstream-derived lane is zero-skip and now covers **87** curated upstream subset files
   with **477** directives, all enforced in both `spec_wast` and `spec_node`.
 - The raw corpus is now large enough to act as a real regression floor:
-  **113** valid fixtures, **116** invalid-validate fixtures, and **34** invalid-decode fixtures.
+  **125** valid fixtures, **116** invalid-validate fixtures, and **34** invalid-decode fixtures.
 - The typed-function-reference / tail-call / nullability / const-init / table-global-element
   campaigns all broadened coverage without forcing architecture drift away from the current
   spec-facing validator model.
