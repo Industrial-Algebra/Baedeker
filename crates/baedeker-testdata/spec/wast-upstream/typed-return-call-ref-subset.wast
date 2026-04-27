@@ -43,6 +43,44 @@
         (then (ref.func $f))
         (else (ref.null $t0))))))
 
+(module
+  (type $i64-i64 (func (param i64) (result i64)))
+
+  (elem declare func $count)
+  (global $count (ref $i64-i64) (ref.func $count))
+
+  (func $count (export "count") (param i64) (result i64)
+    (if (result i64) (i64.eqz (local.get 0))
+      (then (local.get 0))
+      (else
+        (return_call_ref $i64-i64
+          (i64.sub (local.get 0) (i64.const 1))
+          (global.get $count))))))
+
+(module
+  (type $i64-i64 (func (param i64) (result i64)))
+
+  (global $even (ref $i64-i64) (ref.func $even))
+  (global $odd (ref $i64-i64) (ref.func $odd))
+
+  (elem declare func $even)
+  (func $even (export "even") (param i64) (result i64)
+    (if (result i64) (i64.eqz (local.get 0))
+      (then (i64.const 44))
+      (else
+        (return_call_ref $i64-i64
+          (i64.sub (local.get 0) (i64.const 1))
+          (global.get $odd)))))
+
+  (elem declare func $odd)
+  (func $odd (export "odd") (param i64) (result i64)
+    (if (result i64) (i64.eqz (local.get 0))
+      (then (i64.const 99))
+      (else
+        (return_call_ref $i64-i64
+          (i64.sub (local.get 0) (i64.const 1))
+          (global.get $even))))))
+
 (assert_invalid
   (module
     (type $t0 (func (param i32) (result i32)))

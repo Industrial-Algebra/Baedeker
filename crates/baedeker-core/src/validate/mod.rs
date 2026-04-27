@@ -4029,6 +4029,15 @@ mod tests {
     }
 
     #[test]
+    fn validate_ref_as_non_null_direct_call_ref_func_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/ref-as-non-null-direct-call-ref-func.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
     fn reject_ref_as_non_null_on_non_ref() {
         let bytes = [
             0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
@@ -4150,6 +4159,14 @@ mod tests {
     }
 
     #[test]
+    fn validate_br_on_null_unreachable_official_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/br-on-null-unreachable.wasm",);
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
     fn reject_typed_br_on_null_fallthrough_to_call_ref_with_wrong_concrete_type() {
         let bytes = include_bytes!(
             "../../../baedeker-testdata/spec/invalid-validate/typed-br-on-null-call-ref-wrong-concrete-type.wasm",
@@ -4206,6 +4223,24 @@ mod tests {
     fn validate_typed_br_on_non_null_branch_to_call_ref_with_equivalent_signature() {
         let bytes = include_bytes!(
             "../../../baedeker-testdata/spec/valid/typed-br-on-non-null-call-ref-equivalent-signature.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_br_on_non_null_ref_as_non_null_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/br-on-non-null-ref-as-non-null.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_br_on_non_null_unreachable_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/br-on-non-null-unreachable.wasm",
         );
         let module = Module::decode(bytes).unwrap();
         module.validate().unwrap();
@@ -6307,6 +6342,32 @@ mod tests {
     }
 
     #[test]
+    fn validate_call_ref_run_nested_official_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/call-ref-run-nested.wasm");
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_call_ref_unreachable_ref_func_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/call-ref-unreachable-ref-func.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_call_ref_unreachable_call_drop_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/call-ref-unreachable-call-drop.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
     fn reject_typed_block_result_to_call_ref_with_wrong_concrete_type() {
         let bytes = include_bytes!(
             "../../../baedeker-testdata/spec/invalid-validate/typed-block-to-call-ref-wrong-concrete-type.wasm",
@@ -6779,6 +6840,14 @@ mod tests {
         let bytes = include_bytes!(
             "../../../baedeker-testdata/spec/valid/typed-if-to-return-call-ref-equivalent-signature.wasm",
         );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_return_call_ref_count_official_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/return-call-ref-count.wasm");
         let module = Module::decode(bytes).unwrap();
         module.validate().unwrap();
     }

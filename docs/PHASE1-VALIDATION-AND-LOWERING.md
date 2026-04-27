@@ -561,6 +561,18 @@ Representative raw valid fixtures and unit tests now pin `unreachable-as-func-mi
 `unreachable-as-local-tee-value`, `unreachable-as-storeN-value`, and
 `unreachable-as-convert-operand`.
 
+A follow-on typed/control adjacency sweep then densified the typed reference/control frontier
+around those now-broader call/branch/unreachable lanes instead of leaving `call_ref`,
+`return_call_ref`, `br_on_null`, `br_on_non_null`, and `ref.as_non_null` coverage relatively
+isolated. Active official grounding now includes nested and recursive `call_ref`, recursive
+`return_call_ref` under `if`, explicit unreachable typing around `call_ref`, `br_on_null`, and
+`br_on_non_null`, `br_on_non_null` + `ref.as_non_null` joins, and direct-call-to-typed-ref
+producer/consumer flow in `ref-as-non-null-subset`. Representative raw valid fixtures and unit
+tests now pin `call-ref-run-nested`, `call-ref-unreachable-ref-func`,
+`call-ref-unreachable-call-drop`, `return-call-ref-count`, `br-on-null-unreachable`,
+`br-on-non-null-ref-as-non-null`, `br-on-non-null-unreachable`, and
+`ref-as-non-null-direct-call-ref-func`.
+
 `ref.as_non_null` now also has dedicated grounding via `ref-as-non-null-subset`, along with raw
 valid fixture `ref-as-non-null-call-ref.wasm` and raw invalid fixture
 `ref-as-non-null-non-ref-input.wasm`. Within the current bounded typed-reference model it accepts
@@ -586,9 +598,9 @@ broadly grounded and structurally stable.
   `invalid-validate` fails after decoding, and decode-preserving body failures are pinned through
   `ValidationErrorKind::Decode { context, kind }`.
 - The active upstream-derived lane is zero-skip and now covers **87** curated upstream subset files
-  with **492** directives, all enforced in both `spec_wast` and `spec_node`.
+  with **500** directives, all enforced in both `spec_wast` and `spec_node`.
 - The raw corpus is now large enough to act as a real regression floor:
-  **171** valid fixtures, **116** invalid-validate fixtures, and **34** invalid-decode fixtures.
+  **179** valid fixtures, **116** invalid-validate fixtures, and **34** invalid-decode fixtures.
 - The typed-function-reference / tail-call / nullability / const-init / table-global-element
   campaigns all broadened coverage without forcing architecture drift away from the current
   spec-facing validator model.
