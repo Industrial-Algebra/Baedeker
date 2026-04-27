@@ -4996,6 +4996,59 @@ mod tests {
     }
 
     #[test]
+    fn validate_br_as_br_if_value_cond_official_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/br-as-br-if-value-cond.wasm");
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_br_as_select_all_official_case() {
+        let bytes = include_bytes!("../../../baedeker-testdata/spec/valid/br-as-select-all.wasm");
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_br_as_call_indirect_all_official_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/br-as-call-indirect-all.wasm",);
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_br_as_local_tee_value_official_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/br-as-local-tee-value.wasm");
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_br_as_load_address_official_case() {
+        let bytes = include_bytes!("../../../baedeker-testdata/spec/valid/br-as-load-address.wasm");
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_br_as_store_n_value_official_case() {
+        let bytes = include_bytes!("../../../baedeker-testdata/spec/valid/br-as-storeN-value.wasm");
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_br_as_memory_grow_size_official_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/br-as-memory-grow-size.wasm",);
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
     fn validate_br_if_as_br_if_value_cond_official_case() {
         let bytes =
             include_bytes!("../../../baedeker-testdata/spec/valid/br-if-as-br-if-value-cond.wasm",);

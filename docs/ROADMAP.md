@@ -428,6 +428,14 @@ interpreter-first with AOT as a future layer.
     raw valid fixtures and unit tests now pin `br-if-as-br-if-value-cond`, `br-if-as-select-cond`,
     `br-if-as-call-indirect-last`, `br-if-as-local-tee-value`, `br-if-as-load-address`,
     `br-if-as-storeN-value`, and `br-if-as-memory-grow-size`.
+  - The next comparable densification broadened `br-subset` across a much larger official direct-
+    branch consumer slice. Active official coverage now spans result typing, block/loop placements,
+    nested branch consumers (`br`, `br_if`, `br_table`), if/select/call/call_indirect consumers,
+    local/global consumers, memory address/value consumers, arithmetic/compare/conversion
+    consumers, and `memory.grow`, while retaining the existing typed-reference branch grounding in
+    the same file. Representative raw valid fixtures and unit tests now pin `br-as-br-if-value-cond`,
+    `br-as-select-all`, `br-as-call-indirect-all`, `br-as-local-tee-value`, `br-as-load-address`,
+    `br-as-storeN-value`, and `br-as-memory-grow-size`.
   - `ref.as_non_null` support now also includes decoding plus validation grounding via new
     `ref-as-non-null-subset` upstream coverage, raw valid
     `valid/ref-as-non-null-call-ref.wasm`, and raw invalid
@@ -499,7 +507,7 @@ Baedeker’s own revised definition.
 - Validation diagnostics are now precise and regression-pinned across a broad raw corpus with exact
   `offset=` metadata and decode-vs-validate separation.
 - The active upstream-derived lane remains **zero-skip** while covering **87** curated
-  `wast-upstream` files and **477** upstream directives.
+  `wast-upstream` files and **478** upstream directives.
 - Compile-time external parity is in the regular loop via Node/V8 for the active supported raw and
   upstream-derived surface.
 - Typed function references, tail calls, null branches, `ref.as_non_null`, const/init flows, and a
@@ -531,11 +539,11 @@ Baedeker’s own revised definition.
 - `cargo test -p baedeker-core --test spec_node`
 - `cargo test -p baedeker-core`
 - `cargo clippy -p baedeker-core --all-targets -- -D warnings`
-- Current `baedeker-core` unit test count: **365 passing**
+- Current `baedeker-core` unit test count: **372 passing**
 - Current spec-harness integration tests: **8 passing** (`spec`: 3, `spec_wast`: 2, `spec_node`: 3)
 - Current corpus snapshot:
-  - `wast-upstream`: **87** active files / **477** directives
-  - raw `valid`: **132** fixtures
+  - `wast-upstream`: **87** active files / **478** directives
+  - raw `valid`: **139** fixtures
   - raw `invalid-validate`: **116** fixtures
   - raw `invalid-decode`: **34** fixtures
   - custom `spec/wast`: **17** files
