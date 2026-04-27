@@ -4996,6 +4996,69 @@ mod tests {
     }
 
     #[test]
+    fn validate_block_as_select_cond_official_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/block-as-select-cond.wasm");
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_block_as_load_address_official_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/block-as-load-address.wasm");
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_if_as_call_indirect_last_official_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/if-as-call-indirect-last.wasm",);
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_if_as_memory_grow_size_official_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/if-as-memory-grow-size.wasm");
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_loop_as_local_tee_value_official_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/loop-as-local-tee-value.wasm");
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_loop_as_memory_grow_size_official_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/loop-as-memory-grow-size.wasm",);
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_return_as_call_value_official_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/return-as-call-value.wasm");
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_return_as_br_value_official_case() {
+        let bytes = include_bytes!("../../../baedeker-testdata/spec/valid/return-as-br-value.wasm");
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
     fn validate_br_as_br_if_value_cond_official_case() {
         let bytes =
             include_bytes!("../../../baedeker-testdata/spec/valid/br-as-br-if-value-cond.wasm");

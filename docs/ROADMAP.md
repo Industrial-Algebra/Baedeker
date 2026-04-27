@@ -436,6 +436,15 @@ interpreter-first with AOT as a future layer.
     the same file. Representative raw valid fixtures and unit tests now pin `br-as-br-if-value-cond`,
     `br-as-select-all`, `br-as-call-indirect-all`, `br-as-local-tee-value`, `br-as-load-address`,
     `br-as-storeN-value`, and `br-as-memory-grow-size`.
+  - A follow-on control-consumer closure sweep then widened the remaining smaller structured-control
+    subsets rather than opening another narrow lane. `if-subset`, `block-subset`, `loop-subset`,
+    and `return-subset` now cover additional consumer placements spanning `call_indirect`,
+    `memory.grow`, `select`, loads, `local.tee`, direct calls, and nested branch values. This
+    closes more of the official expression-position surface around structured control without new
+    validator algorithms. Representative raw valid fixtures and unit tests now pin
+    `if-as-call-indirect-last`, `if-as-memory-grow-size`, `block-as-select-cond`,
+    `block-as-load-address`, `loop-as-local-tee-value`, `loop-as-memory-grow-size`,
+    `return-as-call-value`, and `return-as-br-value`.
   - `ref.as_non_null` support now also includes decoding plus validation grounding via new
     `ref-as-non-null-subset` upstream coverage, raw valid
     `valid/ref-as-non-null-call-ref.wasm`, and raw invalid
@@ -539,11 +548,11 @@ Baedeker’s own revised definition.
 - `cargo test -p baedeker-core --test spec_node`
 - `cargo test -p baedeker-core`
 - `cargo clippy -p baedeker-core --all-targets -- -D warnings`
-- Current `baedeker-core` unit test count: **372 passing**
+- Current `baedeker-core` unit test count: **380 passing**
 - Current spec-harness integration tests: **8 passing** (`spec`: 3, `spec_wast`: 2, `spec_node`: 3)
 - Current corpus snapshot:
   - `wast-upstream`: **87** active files / **478** directives
-  - raw `valid`: **139** fixtures
+  - raw `valid`: **147** fixtures
   - raw `invalid-validate`: **116** fixtures
   - raw `invalid-decode`: **34** fixtures
   - custom `spec/wast`: **17** files

@@ -2,6 +2,7 @@
 
 (module
   (func $dummy)
+  (func $id (param i32) (result i32) (local.get 0))
 
   (func (export "type-i32-value") (result i32)
     (block (result i32) (i32.ctz (return (i32.const 1)))))
@@ -16,7 +17,13 @@
     (if (result i32)
       (local.get 0)
       (then (local.get 1))
-      (else (return (i32.const 4))))))
+      (else (return (i32.const 4)))))
+
+  (func (export "as-call-value") (result i32)
+    (call $id (return (i32.const 5))))
+
+  (func (export "as-br-value") (result i32)
+    (block (result i32) (br 0 (return (i32.const 6))))))
 
 (module
   (type $t0 (func (param i32) (result i32)))

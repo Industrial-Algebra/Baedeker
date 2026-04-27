@@ -1,6 +1,7 @@
 ;; Source: https://github.com/WebAssembly/spec/blob/main/test/core/block.wast
 
 (module
+  (memory 1)
   (func $dummy)
 
   (func (export "singular") (result i32)
@@ -16,7 +17,16 @@
     (if (result i32)
       (i32.const 1)
       (then (block (result i32) (i32.const 1)))
-      (else (i32.const 2)))))
+      (else (i32.const 2))))
+
+  (func (export "as-select-cond") (result i32)
+    (select
+      (i32.const 0)
+      (i32.const 1)
+      (block (result i32) (call $dummy) (i32.const 1))))
+
+  (func (export "as-load-address") (result i32)
+    (i32.load (block (result i32) (call $dummy) (i32.const 0)))))
 
 (module
   (type $t0 (func (param i32) (result i32)))

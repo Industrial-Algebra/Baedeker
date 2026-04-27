@@ -33,7 +33,13 @@
 
   (func (export "as-global.set-value") (result i32)
     (global.set $a (loop (result i32) (i32.const 1)))
-    (global.get $a)))
+    (global.get $a))
+
+  (func (export "as-local.tee-value") (result i32) (local i32)
+    (local.tee 0 (loop (result i32) (i32.const 1))))
+
+  (func (export "as-memory.grow-size") (result i32)
+    (memory.grow (loop (result i32) (i32.const 1)))))
 
 (module
   (type $t0 (func (param i32) (result i32)))
