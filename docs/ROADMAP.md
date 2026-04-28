@@ -511,6 +511,22 @@ interpreter-first with AOT as a future layer.
     `typed-call-ref-if-result-wrong-concrete-type`,
     `typed-return-call-ref-result-wrong-concrete-type`, and
     `typed-return-call-ref-result-nullability-mismatch`.
+  - The next typed select / ref-control result-pressure pass then widened the same result-boundary
+    scrutiny across `select`, `ref.as_non_null`, `br_on_null`, and `br_on_non_null` rather than
+    leaving that lattice pressure concentrated only around `call_ref` / `return_call_ref`.
+    Active official invalid grounding now includes additional result-boundary failures in
+    `ref-select-subset`, `ref-as-non-null-subset`, `br-on-null-subset`, and
+    `br-on-non-null-subset`, while new raw exact-offset fixtures pin typed-select function/block/
+    `if` result mismatches, typed-select nullability-result mismatch, `ref.as_non_null`
+    function-result mismatch, and `br_on_null` / `br_on_non_null` block-result mismatches.
+    Representative raw invalid fixtures and unit tests now pin
+    `typed-select-function-result-wrong-concrete-type`,
+    `typed-select-block-result-wrong-concrete-type`,
+    `typed-select-if-result-wrong-concrete-type`,
+    `typed-select-function-result-nullability-mismatch`,
+    `typed-ref-as-non-null-function-result-wrong-concrete-type`,
+    `typed-br-on-null-block-result-wrong-concrete-type`, and
+    `typed-br-on-non-null-block-result-wrong-concrete-type`.
   - `ref.as_non_null` support now also includes decoding plus validation grounding via new
     `ref-as-non-null-subset` upstream coverage, raw valid
     `valid/ref-as-non-null-call-ref.wasm`, and raw invalid
@@ -582,7 +598,7 @@ Baedeker’s own revised definition.
 - Validation diagnostics are now precise and regression-pinned across a broad raw corpus with exact
   `offset=` metadata and decode-vs-validate separation.
 - The active upstream-derived lane remains **zero-skip** while covering **87** curated
-  `wast-upstream` files and **513** upstream directives.
+  `wast-upstream` files and **519** upstream directives.
 - Compile-time external parity is in the regular loop via Node/V8 for the active supported raw and
   upstream-derived surface.
 - Typed function references, tail calls, null branches, `ref.as_non_null`, const/init flows, and a
@@ -614,12 +630,12 @@ Baedeker’s own revised definition.
 - `cargo test -p baedeker-core --test spec_node`
 - `cargo test -p baedeker-core`
 - `cargo clippy -p baedeker-core --all-targets -- -D warnings`
-- Current `baedeker-core` unit test count: **425 passing**
+- Current `baedeker-core` unit test count: **432 passing**
 - Current spec-harness integration tests: **8 passing** (`spec`: 3, `spec_wast`: 2, `spec_node`: 3)
 - Current corpus snapshot:
-  - `wast-upstream`: **87** active files / **513** directives
+  - `wast-upstream`: **87** active files / **519** directives
   - raw `valid`: **179** fixtures
-  - raw `invalid-validate`: **129** fixtures
+  - raw `invalid-validate`: **136** fixtures
   - raw `invalid-decode`: **34** fixtures
   - custom `spec/wast`: **17** files
 - `spec_node` adds a Node/V8 compile-time cross-check over the raw fixture corpus plus the active

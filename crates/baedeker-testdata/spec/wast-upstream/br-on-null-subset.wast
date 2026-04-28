@@ -81,3 +81,16 @@
       (call $f)))
   "type mismatch"
 )
+
+(assert_invalid
+  (module
+    (type $t0 (func (param i32) (result i32)))
+    (type $t1 (func (param i64) (result i64)))
+    (func (param $c i32) (param $r (ref null $t0)) (result (ref null $t1))
+      (block (result (ref null $t1))
+        (block $l (result (ref null $t0))
+          (br_on_null $l (ref.null $t0) (local.get $r))
+          (local.get $c)
+          (select (result (ref null $t0)))))))
+  "type mismatch"
+)

@@ -95,3 +95,18 @@
       (local.get 0)))
   "type mismatch"
 )
+
+(assert_invalid
+  (module
+    (type $t0 (func (param i32) (result i32)))
+    (type $t1 (func (param i64) (result i64)))
+    (func $f (type $t0)
+      (local.get 0))
+    (export "f" (func $f))
+    (func (param $r (ref null $t0)) (result (ref $t1))
+      (block (result (ref $t1))
+        (block $l (result (ref $t0))
+          (br_on_non_null $l (local.get $r))
+          (ref.func $f)))))
+  "type mismatch"
+)

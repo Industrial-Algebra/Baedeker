@@ -597,6 +597,23 @@ invalid fixtures and unit tests now pin `typed-call-ref-function-result-wrong-co
 `typed-return-call-ref-result-wrong-concrete-type`, and
 `typed-return-call-ref-result-nullability-mismatch`.
 
+The next typed select / ref-control result-pressure pass then widened the same result-boundary
+scrutiny across `select`, `ref.as_non_null`, `br_on_null`, and `br_on_non_null` rather than
+leaving that lattice pressure concentrated only around `call_ref` / `return_call_ref`. Active
+official invalid grounding now includes additional result-boundary failures in
+`ref-select-subset`, `ref-as-non-null-subset`, `br-on-null-subset`, and
+`br-on-non-null-subset`, while new raw exact-offset fixtures pin typed-select function/block/`if`
+result mismatches, typed-select nullability-result mismatch, `ref.as_non_null`
+function-result mismatch, and `br_on_null` / `br_on_non_null` block-result mismatches.
+Representative raw invalid fixtures and unit tests now pin
+`typed-select-function-result-wrong-concrete-type`,
+`typed-select-block-result-wrong-concrete-type`,
+`typed-select-if-result-wrong-concrete-type`,
+`typed-select-function-result-nullability-mismatch`,
+`typed-ref-as-non-null-function-result-wrong-concrete-type`,
+`typed-br-on-null-block-result-wrong-concrete-type`, and
+`typed-br-on-non-null-block-result-wrong-concrete-type`.
+
 `ref.as_non_null` now also has dedicated grounding via `ref-as-non-null-subset`, along with raw
 valid fixture `ref-as-non-null-call-ref.wasm` and raw invalid fixture
 `ref-as-non-null-non-ref-input.wasm`. Within the current bounded typed-reference model it accepts
@@ -622,9 +639,9 @@ broadly grounded and structurally stable.
   `invalid-validate` fails after decoding, and decode-preserving body failures are pinned through
   `ValidationErrorKind::Decode { context, kind }`.
 - The active upstream-derived lane is zero-skip and now covers **87** curated upstream subset files
-  with **513** directives, all enforced in both `spec_wast` and `spec_node`.
+  with **519** directives, all enforced in both `spec_wast` and `spec_node`.
 - The raw corpus is now large enough to act as a real regression floor:
-  **179** valid fixtures, **129** invalid-validate fixtures, and **34** invalid-decode fixtures.
+  **179** valid fixtures, **136** invalid-validate fixtures, and **34** invalid-decode fixtures.
 - The typed-function-reference / tail-call / nullability / const-init / table-global-element
   campaigns all broadened coverage without forcing architecture drift away from the current
   spec-facing validator model.

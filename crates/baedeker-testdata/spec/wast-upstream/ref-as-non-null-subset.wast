@@ -70,6 +70,15 @@
   "type mismatch"
 )
 
+(assert_invalid
+  (module
+    (type $t0 (func (param i32) (result i32)))
+    (type $t1 (func (param i64) (result i64)))
+    (func (param $r (ref null $t0)) (result (ref $t1))
+      (ref.as_non_null (local.get $r))))
+  "type mismatch"
+)
+
 (module
   (type $t (func))
   (func (param $r (ref $t))
