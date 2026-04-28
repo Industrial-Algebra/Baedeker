@@ -52,6 +52,35 @@
         (then (i32.const 1))
         (else (i32.const 0))))))
 
+(module
+  (type $t0 (func (param i32) (result i32)))
+  (func $f (type $t0)
+    (local.get 0))
+  (export "f" (func $f))
+  (func (param i32) (result (ref null $t0))
+    (if (result (ref null $t0))
+      (local.get 0)
+      (then
+        (ref.func $f))
+      (else
+        (ref.null $t0)))))
+
+(assert_invalid
+  (module
+    (type $t0 (func (param i32) (result i32)))
+    (func $f (type $t0)
+      (local.get 0))
+    (export "f" (func $f))
+    (func (param i32) (result (ref $t0))
+      (if (result (ref $t0))
+        (local.get 0)
+        (then
+          (ref.func $f))
+        (else
+          (ref.null $t0)))))
+  "type mismatch"
+)
+
 (assert_invalid
   (module
     (type $sig (func))

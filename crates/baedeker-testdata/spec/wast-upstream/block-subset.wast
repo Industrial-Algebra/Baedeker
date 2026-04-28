@@ -53,6 +53,24 @@
   "type mismatch"
 )
 
+(module
+  (type $t0 (func (param i32) (result i32)))
+  (func $f (type $t0)
+    (local.get 0))
+  (export "f" (func $f))
+  (func (result (ref null $t0))
+    (block (result (ref null $t0))
+      (ref.func $f))))
+
+(assert_invalid
+  (module
+    (type $t0 (func (param i32) (result i32)))
+    (func (result (ref $t0))
+      (block (result (ref $t0))
+        (ref.null $t0))))
+  "type mismatch"
+)
+
 (assert_invalid
   (module
     (type $sig (func))
