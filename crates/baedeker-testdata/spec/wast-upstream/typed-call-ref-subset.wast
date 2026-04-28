@@ -123,6 +123,39 @@
   "type mismatch"
 )
 
+(module
+  (type $t0 (func (param i32) (result i32)))
+  (func $f (type $t0)
+    (local.get 0))
+  (export "f" (func $f))
+  (func (param $c i32) (param $x i32) (result i32)
+    (call_ref $t0
+      (local.get $x)
+      (if (result (ref null $t0))
+        (local.get $c)
+        (then
+          (ref.func $f))
+        (else
+          (ref.null $t0))))))
+
+(assert_invalid
+  (module
+    (type $t0 (func (param i32) (result i32)))
+    (func $f (type $t0)
+      (local.get 0))
+    (export "f" (func $f))
+    (func (param $c i32) (param $x i32) (result i32)
+      (call_ref $t0
+        (local.get $x)
+        (if (result funcref)
+          (local.get $c)
+          (then
+            (ref.func $f))
+          (else
+            (ref.null func))))))
+  "type mismatch"
+)
+
 (assert_invalid
   (module
     (elem declare func $f)

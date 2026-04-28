@@ -57,6 +57,37 @@
     (global.set 0 (table.get 0 (i32.const 0)))
     (global.get 0)))
 
+(module
+  (type $t0 (func (param i32) (result i32)))
+  (func $f (type $t0)
+    (local.get 0))
+  (export "f" (func $f))
+  (global $g (mut (ref null $t0)) (ref.null $t0))
+  (func (param $c i32)
+    (global.set $g
+      (if (result (ref null $t0))
+        (local.get $c)
+        (then
+          (ref.func $f))
+        (else
+          (ref.null $t0))))))
+
+(module
+  (type $t0 (func (param i32) (result i32)))
+  (func $f (type $t0)
+    (local.get 0))
+  (export "f" (func $f))
+  (table $t 1 (ref null $t0))
+  (func (param $c i32)
+    (table.set $t
+      (i32.const 0)
+      (if (result (ref null $t0))
+        (local.get $c)
+        (then
+          (ref.func $f))
+        (else
+          (ref.null $t0))))))
+
 (assert_invalid
   (module
     (type $t0 (func (param i32) (result i32)))
@@ -77,6 +108,43 @@
     (table $t 1 (ref null $ii))
     (func
       (table.set $t (i32.const 0) (ref.null extern))))
+  "type mismatch"
+)
+
+(assert_invalid
+  (module
+    (type $t0 (func (param i32) (result i32)))
+    (func $f (type $t0)
+      (local.get 0))
+    (export "f" (func $f))
+    (global $g (mut (ref $t0)) (ref.func $f))
+    (func (param $c i32)
+      (global.set $g
+        (if (result (ref null $t0))
+          (local.get $c)
+          (then
+            (ref.func $f))
+          (else
+            (ref.null $t0))))))
+  "type mismatch"
+)
+
+(assert_invalid
+  (module
+    (type $t0 (func (param i32) (result i32)))
+    (func $f (type $t0)
+      (local.get 0))
+    (export "f" (func $f))
+    (table $t 1 (ref $t0))
+    (func (param $c i32)
+      (table.set $t
+        (i32.const 0)
+        (if (result (ref null $t0))
+          (local.get $c)
+          (then
+            (ref.func $f))
+          (else
+            (ref.null $t0))))))
   "type mismatch"
 )
 

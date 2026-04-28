@@ -643,6 +643,20 @@ targeting non-null loop params. Representative raw fixtures and unit tests now p
 `typed-br-to-loop-param-nullability-mismatch`, and
 `typed-br-if-to-loop-param-nullability-mismatch`.
 
+A follow-on typed nullability-consumer sweep then widened pressure across plain `return`,
+`call_ref` consumers, and table/global storage boundaries under mixed nullable/non-null structured
+joins. Active official grounding now includes nullable structured-join return cases in
+`return-subset`, nullable `if`-fed `call_ref` cases in `typed-call-ref-subset`, and nullable
+`if`-fed `global.set` / `table.set` cases in `typed-table-ref-subset`. New raw fixtures now pin
+valid nullable joins flowing into `return`, `call_ref`, `global.set`, and `table.set`, along with
+exact-offset invalids for non-null return/global/table expectations fed by nullable structured
+joins and for an abstract `funcref` structured join consumed by `call_ref`. Representative raw
+fixtures and unit tests now pin `typed-return-if-nullable`, `typed-call-ref-if-nullable`,
+`typed-global-set-if-nullable`, `typed-table-set-if-nullable`,
+`typed-return-if-nullability-mismatch`, `typed-call-ref-if-abstract-nullability-mismatch`,
+`typed-global-set-if-nullability-mismatch`, and
+`typed-table-set-if-nullability-mismatch`.
+
 `ref.as_non_null` now also has dedicated grounding via `ref-as-non-null-subset`, along with raw
 valid fixture `ref-as-non-null-call-ref.wasm` and raw invalid fixture
 `ref-as-non-null-non-ref-input.wasm`. Within the current bounded typed-reference model it accepts
@@ -668,9 +682,9 @@ broadly grounded and structurally stable.
   `invalid-validate` fails after decoding, and decode-preserving body failures are pinned through
   `ValidationErrorKind::Decode { context, kind }`.
 - The active upstream-derived lane is zero-skip and now covers **87** curated upstream subset files
-  with **536** directives, all enforced in both `spec_wast` and `spec_node`.
+  with **544** directives, all enforced in both `spec_wast` and `spec_node`.
 - The raw corpus is now large enough to act as a real regression floor:
-  **187** valid fixtures, **146** invalid-validate fixtures, and **34** invalid-decode fixtures.
+  **191** valid fixtures, **150** invalid-validate fixtures, and **34** invalid-decode fixtures.
 - The typed-function-reference / tail-call / nullability / const-init / table-global-element
   campaigns all broadened coverage without forcing architecture drift away from the current
   spec-facing validator model.
