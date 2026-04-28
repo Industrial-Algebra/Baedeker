@@ -6431,6 +6431,72 @@ mod tests {
     }
 
     #[test]
+    fn reject_typed_call_ref_function_result_wrong_concrete_type() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/typed-call-ref-function-result-wrong-concrete-type.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(57));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::FunctionResultTypeMismatch {
+                expected,
+                found,
+                ..
+            } if expected == vec![ValType::Ref(RefType::Typed {
+                    nullable: true,
+                    heap: crate::types::HeapType::Type(TypeIdx(1)),
+                })] && found == vec![ValType::Ref(RefType::Typed {
+                    nullable: true,
+                    heap: crate::types::HeapType::Type(TypeIdx(0)),
+                })]
+        ));
+    }
+
+    #[test]
+    fn reject_typed_call_ref_block_result_wrong_concrete_type() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/typed-call-ref-block-result-wrong-concrete-type.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(60));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::ControlResultTypeMismatch { expected, found }
+                if expected == vec![ValType::Ref(RefType::Typed {
+                    nullable: true,
+                    heap: crate::types::HeapType::Type(TypeIdx(1)),
+                })] && found == vec![ValType::Ref(RefType::Typed {
+                    nullable: true,
+                    heap: crate::types::HeapType::Type(TypeIdx(0)),
+                })]
+        ));
+    }
+
+    #[test]
+    fn reject_typed_call_ref_if_result_wrong_concrete_type() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/typed-call-ref-if-result-wrong-concrete-type.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(63));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::ControlResultTypeMismatch { expected, found }
+                if expected == vec![ValType::Ref(RefType::Typed {
+                    nullable: true,
+                    heap: crate::types::HeapType::Type(TypeIdx(1)),
+                })] && found == vec![ValType::Ref(RefType::Typed {
+                    nullable: true,
+                    heap: crate::types::HeapType::Type(TypeIdx(0)),
+                })]
+        ));
+    }
+
+    #[test]
     fn reject_typed_block_result_to_call_ref_with_wrong_concrete_type() {
         let bytes = include_bytes!(
             "../../../baedeker-testdata/spec/invalid-validate/typed-block-to-call-ref-wrong-concrete-type.wasm",
@@ -6913,6 +6979,48 @@ mod tests {
             include_bytes!("../../../baedeker-testdata/spec/valid/return-call-ref-count.wasm");
         let module = Module::decode(bytes).unwrap();
         module.validate().unwrap();
+    }
+
+    #[test]
+    fn reject_typed_return_call_ref_result_wrong_concrete_type() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/typed-return-call-ref-result-wrong-concrete-type.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(55));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::ResultTypeMismatch { expected, found }
+                if expected == vec![ValType::Ref(RefType::Typed {
+                    nullable: true,
+                    heap: crate::types::HeapType::Type(TypeIdx(1)),
+                })] && found == vec![ValType::Ref(RefType::Typed {
+                    nullable: true,
+                    heap: crate::types::HeapType::Type(TypeIdx(0)),
+                })]
+        ));
+    }
+
+    #[test]
+    fn reject_typed_return_call_ref_result_nullability_mismatch() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/typed-return-call-ref-result-nullability-mismatch.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(50));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::ResultTypeMismatch { expected, found }
+                if expected == vec![ValType::Ref(RefType::Typed {
+                    nullable: false,
+                    heap: crate::types::HeapType::Type(TypeIdx(0)),
+                })] && found == vec![ValType::Ref(RefType::Typed {
+                    nullable: true,
+                    heap: crate::types::HeapType::Type(TypeIdx(0)),
+                })]
+        ));
     }
 
     #[test]

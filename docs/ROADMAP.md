@@ -498,6 +498,19 @@ interpreter-first with AOT as a future layer.
     `return-call-ref-non-funcref-externref`, `return-call-ref-non-funcref-funcref`,
     `return-call-ref-multi-result`, `br-on-null-stack-mismatch`,
     `br-on-non-null-stack-mismatch`, and `ref-as-non-null-null-to-nonnull-call`.
+  - A follow-on typed result-lattice pressure pass then focused specifically on reference-result
+    subtyping and nullability joins around `call_ref`, `return_call_ref`, and structured-control
+    result boundaries. Active official invalid grounding now includes the broader
+    `return_call_ref` result-lattice slice from upstream (`ref $t` vs `ref null $t`, `ref func`,
+    and `ref null func` result interactions), while new raw exact-offset fixtures pin
+    `call_ref`-produced wrong-concrete-type failures at function, block, and `if` result
+    boundaries plus `return_call_ref` wrong-concrete-type and nullability result mismatches.
+    Representative raw invalid fixtures and unit tests now pin
+    `typed-call-ref-function-result-wrong-concrete-type`,
+    `typed-call-ref-block-result-wrong-concrete-type`,
+    `typed-call-ref-if-result-wrong-concrete-type`,
+    `typed-return-call-ref-result-wrong-concrete-type`, and
+    `typed-return-call-ref-result-nullability-mismatch`.
   - `ref.as_non_null` support now also includes decoding plus validation grounding via new
     `ref-as-non-null-subset` upstream coverage, raw valid
     `valid/ref-as-non-null-call-ref.wasm`, and raw invalid
@@ -569,7 +582,7 @@ Baedeker’s own revised definition.
 - Validation diagnostics are now precise and regression-pinned across a broad raw corpus with exact
   `offset=` metadata and decode-vs-validate separation.
 - The active upstream-derived lane remains **zero-skip** while covering **87** curated
-  `wast-upstream` files and **507** upstream directives.
+  `wast-upstream` files and **513** upstream directives.
 - Compile-time external parity is in the regular loop via Node/V8 for the active supported raw and
   upstream-derived surface.
 - Typed function references, tail calls, null branches, `ref.as_non_null`, const/init flows, and a
@@ -601,12 +614,12 @@ Baedeker’s own revised definition.
 - `cargo test -p baedeker-core --test spec_node`
 - `cargo test -p baedeker-core`
 - `cargo clippy -p baedeker-core --all-targets -- -D warnings`
-- Current `baedeker-core` unit test count: **420 passing**
+- Current `baedeker-core` unit test count: **425 passing**
 - Current spec-harness integration tests: **8 passing** (`spec`: 3, `spec_wast`: 2, `spec_node`: 3)
 - Current corpus snapshot:
-  - `wast-upstream`: **87** active files / **507** directives
+  - `wast-upstream`: **87** active files / **513** directives
   - raw `valid`: **179** fixtures
-  - raw `invalid-validate`: **124** fixtures
+  - raw `invalid-validate`: **129** fixtures
   - raw `invalid-decode`: **34** fixtures
   - custom `spec/wast`: **17** files
 - `spec_node` adds a Node/V8 compile-time cross-check over the raw fixture corpus plus the active

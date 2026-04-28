@@ -83,6 +83,65 @@
 
 (assert_invalid
   (module
+    (type $t (func))
+    (type $t2 (func (result (ref null $t))))
+    (elem declare func $f22)
+    (func $f12 (result (ref $t)) (return_call_ref $t2 (ref.func $f22)))
+    (func $f22 (result (ref null $t)) (return_call_ref $t2 (ref.func $f22))))
+  "type mismatch"
+)
+
+(assert_invalid
+  (module
+    (type $t (func))
+    (type $t3 (func (result (ref func))))
+    (elem declare func $f33)
+    (func $f13 (result (ref $t)) (return_call_ref $t3 (ref.func $f33)))
+    (func $f33 (result (ref func)) (return_call_ref $t3 (ref.func $f33))))
+  "type mismatch"
+)
+
+(assert_invalid
+  (module
+    (type $t (func))
+    (type $t4 (func (result (ref null func))))
+    (elem declare func $f44)
+    (func $f14 (result (ref $t)) (return_call_ref $t4 (ref.func $f44)))
+    (func $f44 (result (ref null func)) (return_call_ref $t4 (ref.func $f44))))
+  "type mismatch"
+)
+
+(assert_invalid
+  (module
+    (type $t (func))
+    (type $t3 (func (result (ref func))))
+    (elem declare func $f33)
+    (func $f23 (result (ref null $t)) (return_call_ref $t3 (ref.func $f33)))
+    (func $f33 (result (ref func)) (return_call_ref $t3 (ref.func $f33))))
+  "type mismatch"
+)
+
+(assert_invalid
+  (module
+    (type $t (func))
+    (type $t4 (func (result (ref null func))))
+    (elem declare func $f44)
+    (func $f24 (result (ref null $t)) (return_call_ref $t4 (ref.func $f44)))
+    (func $f44 (result (ref null func)) (return_call_ref $t4 (ref.func $f44))))
+  "type mismatch"
+)
+
+(assert_invalid
+  (module
+    (type $t4 (func (result (ref null func))))
+    (elem declare func $f44)
+    (func $f34 (result (ref func)) (return_call_ref $t4 (ref.func $f44)))
+    (func $f44 (result (ref null func)) (return_call_ref $t4 (ref.func $f44))))
+  "type mismatch"
+)
+
+(assert_invalid
+  (module
     (type $t0 (func (param i32) (result i32)))
     (type $t1 (func (param i64) (result i32)))
     (func $f (type $t0) (local.get 0))
