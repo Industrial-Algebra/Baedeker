@@ -108,3 +108,56 @@
           (else (ref.null $t0))))))
   "type mismatch"
 )
+
+(assert_invalid
+  (module
+    (elem declare func $f)
+    (type $t (func (param i32) (result i32)))
+    (func $f (param i32) (result i32) (local.get 0))
+
+    (func (export "unreachable-bad-arg") (result i32)
+      (unreachable)
+      (i64.const 0)
+      (ref.func $f)
+      (return_call_ref $t)))
+  "type mismatch"
+)
+
+(assert_invalid
+  (module
+    (elem declare func $f)
+    (type $t (func (param i32) (result i32)))
+    (func $f (param i32) (result i32) (local.get 0))
+
+    (func (export "unreachable-bad-tail") (result i32)
+      (unreachable)
+      (ref.func $f)
+      (return_call_ref $t)
+      (i64.const 0)))
+  "type mismatch"
+)
+
+(assert_invalid
+  (module
+    (type $t (func))
+    (func $f (param $r externref)
+      (return_call_ref $t (local.get $r))))
+  "type mismatch"
+)
+
+(assert_invalid
+  (module
+    (type $t (func))
+    (func $f (param $r funcref)
+      (return_call_ref $t (local.get $r))))
+  "type mismatch"
+)
+
+(assert_invalid
+  (module
+    (type $ty (func (result i32 i32)))
+    (func (param (ref $ty)) (result i32)
+      local.get 0
+      return_call_ref $ty))
+  "type mismatch"
+)

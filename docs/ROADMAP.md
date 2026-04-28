@@ -488,6 +488,16 @@ interpreter-first with AOT as a future layer.
     `call-ref-unreachable-call-drop`, `return-call-ref-count`, `br-on-null-unreachable`,
     `br-on-non-null-ref-as-non-null`, `br-on-non-null-unreachable`, and
     `ref-as-non-null-direct-call-ref-func`.
+  - The next invalid-pressure pass then deepened the same typed/control frontier rather than only
+    adding more happy-path official grounding. Active official invalid coverage now includes extra
+    `call_ref` / `return_call_ref` non-funcref cases, `return_call_ref` result-arity pressure, and
+    broader raw exact-offset regression fixtures for `call_ref`, `return_call_ref`,
+    `br_on_null`, `br_on_non_null`, and `ref.as_non_null` consumer/stack-shape failures.
+    Representative raw invalid fixtures and unit tests now pin
+    `call-ref-non-funcref-externref`, `call-ref-non-funcref-funcref`,
+    `return-call-ref-non-funcref-externref`, `return-call-ref-non-funcref-funcref`,
+    `return-call-ref-multi-result`, `br-on-null-stack-mismatch`,
+    `br-on-non-null-stack-mismatch`, and `ref-as-non-null-null-to-nonnull-call`.
   - `ref.as_non_null` support now also includes decoding plus validation grounding via new
     `ref-as-non-null-subset` upstream coverage, raw valid
     `valid/ref-as-non-null-call-ref.wasm`, and raw invalid
@@ -559,7 +569,7 @@ Baedeker’s own revised definition.
 - Validation diagnostics are now precise and regression-pinned across a broad raw corpus with exact
   `offset=` metadata and decode-vs-validate separation.
 - The active upstream-derived lane remains **zero-skip** while covering **87** curated
-  `wast-upstream` files and **500** upstream directives.
+  `wast-upstream` files and **507** upstream directives.
 - Compile-time external parity is in the regular loop via Node/V8 for the active supported raw and
   upstream-derived surface.
 - Typed function references, tail calls, null branches, `ref.as_non_null`, const/init flows, and a
@@ -591,12 +601,12 @@ Baedeker’s own revised definition.
 - `cargo test -p baedeker-core --test spec_node`
 - `cargo test -p baedeker-core`
 - `cargo clippy -p baedeker-core --all-targets -- -D warnings`
-- Current `baedeker-core` unit test count: **412 passing**
+- Current `baedeker-core` unit test count: **420 passing**
 - Current spec-harness integration tests: **8 passing** (`spec`: 3, `spec_wast`: 2, `spec_node`: 3)
 - Current corpus snapshot:
-  - `wast-upstream`: **87** active files / **500** directives
+  - `wast-upstream`: **87** active files / **507** directives
   - raw `valid`: **179** fixtures
-  - raw `invalid-validate`: **116** fixtures
+  - raw `invalid-validate`: **124** fixtures
   - raw `invalid-decode`: **34** fixtures
   - custom `spec/wast`: **17** files
 - `spec_node` adds a Node/V8 compile-time cross-check over the raw fixture corpus plus the active

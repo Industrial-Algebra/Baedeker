@@ -4057,6 +4057,29 @@ mod tests {
     }
 
     #[test]
+    fn reject_ref_as_non_null_null_to_nonnull_call_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/ref-as-non-null-null-to-nonnull-call.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(42));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::TypeMismatch { op, expected, found }
+                if op == "stack"
+                    && expected == ValType::Ref(RefType::Typed {
+                        nullable: false,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })
+                    && found == ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })
+        ));
+    }
+
+    #[test]
     fn validate_typed_ref_as_non_null_global_set_with_equivalent_signature() {
         let bytes = include_bytes!(
             "../../../baedeker-testdata/spec/valid/typed-ref-as-non-null-global-set-equivalent-signature.wasm",
@@ -4190,6 +4213,26 @@ mod tests {
     }
 
     #[test]
+    fn reject_br_on_null_stack_mismatch_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/br-on-null-stack-mismatch.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(47));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::TypeMismatch { op, expected, found }
+                if op == "stack"
+                    && expected == ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })
+                    && found == ValType::Ref(RefType::FuncRef)
+        ));
+    }
+
+    #[test]
     fn validate_br_on_non_null() {
         let bytes = [
             0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x6F,
@@ -4266,6 +4309,26 @@ mod tests {
                         nullable: true,
                         heap: crate::types::HeapType::Type(TypeIdx(0)),
                     })
+        ));
+    }
+
+    #[test]
+    fn reject_br_on_non_null_stack_mismatch_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/br-on-non-null-stack-mismatch.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(47));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::TypeMismatch { op, expected, found }
+                if op == "stack"
+                    && expected == ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })
+                    && found == ValType::Ref(RefType::FuncRef)
         ));
     }
 
@@ -6895,6 +6958,105 @@ mod tests {
                 }),
                 found: ValType::Ref(RefType::ExternRef),
             }
+        ));
+    }
+
+    #[test]
+    fn reject_call_ref_non_funcref_externref_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/call-ref-non-funcref-externref.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(29));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::TypeMismatch { op, expected, found }
+                if op == "call_ref"
+                    && expected == ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })
+                    && found == ValType::Ref(RefType::ExternRef)
+        ));
+    }
+
+    #[test]
+    fn reject_call_ref_non_funcref_funcref_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/call-ref-non-funcref-funcref.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(29));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::TypeMismatch { op, expected, found }
+                if op == "call_ref"
+                    && expected == ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })
+                    && found == ValType::Ref(RefType::FuncRef)
+        ));
+    }
+
+    #[test]
+    fn reject_return_call_ref_non_funcref_externref_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/return-call-ref-non-funcref-externref.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(29));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::TypeMismatch { op, expected, found }
+                if op == "return_call_ref"
+                    && expected == ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })
+                    && found == ValType::Ref(RefType::ExternRef)
+        ));
+    }
+
+    #[test]
+    fn reject_return_call_ref_non_funcref_funcref_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/return-call-ref-non-funcref-funcref.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(29));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::TypeMismatch { op, expected, found }
+                if op == "return_call_ref"
+                    && expected == ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })
+                    && found == ValType::Ref(RefType::FuncRef)
+        ));
+    }
+
+    #[test]
+    fn reject_return_call_ref_multi_result_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/return-call-ref-multi-result.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(33));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::ResultTypeMismatch { expected, found }
+                if expected == vec![ValType::Num(crate::types::NumType::I32)]
+                    && found == vec![
+                        ValType::Num(crate::types::NumType::I32),
+                        ValType::Num(crate::types::NumType::I32),
+                    ]
         ));
     }
 
