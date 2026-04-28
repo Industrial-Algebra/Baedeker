@@ -395,6 +395,37 @@
   "type mismatch"
 )
 
+(module
+  (type $t0 (func (param i32) (result i32)))
+  (func $f (type $t0)
+    (local.get 0))
+  (export "f" (func $f))
+  (func (param $s i32) (result (ref null $t0))
+    (block (result (ref null $t0))
+      (br_table 0 0
+        (select (result (ref null $t0))
+          (ref.func $f)
+          (ref.null $t0)
+          (local.get $s))
+        (i32.const 0)))))
+
+(assert_invalid
+  (module
+    (type $t0 (func (param i32) (result i32)))
+    (func $f (type $t0)
+      (local.get 0))
+    (export "f" (func $f))
+    (func (param $s i32) (result (ref $t0))
+      (block (result (ref $t0))
+        (br_table 0 0
+          (select (result (ref null $t0))
+            (ref.func $f)
+            (ref.null $t0)
+            (local.get $s))
+          (i32.const 0)))))
+  "type mismatch"
+)
+
 (assert_invalid
   (module (func $type-arg-void-vs-num (result i32)
     (block (br_table 0 (i32.const 1)) (i32.const 1))))

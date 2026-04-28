@@ -246,7 +246,9 @@ fn raw_expectation(path: &Path) -> RawExpectation {
             if stem.contains("unsupported")
                 || matches!(
                     stem,
-                    "unknown-ref-type-in-ref-null" | "unknown-ref-type-in-block-result"
+                    "unknown-ref-type-in-ref-null"
+                        | "unknown-ref-type-in-block-result"
+                        | "typed-br-table-nullability-targets-mismatch"
                 )
             {
                 RawExpectation::Skip

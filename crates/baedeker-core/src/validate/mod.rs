@@ -3941,6 +3941,38 @@ mod tests {
     }
 
     #[test]
+    fn validate_typed_select_to_br_nullable_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/typed-select-to-br-nullable.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn reject_typed_select_to_br_nullability_mismatch() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/typed-select-to-br-nullability-mismatch.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(57));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::BranchTypeMismatch { label, expected, found }
+                if label == crate::types::LabelIdx(0)
+                    && expected == vec![ValType::Ref(RefType::Typed {
+                        nullable: false,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })]
+                    && found == vec![ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })]
+        ));
+    }
+
+    #[test]
     fn validate_imported_global_get_and_set() {
         let bytes = [
             0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
@@ -5660,6 +5692,38 @@ mod tests {
     }
 
     #[test]
+    fn validate_typed_select_to_br_if_nullable_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/typed-select-to-br-if-nullable.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn reject_typed_select_to_br_if_nullability_mismatch() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/typed-select-to-br-if-nullability-mismatch.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(60));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::BranchTypeMismatch { label, expected, found }
+                if label == crate::types::LabelIdx(0)
+                    && expected == vec![ValType::Ref(RefType::Typed {
+                        nullable: false,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })]
+                    && found == vec![ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })]
+        ));
+    }
+
+    #[test]
     fn validate_typed_br_to_loop_param_with_equivalent_signature() {
         let bytes = [
             0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x17, 0x04, 0x60, 0x01, 0x7f,
@@ -5778,6 +5842,59 @@ mod tests {
                         nullable: false,
                         heap: crate::types::HeapType::Type(TypeIdx(0)),
                     })]
+        ));
+    }
+
+    #[test]
+    fn validate_typed_select_to_br_table_nullable_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/typed-select-to-br-table-nullable.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn reject_typed_select_to_br_table_nullability_mismatch() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/typed-select-to-br-table-nullability-mismatch.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(59));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::BranchTypeMismatch { label, expected, found }
+                if label == crate::types::LabelIdx(0)
+                    && expected == vec![ValType::Ref(RefType::Typed {
+                        nullable: false,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })]
+                    && found == vec![ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })]
+        ));
+    }
+
+    #[test]
+    fn reject_typed_br_table_nullability_targets_mismatch() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/typed-br-table-nullability-targets-mismatch.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(54));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::InconsistentBranchTypes { expected, found }
+                if expected == vec![ValType::Ref(RefType::Typed {
+                    nullable: true,
+                    heap: crate::types::HeapType::Type(TypeIdx(0)),
+                })] && found == vec![ValType::Ref(RefType::Typed {
+                    nullable: false,
+                    heap: crate::types::HeapType::Type(TypeIdx(0)),
+                })]
         ));
     }
 
@@ -5919,6 +6036,33 @@ mod tests {
                     ValType::Ref(RefType::Typed {
                         nullable: true,
                         heap: crate::types::HeapType::Type(TypeIdx(1)),
+                    }),
+                ]
+        ));
+    }
+
+    #[test]
+    fn reject_typed_select_nullability_mismatch() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/typed-select-nullability-mismatch.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(50));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::SelectOperandTypeMismatch { expected, found }
+                if expected == ValType::Ref(RefType::Typed {
+                    nullable: false,
+                    heap: crate::types::HeapType::Type(TypeIdx(0)),
+                }) && found == vec![
+                    ValType::Ref(RefType::Typed {
+                        nullable: false,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    }),
+                    ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
                     }),
                 ]
         ));

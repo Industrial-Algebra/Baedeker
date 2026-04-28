@@ -83,6 +83,20 @@
 (assert_invalid
   (module
     (type $t0 (func (param i32) (result i32)))
+    (func $f (type $t0)
+      (local.get 0))
+    (export "f" (func $f))
+    (func (param i32) (result (ref $t0))
+      (select (result (ref $t0))
+        (ref.func $f)
+        (ref.null $t0)
+        (local.get 0))))
+  "type mismatch"
+)
+
+(assert_invalid
+  (module
+    (type $t0 (func (param i32) (result i32)))
     (type $t1 (func (param i64) (result i64)))
     (func $f (type $t0)
       (local.get 0))
