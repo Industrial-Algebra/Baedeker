@@ -7,6 +7,9 @@ use alloc::{borrow::ToOwned, string::String, vec::Vec};
 
 use crate::binary::leb128::{self, Cursor};
 use crate::binary::section::RawSection;
+use crate::binary::typeparser::{
+    parse_ref_type as parse_binary_ref_type, parse_val_type as parse_binary_val_type,
+};
 use crate::error::{ByteOffset, DecodeContext, DecodeError, DecodeErrorKind};
 use crate::types::{
     GlobalType, Import, ImportDesc, Limits, MemType, Mutability, RefType, TableType, TypeIdx,
@@ -138,37 +141,11 @@ fn parse_name(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<String, Dec
 }
 
 fn parse_val_type(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<ValType, DecodeError> {
-    let offset = cursor.position();
-    let byte = cursor.read_byte().map_err(|_| DecodeError {
-        offset: ByteOffset(base_offset + offset),
-        context: DecodeContext::ImportSection,
-        kind: DecodeErrorKind::UnexpectedEof,
-    })?;
-
-    ValType::from_encoding(byte).ok_or(DecodeError {
-        offset: ByteOffset(base_offset + offset),
-        context: DecodeContext::ImportSection,
-        kind: DecodeErrorKind::UnknownValType { byte },
-    })
+    parse_binary_val_type(cursor, base_offset, DecodeContext::ImportSection)
 }
 
 fn parse_ref_type(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<RefType, DecodeError> {
-    let offset = cursor.position();
-    let byte = cursor.read_byte().map_err(|_| DecodeError {
-        offset: ByteOffset(base_offset + offset),
-        context: DecodeContext::ImportSection,
-        kind: DecodeErrorKind::UnexpectedEof,
-    })?;
-
-    match byte {
-        0x70 => Ok(RefType::FuncRef),
-        0x6F => Ok(RefType::ExternRef),
-        _ => Err(DecodeError {
-            offset: ByteOffset(base_offset + offset),
-            context: DecodeContext::ImportSection,
-            kind: DecodeErrorKind::UnknownRefType { byte },
-        }),
-    }
+    parse_binary_ref_type(cursor, base_offset, DecodeContext::ImportSection)
 }
 
 fn parse_mutability(

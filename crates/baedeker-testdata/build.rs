@@ -79,11 +79,16 @@ fn main() {
     }
 
     if spec_dir.exists() {
-        copy_spec_fixtures(
-            &spec_dir,
-            Path::new(&out_dir).join("spec").as_path(),
-            verbose,
-        );
+        let out_spec_dir = Path::new(&out_dir).join("spec");
+        if out_spec_dir.exists() {
+            fs::remove_dir_all(&out_spec_dir).unwrap_or_else(|e| {
+                panic!(
+                    "failed to clear stale spec output directory {}: {e}",
+                    out_spec_dir.display()
+                )
+            });
+        }
+        copy_spec_fixtures(&spec_dir, out_spec_dir.as_path(), verbose);
     }
 }
 

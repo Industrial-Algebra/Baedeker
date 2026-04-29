@@ -14,8 +14,41 @@
     (local.set 7 (i64.const 0))
     (local.set 8 (f64.const 0))))
 
+(module
+  (type $t0 (func (param i32) (result i32)))
+  (func $f (type $t0)
+    (local.get 0))
+  (export "f" (func $f))
+  (func (param $c i32)
+    (local $r (ref null $t0))
+    (local.set $r
+      (if (result (ref null $t0))
+        (local.get $c)
+        (then
+          (ref.func $f))
+        (else
+          (ref.null $t0))))))
+
 (assert_invalid
   (module (func $type-local-arg-void-vs-num (local i32) (local.set 0 (nop))))
+  "type mismatch"
+)
+
+(assert_invalid
+  (module
+    (type $t0 (func (param i32) (result i32)))
+    (func $f (type $t0)
+      (local.get 0))
+    (export "f" (func $f))
+    (func (param $c i32)
+      (local $r (ref $t0))
+      (local.set $r
+        (if (result (ref null $t0))
+          (local.get $c)
+          (then
+            (ref.func $f))
+          (else
+            (ref.null $t0))))))
   "type mismatch"
 )
 

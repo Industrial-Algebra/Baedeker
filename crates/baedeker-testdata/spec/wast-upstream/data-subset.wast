@@ -14,6 +14,26 @@
   (import "spectest" "memory" (memory 1))
   (data (global.get $g) "a"))
 
+(module
+  (memory 1)
+  (global i32 (i32.const 0))
+  (data (global.get 0) "a"))
+
+(module
+  (memory 1)
+  (global $g i32 (i32.const 0))
+  (data (global.get $g) "a"))
+
+(module
+  (global (import "spectest" "global_i32") i32)
+  (memory 1)
+  (data (i32.mul
+          (i32.const 2)
+          (i32.add
+            (i32.sub (global.get 0) (i32.const 1))
+            (i32.const 2)))
+        "a"))
+
 (assert_invalid
   (module
     (data (i32.const 0) ""))

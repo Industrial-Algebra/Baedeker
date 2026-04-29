@@ -7,6 +7,7 @@ use alloc::vec::Vec;
 
 use crate::binary::leb128::{self, Cursor};
 use crate::binary::section::RawSection;
+use crate::binary::typeparser::parse_ref_type as parse_binary_ref_type;
 use crate::error::{ByteOffset, DecodeContext, DecodeError, DecodeErrorKind};
 use crate::types::{Limits, RefType, TableType};
 
@@ -40,22 +41,7 @@ fn parse_table_type(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Table
 }
 
 fn parse_ref_type(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<RefType, DecodeError> {
-    let offset = cursor.position();
-    let byte = cursor.read_byte().map_err(|_| DecodeError {
-        offset: ByteOffset(base_offset + offset),
-        context: DecodeContext::TableSection,
-        kind: DecodeErrorKind::UnexpectedEof,
-    })?;
-
-    match byte {
-        0x70 => Ok(RefType::FuncRef),
-        0x6F => Ok(RefType::ExternRef),
-        _ => Err(DecodeError {
-            offset: ByteOffset(base_offset + offset),
-            context: DecodeContext::TableSection,
-            kind: DecodeErrorKind::UnknownRefType { byte },
-        }),
-    }
+    parse_binary_ref_type(cursor, base_offset, DecodeContext::TableSection)
 }
 
 fn parse_limits(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Limits, DecodeError> {
@@ -146,6 +132,23 @@ mod tests {
             err.kind,
             DecodeErrorKind::UnknownRefType { byte: 0x6E }
         ));
+    }
+
+    #[test]
+    fn parse_typed_function_reference_table() {
+        let section = raw_table_section(&[
+            0x01, // one table
+            0x63, 0x00, // (ref null type 0)
+            0x00, 0x01, // min 1
+        ]);
+        let tables = parse_table_section(&section).unwrap();
+
+        assert_eq!(
+            tables[0].elem,
+            RefType::concrete(true, crate::types::TypeIdx(0))
+        );
+        assert_eq!(tables[0].limits.min, 1);
+        assert_eq!(tables[0].limits.max, None);
     }
 
     #[test]

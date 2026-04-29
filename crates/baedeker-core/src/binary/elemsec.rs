@@ -7,6 +7,7 @@ use alloc::vec::Vec;
 
 use crate::binary::leb128::{self, Cursor};
 use crate::binary::section::RawSection;
+use crate::binary::typeparser::parse_ref_type as parse_binary_ref_type;
 use crate::error::{ByteOffset, DecodeContext, DecodeError, DecodeErrorKind};
 use crate::types::{
     ElementExpr, ElementInit, ElementMode, ElementSegment, FuncIdx, RefType, TableIdx,
@@ -216,22 +217,7 @@ fn parse_elemkind(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<RefType
 }
 
 fn parse_ref_type(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<RefType, DecodeError> {
-    let offset = cursor.position();
-    let byte = cursor.read_byte().map_err(|_| DecodeError {
-        offset: ByteOffset(base_offset + offset),
-        context: DecodeContext::ElementSection,
-        kind: DecodeErrorKind::UnexpectedEof,
-    })?;
-
-    match byte {
-        0x70 => Ok(RefType::FuncRef),
-        0x6F => Ok(RefType::ExternRef),
-        _ => Err(DecodeError {
-            offset: ByteOffset(base_offset + offset),
-            context: DecodeContext::ElementSection,
-            kind: DecodeErrorKind::UnknownRefType { byte },
-        }),
-    }
+    parse_binary_ref_type(cursor, base_offset, DecodeContext::ElementSection)
 }
 
 fn decode_u32_in_section(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<u32, DecodeError> {
@@ -289,6 +275,35 @@ mod tests {
             ElementInit::Expressions(exprs) => {
                 assert_eq!(exprs.len(), 1);
                 assert_eq!(exprs[0].expr, &[0xD2, 0x70, 0x0B]);
+            }
+            _ => panic!("expected expression initializers"),
+        }
+    }
+
+    #[test]
+    fn parse_typed_active_expr_elements() {
+        let section = raw_element_section(&[
+            0x01, 0x06, 0x00, 0x41, 0x00, 0x0B, 0x63, 0x01, 0x01, 0xD2, 0x00, 0x0B,
+        ]);
+        let elems = parse_element_section(&section).unwrap();
+        assert_eq!(elems.len(), 1);
+        match &elems[0].mode {
+            ElementMode::Active {
+                table, offset_expr, ..
+            } => {
+                assert_eq!(*table, TableIdx(0));
+                assert_eq!(*offset_expr, &[0x41, 0x00, 0x0B]);
+            }
+            _ => panic!("expected active element segment"),
+        }
+        assert_eq!(
+            elems[0].elem_type,
+            RefType::concrete(true, crate::types::TypeIdx(1))
+        );
+        match &elems[0].init {
+            ElementInit::Expressions(exprs) => {
+                assert_eq!(exprs.len(), 1);
+                assert_eq!(exprs[0].expr, &[0xD2, 0x00, 0x0B]);
             }
             _ => panic!("expected expression initializers"),
         }

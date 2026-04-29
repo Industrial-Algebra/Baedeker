@@ -1,7 +1,11 @@
 ;; Source: https://github.com/WebAssembly/spec/blob/main/test/core/if.wast
 
 (module
+  (memory 1)
   (func $dummy)
+  (func $func (param i32) (result i32) (local.get 0))
+  (type $check (func (param i32) (result i32)))
+  (table funcref (elem $func))
 
   (func (export "singular") (param i32) (result i32)
     (if (local.get 0) (then (nop)))
@@ -31,7 +35,51 @@
         (then (call $dummy) (i32.const 1))
         (else (call $dummy) (i32.const 0)))
       (i32.const 2)
-      (i32.const 3))))
+      (i32.const 3)))
+
+  (func (export "as-call_indirect-last") (param i32) (result i32)
+    (call_indirect (type $check)
+      (i32.const 1)
+      (if (result i32)
+        (local.get 0)
+        (then (i32.const 0))
+        (else (i32.const 0)))))
+
+  (func (export "as-memory.grow-size") (param i32) (result i32)
+    (memory.grow
+      (if (result i32)
+        (local.get 0)
+        (then (i32.const 1))
+        (else (i32.const 0))))))
+
+(module
+  (type $t0 (func (param i32) (result i32)))
+  (func $f (type $t0)
+    (local.get 0))
+  (export "f" (func $f))
+  (func (param i32) (result (ref null $t0))
+    (if (result (ref null $t0))
+      (local.get 0)
+      (then
+        (ref.func $f))
+      (else
+        (ref.null $t0)))))
+
+(assert_invalid
+  (module
+    (type $t0 (func (param i32) (result i32)))
+    (func $f (type $t0)
+      (local.get 0))
+    (export "f" (func $f))
+    (func (param i32) (result (ref $t0))
+      (if (result (ref $t0))
+        (local.get 0)
+        (then
+          (ref.func $f))
+        (else
+          (ref.null $t0)))))
+  "type mismatch"
+)
 
 (assert_invalid
   (module

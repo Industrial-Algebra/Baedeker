@@ -35,6 +35,9 @@ pub enum ValidationErrorKind {
     UnknownLocalIdx {
         idx: LocalIdx,
     },
+    UninitializedLocal {
+        idx: LocalIdx,
+    },
     UnknownGlobalIdx {
         idx: GlobalIdx,
         available: u32,
@@ -87,6 +90,10 @@ pub enum ValidationErrorKind {
     BranchTypeMismatch {
         label: LabelIdx,
         expected: Vec<ValType>,
+        found: Vec<ValType>,
+    },
+    InvalidBrOnNonNullTarget {
+        label: LabelIdx,
         found: Vec<ValType>,
     },
     InconsistentBranchTypes {
@@ -189,6 +196,9 @@ impl fmt::Display for ValidationErrorKind {
             ValidationErrorKind::UnknownLocalIdx { idx } => {
                 write!(f, "unknown local index {}", idx.0)
             }
+            ValidationErrorKind::UninitializedLocal { idx } => {
+                write!(f, "uninitialized local {}", idx.0)
+            }
             ValidationErrorKind::UnknownGlobalIdx { idx, available } => {
                 write!(
                     f,
@@ -276,6 +286,13 @@ impl fmt::Display for ValidationErrorKind {
                     f,
                     "branch to label {} has type mismatch: expected {:?}, found {:?}",
                     label.0, expected, found
+                )
+            }
+            ValidationErrorKind::InvalidBrOnNonNullTarget { label, found } => {
+                write!(
+                    f,
+                    "br_on_non_null target label {} must end in a reference type, found {:?}",
+                    label.0, found
                 )
             }
             ValidationErrorKind::InconsistentBranchTypes { expected, found } => {

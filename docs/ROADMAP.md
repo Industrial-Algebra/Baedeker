@@ -121,22 +121,51 @@ interpreter-first with AOT as a future layer.
   - Active upstream-derived subsets now include:
     - `wast-upstream/labels-invalid-subset.wast`
     - `wast-upstream/labels-invalid-folded-syntax-subset.wast`
+    - `wast-upstream/ref-null-subset.wast`
+    - `wast-upstream/ref-as-non-null-subset.wast`
+    - `wast-upstream/ref-select-subset.wast`
+    - `wast-upstream/ref-control-subset.wast`
     - `wast-upstream/ref-func-undeclared-reference-subset.wast`
     - `wast-upstream/imports-unknown-type-subset.wast`
     - `wast-upstream/global-subset.wast`
+    - `wast-upstream/global-ref-init-subset.wast`
     - `wast-upstream/data-subset.wast`
+    - `wast-upstream/data-memory-subset.wast`
     - `wast-upstream/elem-subset.wast`
+    - `wast-upstream/elem-table-init-subset.wast`
     - `wast-upstream/local-get-subset.wast`
     - `wast-upstream/local-set-subset.wast`
     - `wast-upstream/local-tee-subset.wast`
     - `wast-upstream/load-subset.wast`
     - `wast-upstream/store-subset.wast`
     - `wast-upstream/align-subset.wast`
+    - `wast-upstream/integer-numeric-subset.wast`
+    - `wast-upstream/float-numeric-subset.wast`
+    - `wast-upstream/proposal-conversions-subset.wast`
+    - `wast-upstream/simd-const-subset.wast`
+    - `wast-upstream/simd-memory-subset.wast`
+    - `wast-upstream/simd-lane-subset.wast`
+    - `wast-upstream/simd-memory-multi-subset.wast`
+    - `wast-upstream/memory-init-subset.wast`
+    - `wast-upstream/data-drop-subset.wast`
+    - `wast-upstream/memory-copy-subset.wast`
+    - `wast-upstream/memory-fill-subset.wast`
     - `wast-upstream/call-subset.wast`
     - `wast-upstream/call-indirect-subset.wast`
+    - `wast-upstream/call-ref-subset.wast`
+    - `wast-upstream/typed-call-ref-subset.wast`
+    - `wast-upstream/return-call-subset.wast`
+    - `wast-upstream/return-call-indirect-subset.wast`
+    - `wast-upstream/return-call-ref-subset.wast`
+    - `wast-upstream/typed-return-call-ref-subset.wast`
+    - `wast-upstream/br-on-null-subset.wast`
+    - `wast-upstream/br-on-non-null-subset.wast`
     - `wast-upstream/return-subset.wast`
     - `wast-upstream/block-subset.wast`
     - `wast-upstream/if-subset.wast`
+    - `wast-upstream/loop-subset.wast`
+    - `wast-upstream/unreachable-subset.wast`
+    - `wast-upstream/switch-subset.wast`
     - `wast-upstream/select-subset.wast`
     - `wast-upstream/br-if-subset.wast`
     - `wast-upstream/br-table-subset.wast`
@@ -144,6 +173,11 @@ interpreter-first with AOT as a future layer.
     - `wast-upstream/table-set-subset.wast`
     - `wast-upstream/table-grow-subset.wast`
     - `wast-upstream/table-size-subset.wast`
+    - `wast-upstream/table-ref-flow-subset.wast`
+    - `wast-upstream/table-grow-ref-subset.wast`
+    - `wast-upstream/ref-func-table-call-subset.wast`
+    - `wast-upstream/typed-table-ref-subset.wast`
+    - `wast-upstream/typed-reference-types-subset.wast`
     - `wast-upstream/table-init-subset.wast`
     - `wast-upstream/table-copy-subset.wast`
     - `wast-upstream/table-fill-subset.wast`
@@ -156,12 +190,29 @@ interpreter-first with AOT as a future layer.
     support/defer boundary and tracking unsupported areas explicitly.
   - Recent upstream grounding has strengthened scalar memory structure/alignment coverage across
     `memory-subset`, `load-subset`, `store-subset`, and `align-subset`.
+  - Recent upstream grounding has also broadened bulk memory coverage via new
+    `memory-init-subset`, `data-drop-subset`, `memory-copy-subset`, and `memory-fill-subset`
+    files, including explicit nonzero memory selection, active/passive data-segment use, same-
+    memory and cross-memory copies, and representative unknown-index / missing-data-count /
+    operand-type invalid cases.
   - Recent upstream grounding has also broadened direct/indirect call argument-flow coverage via
     `call-subset` and an expanded `call-indirect-subset`.
   - Recent upstream grounding has also broadened global / const-expression coverage via expanded
     `global-subset`, `data-subset`, and `elem-subset` files, including imported-const-global
     offsets, reference-valued constant initializers, immutable-global writes, and representative
     invalid constant-expression forms.
+  - Const-expression / initialization / extended-const hardening now also accepts defined immutable
+    globals in later constant-expression contexts where the spec allows them and supports the
+    current extended-const arithmetic subset used by the official tests (`i32.add/sub/mul`,
+    `i64.add/sub/mul`). Grounding now includes additional valid raw fixtures for defined-global and
+    arithmetic-based global initializers, data offsets, and element offsets, while upstream-derived
+    `global-subset`, `data-subset`, and `elem-subset` now include representative defined-global and
+    arithmetic constant-expression cases.
+  - Recent upstream grounding has also broadened const-expression / initialization coverage via new
+    `global-ref-init-subset`, `data-memory-subset`, and `elem-table-init-subset` files, including
+    imported immutable ref globals in global initializers, explicit memory selection in active data
+    segments, and nonzero-table element initialization with imported-global offsets and ref-valued
+    expressions.
   - Recent upstream grounding has also broadened reference-type / table-const-expression coverage
     via expanded `table-subset` and `elem-subset` cases, including inline table element syntax,
     `ref.func` / `ref.null` table initializers in supported sugar forms, imported `externref` /
@@ -179,6 +230,10 @@ interpreter-first with AOT as a future layer.
     coverage via expanded `select-subset`, `br-if-subset`, and `br-table-subset` files, including
     use inside loop/if/branch contexts and representative arity / operand-type / label-result
     mismatch invalid cases.
+  - Recent upstream grounding has also broadened control-expression saturation via new
+    `loop-subset`, `unreachable-subset`, and `switch-subset` files, including loop-valued
+    expression positions, stack-polymorphic unreachable use in control/call/memory contexts, and
+    additional `br_table`-driven structured-control nesting.
   - Recent upstream grounding has also broadened bulk table-op coverage via new
     `table-init-subset`, `table-copy-subset`, and `table-fill-subset` files, including nonzero
     table/element indices, `elem.drop`, same-table and cross-table copies, and representative
@@ -186,10 +241,472 @@ interpreter-first with AOT as a future layer.
   - Recent upstream grounding has also broadened `call_indirect` / table interaction coverage via
     an expanded `call-indirect-subset` with multi-table valid modules, explicit nonzero table
     selection, and representative no-table / wrong-result / wrong-argument invalid cases.
+  - Recent upstream grounding has also broadened call / table / reference interaction coverage via
+    new `table-ref-flow-subset`, `table-grow-ref-subset`, and `ref-func-table-call-subset` files,
+    including `table.get -> table.set` round-trips, `table.grow` with `ref.null` / `ref.func`,
+    `ref.func`-driven `call_indirect` through mutable/global/table flows, and representative
+    ref-type mismatch invalid cases.
+  - Recent upstream grounding has also broadened numeric / SIMD / proposal-surface completeness via
+    new `integer-numeric-subset`, `float-numeric-subset`, `proposal-conversions-subset`,
+    `simd-const-subset`, `simd-memory-subset`, `simd-lane-subset`, and
+    `simd-memory-multi-subset` files, including integer unary/binary/compare/sign-extension
+    operators, float compare/unary/binary families, saturating truncations, reinterpretation and
+    conversion paths, `v128.const`, SIMD load/store/alignment/lane validation, and nonzero-memory
+    SIMD lane syntax.
+  - Recent upstream grounding has also broadened reference/control proposal-edge coverage via new
+    `ref-null-subset`, `ref-as-non-null-subset`, `ref-select-subset`, and `ref-control-subset`
+    files, including `ref.null` in function/global/control positions, `ref.as_non_null` over
+    nullable and already-non-null references, typed `select` over `funcref`/`externref`,
+    `ref.func` / `ref.null` joins, and reference-valued block/if result flow with representative
+    ref-type mismatch invalid cases.
+  - Tail-call mini-cluster support now also includes `return_call` and `return_call_indirect`
+    decoding plus validation grounding via new `return-call-subset` and
+    `return-call-indirect-subset` upstream files, new raw valid fixtures
+    `valid/return-call-minimal.wasm` and `valid/return-call-indirect-funcref-table.wasm`, and new
+    raw invalid fixtures for result-mismatch and non-`funcref`-table cases.
+  - Function-reference call support now also includes `call_ref` and `return_call_ref` decoding
+    plus the first typed-reference groundwork pass: `RefType` now models nullable vs non-null
+    references and concrete function type indices, binary parsing accepts typed-reference encodings
+    across types/tables/globals/locals/block results, and validation accepts concrete function refs
+    as subtypes of abstract `funcref` where appropriate. Validation now also canonicalizes
+    structurally equivalent concrete function types for the currently supported typed-function-
+    reference surface, so equivalent signatures no longer mismatch solely because their raw
+    `TypeIdx` values differ. Grounding now includes new `call-ref-subset`,
+    `return-call-ref-subset`, `typed-call-ref-subset`, `typed-return-call-ref-subset`,
+    `typed-table-ref-subset`, and `typed-reference-types-subset` upstream files, new raw valid
+    fixtures `valid/call-ref-minimal.wasm`, `valid/return-call-ref-minimal.wasm`,
+    `valid/typed-ref-global-init-from-ref-func.wasm`, `valid/typed-call-ref-null-concrete.wasm`,
+    `valid/typed-table-set-get-concrete.wasm`, `valid/typed-call-ref-equivalent-signature.wasm`,
+    `valid/typed-return-call-ref-equivalent-signature.wasm`,
+    `valid/typed-table-set-get-equivalent-signature.wasm`, and
+    `valid/typed-ref-global-init-equivalent-signature.wasm`, plus raw invalid fixtures for
+    non-`funcref` references, concrete-type mismatches, and result-mismatch cases.
+  - Typed-reference / const-init / table-element saturation now also covers typed `global.get`
+    flows in constant initializers, typed element expressions sourced from typed globals and
+    `ref.func`, and typed `table.init` against passive typed element segments. Validation now
+    normalizes element-segment reference types during `table.init`, so structurally equivalent
+    concrete function signatures no longer mismatch there solely because their raw `TypeIdx`
+    values differ. Grounding expanded `typed-reference-types-subset`, `elem-subset`, and
+    `table-init-subset`, and added raw fixtures for imported/defined typed-global initializers,
+    typed element/global flows, passive typed element segments, and typed `table.init`
+    equivalent-signature and wrong-concrete-type boundaries.
+  - Typed-reference index-validity / malformed-boundary saturation now also validates concrete
+    typed-reference `TypeIdx` operands across the bounded Phase 1 surface: function-type params /
+    results, imported typed globals, defined tables, defined globals, element segment types,
+    locals, `ref.null` immediates, and reference-valued block results. New raw invalid fixtures pin
+    `UnknownTypeIdx` at these boundaries. Malformed-boundary coverage also now includes raw
+    unknown-heaptype bytes in import/global/element/local decoding plus decode-preserving body
+    cases for `ref.null` and block-result immediates. Because Node/V8 supports a broader GC-era
+    heap-type space than Baedeker currently models, those raw unknown-ref-type byte fixtures are
+    explicitly skipped in strict Node parity while remaining active Baedeker boundary assertions.
+    Official grounding expanded via new `typed-invalid-typeidx-subset.wast`.
+  - Typed-reference proposal-surface saturation now also broadens three adjacent supported areas:
+    typed `select`, table/global import mixes, and additional block/control/result forms.
+    Grounding expanded `ref-select-subset`, `ref-control-subset`, `typed-table-ref-subset`, and
+    `typed-reference-types-subset` with representative equivalent-signature typed-reference cases:
+    typed `select` over concrete function refs, imported typed-global -> defined/imported typed-
+    table flows, `ref.func` -> imported mutable typed-global flows, and typed block/if result
+    propagation. New raw valid fixtures cover those equivalent-signature cases, and new raw invalid
+    fixtures pin representative wrong-concrete-type boundaries for typed `select`, imported typed-
+    global -> imported typed-table flow, and typed `if` result propagation.
+  - Typed-reference table/control saturation now also covers `br_if`, `br_table`, and typed
+    loop-result forms. Grounding expanded `br-if-subset`, `br-table-subset`, and `loop-subset`
+    with representative equivalent-signature typed-function-reference branches/results plus wrong-
+    concrete-type invalids. New raw valid fixtures cover typed `br_if`, typed `br_table`, and
+    typed loop-result equivalent-signature flows, and new raw invalid fixtures pin
+    `BranchTypeMismatch` / `ControlResultTypeMismatch` boundaries for wrong-concrete-type branch
+    operands and loop fallthrough results.
+  - Typed branch-target consistency is now also grounded across broader multi-target `br_table`
+    combinations. `br-table-subset` now includes equivalent-signature and wrong-concrete-type
+    cases for nested block/block targets and mixed loop/block targets, and new raw fixtures pin
+    `InconsistentBranchTypes` for mismatched typed multi-target label sets.
+  - Typed control-signature interaction is now also grounded as a broader campaign across block /
+    loop parameter-result composition and branch-to-loop targets. Grounding expanded
+    `block-subset`, `loop-subset`, `br-subset`, and `br-if-subset` with representative
+    equivalent-signature typed function-reference cases for block-result -> loop-param flow,
+    loop-result -> block-result flow, `br` to param-bearing loops, and `br_if` to param-bearing
+    loops. New raw valid fixtures cover those composed control-signature flows, and new raw
+    invalid fixtures pin `TypeMismatch`, `BranchTypeMismatch`, and
+    `ControlResultTypeMismatch` boundaries for wrong-concrete-type loop entry, branch targets, and
+    enclosing block/result joins.
+  - Typed branch/control closure under reachability is now also grounded across `unreachable`,
+    `return`, dead code after `br`, and control joins with early `return` inside typed `if`.
+    Grounding expanded `unreachable-subset`, `return-subset`, `ref-control-subset`, and
+    `br-subset` with representative equivalent-signature typed-function-reference cases for
+    unreachable block ends, direct typed returns, typed dead-code tails after `br`, and typed
+    `if` joins where one arm exits via `return`. New raw valid fixtures cover those reachability
+    closures, and new raw invalid fixtures pin `ControlResultTypeMismatch` boundaries for wrong-
+    concrete-type dead-code tails, wrong-concrete-type returns, and mismatched typed joins after
+    early exit.
+  - Typed call/control convergence is now also grounded across control-produced typed-function-
+    references flowing into `call_ref`, `return_call_ref`, `call_indirect`, and
+    `return_call_indirect`. Grounding expanded `typed-call-ref-subset`,
+    `typed-return-call-ref-subset`, `call-indirect-subset`, and
+    `return-call-indirect-subset` with representative equivalent-signature typed cases where
+    block/if results feed direct reference calls and typed indirect-call parameters. New raw valid
+    fixtures cover block-result -> `call_ref`, if-result -> `return_call_ref`, block-result ->
+    typed `call_indirect` parameter, and if-result -> typed `return_call_indirect` parameter.
+    New raw invalid fixtures pin `TypeMismatch` boundaries for wrong-concrete-type call-site
+    convergence rather than earlier control-frame failure.
+  - Typed table/global/element flow closure is now also grounded across typed table reads feeding
+    mutable typed globals and typed globals feeding passive element segments that later initialize
+    typed tables. Grounding expanded `typed-reference-types-subset`, `typed-table-ref-subset`,
+    `elem-subset`, and `table-init-subset` with representative equivalent-signature cases for
+    defined/imported typed `table.get -> global.set` flows plus defined/imported typed
+    `global.get -> passive elem -> table.init -> table.get` chains. New raw valid fixtures cover
+    those composed storage/dataflow paths, and new raw invalid fixtures pin `TypeMismatch` on
+    `global.set` plus `ElementExprTypeMismatch` on wrong-concrete-type passive element
+    expressions.
+  - Typed nullability-flow saturation is now also grounded across `br_on_null`,
+    `br_on_non_null`, `ref.as_non_null`, and typed nullable joins. Grounding expanded
+    `br-on-null-subset`, `br-on-non-null-subset`, `ref-as-non-null-subset`, and
+    `ref-control-subset` with representative equivalent-signature typed-function-reference cases
+    for `br_on_null` fallthrough feeding `call_ref`, `br_on_non_null` taken branches feeding typed
+    block results and `call_ref`, `ref.as_non_null` feeding mutable typed globals, and typed `if`
+    joins combining `ref.as_non_null` with `ref.null`. New raw valid fixtures cover those
+    nullability-flow compositions, and new raw invalid fixtures pin `TypeMismatch` at
+    `call_ref`, `br_on_non_null`, and `global.set` plus `ControlResultTypeMismatch` at typed null
+    joins with wrong concrete function types.
+  - Malformed/decode boundary completion for typed control/reference encodings is now also
+    grounded across truncated `call_ref` / `return_call_ref` type immediates, truncated
+    `br_on_null` / `br_on_non_null` label immediates, truncated `ref.null` heap types, and
+    truncated typed block-result heap types. Grounding added a new upstream-derived
+    `typed-malformed-control-subset` plus raw invalid fixtures pinning decode-preserving
+    `ValidationErrorKind::Decode` with exact `CodeSection` / `UnexpectedEof` metadata at the
+    instruction boundary offsets for these typed control/reference body-decode failures.
+  - Official spec grounding is now also broadened across additional upstream validation-only and
+    malformed-binary files that fit Baedeker’s current supported surface. Grounding added new
+    upstream-derived `forward-subset`, `unreached-invalid-subset`, `func-ptrs-invalid-subset`,
+    `binary-leb128-subset`, `utf8-import-module-subset`, and `utf8-import-field-subset` files.
+    These expand coverage for forward mutual recursion, unreachable-code invalids, classic
+    function-pointer/table/type invalids, non-minimal vs malformed LEB128 encodings, and malformed
+    UTF-8 import names. Raw fixtures and unit tests now also pin valid `forward-mutual-recursion`
+    and `unreached-call-ref` acceptance plus unreachable unknown-local/global/function/label
+    failures with exact offsets.
+  - Non-defaultable local initialization tracking is now implemented for function validation.
+    Parameters and defaultable locals start initialized, non-defaultable locals must be initialized
+    before `local.get`, and initialization established inside structured control does not escape
+    the enclosing block/if/loop frame. Grounding added new upstream-derived
+    `local-init-subset` plus raw valid fixtures for `local.set` / `local.tee` / block-internal
+    flows and raw invalid fixtures pinning `UninitializedLocal` for direct use, post-block use,
+    `else`-arm use, and post-`if` use of non-defaultable locals.
+  - Bottom-type / stack-polymorphic unreachable closure is now materially broader across
+    representative official `unreached-valid.wast` shapes. The validator now carries explicit
+    bottom operands through unreachable validation so instructions like `select` and
+    `ref.as_non_null` can consume stack-polymorphic inputs without spuriously underflowing, while
+    frame-end checks still reject concrete stray or mismatched values that survive in dead code.
+    Grounding added new upstream-derived `unreached-valid-subset` plus raw valid fixtures for
+    select-heavy unreachable flows, bottom-heap `ref.as_non_null` / `br_on_null` cases, and a
+    meet-bottom `br_table` join, along with raw invalid fixtures pinning function-end mismatches
+    for concrete unreachable select/result leakage.
+  - Official grounding expansion has resumed now that the concrete post-audit semantic blockers are
+    closed. Curated official additions broadened active coverage in `local-init-subset`,
+    `unreached-valid-subset`, `ref-as-non-null-subset`, `select-subset`, and `br-table-subset`,
+    including extra `local_init.wast` tee-init grounding, additional unreachable-valid select
+    shapes, an official unreachable `ref.as_non_null` case, richer select placement coverage, and
+    additional numeric `br_table` value forms. Representative raw valid fixtures and unit tests now
+    also pin those official shapes directly.
+  - To avoid drifting back into tiny one-off expansions, the next official zero-skip batch widened a
+    denser `select.wast` control-consumer slice in one pass. `select-subset` now covers broader
+    official placement shapes including loop-first/last, if-condition, call-indirect operand
+    positions, store operands, memory.grow, call/return/branch/local/global consumers, load,
+    unary/binary/test/compare, and conversion contexts. Representative raw valid fixtures and unit
+    tests now pin `select-as-call-indirect-last`, `select-as-memory-grow-value`,
+    `select-as-global-set-value`, `select-as-convert-operand`, and `select-as-if-condition`.
+  - The next official sweep kept that denser cadence by broadening `br-table-subset` across a much
+    larger official branch-consumer slice rather than a single placement. Active coverage now spans
+    block/loop placements, branch consumers (`br`, `br_if`, nested `br_table`), if/select/call /
+    call_indirect positions, local/global consumers, memory address/value consumers, arithmetic /
+    compare / conversion consumers, and `memory.grow`. Representative raw valid fixtures and unit
+    tests now pin `br-table-as-br-if-value-cond`, `br-table-as-call-indirect-func`,
+    `br-table-as-local-set-value`, `br-table-as-load-address`, `br-table-as-store-value`,
+    `br-table-as-compare-left`, and `br-table-as-memory-grow-size`.
+  - A comparable branch-adjacent sweep then broadened `br-if-subset` rather than starting another
+    tiny file. Active official coverage now spans `br_if` result typing, block/loop placements,
+    nested branch consumers, if/select/call/call_indirect consumers, local/global consumers,
+    memory address/value consumers, arithmetic/compare consumers, and `memory.grow`. Representative
+    raw valid fixtures and unit tests now pin `br-if-as-br-if-value-cond`, `br-if-as-select-cond`,
+    `br-if-as-call-indirect-last`, `br-if-as-local-tee-value`, `br-if-as-load-address`,
+    `br-if-as-storeN-value`, and `br-if-as-memory-grow-size`.
+  - The next comparable densification broadened `br-subset` across a much larger official direct-
+    branch consumer slice. Active official coverage now spans result typing, block/loop placements,
+    nested branch consumers (`br`, `br_if`, `br_table`), if/select/call/call_indirect consumers,
+    local/global consumers, memory address/value consumers, arithmetic/compare/conversion
+    consumers, and `memory.grow`, while retaining the existing typed-reference branch grounding in
+    the same file. Representative raw valid fixtures and unit tests now pin `br-as-br-if-value-cond`,
+    `br-as-select-all`, `br-as-call-indirect-all`, `br-as-local-tee-value`, `br-as-load-address`,
+    `br-as-storeN-value`, and `br-as-memory-grow-size`.
+  - A follow-on control-consumer closure sweep then widened the remaining smaller structured-control
+    subsets rather than opening another narrow lane. `if-subset`, `block-subset`, `loop-subset`,
+    and `return-subset` now cover additional consumer placements spanning `call_indirect`,
+    `memory.grow`, `select`, loads, `local.tee`, direct calls, and nested branch values. This
+    closes more of the official expression-position surface around structured control without new
+    validator algorithms. Representative raw valid fixtures and unit tests now pin
+    `if-as-call-indirect-last`, `if-as-memory-grow-size`, `block-as-select-cond`,
+    `block-as-load-address`, `loop-as-local-tee-value`, `loop-as-memory-grow-size`,
+    `return-as-call-value`, and `return-as-br-value`.
+  - The next broader official audit pass selected `call-subset` as the best dense zero-skip target,
+    and the follow-on batch widened it aggressively inside a single existing file. Active official
+    direct-call grounding now spans richer type/result cases plus a broad producer/consumer slice
+    across `select`, `if`, `br_if`, `br_table`, `call_indirect`, stores, `memory.grow`, `return`,
+    `drop`, `br`, local/global writes, loads, unary/binary/test/compare operators, and conversion
+    contexts, alongside additional representative invalid arity/type cases. Representative raw
+    valid fixtures and unit tests now pin `call-as-call-all-operands`, `call-as-br-table-last`,
+    `call-as-call-indirect-last`, `call-as-memory-grow-value`, `call-as-local-tee-value`,
+    `call-as-load-operand`, `call-as-compare-right`, and `call-as-convert-operand`.
+  - A comparable dense follow-on then broadened `call-indirect-subset` across its own official
+    producer/consumer surface rather than leaving indirect-call coverage comparatively sparse.
+    Active official indirect-call grounding now spans richer type/result cases plus placement
+    coverage across `select`, `if`, `br_if`, `br_table`, stores, `memory.grow`, `return`, `drop`,
+    `br`, local/global writes, loads, unary/binary/test/compare operators, and conversion
+    contexts, while preserving the existing multi-table / explicit-table-index and typed-reference
+    call-indirect grounding already present in the file. The invalid slice also broadened with more
+    representative official arity/type mismatches. Representative raw valid fixtures and unit tests
+    now pin `call-indirect-as-select-last`, `call-indirect-as-br-if-first`,
+    `call-indirect-as-store-last`, `call-indirect-as-memory-grow-value`,
+    `call-indirect-as-local-tee-value`, `call-indirect-as-load-operand`,
+    `call-indirect-as-compare-right`, and `call-indirect-as-convert-operand`.
+  - The next dense sweep then expanded `unreachable-subset` itself rather than leaving the
+    stack-polymorphic lane represented by only a handful of official placements. Active official
+    unreachable grounding now spans result typing, function/block/loop placements, branch/branch-
+    table positions, `if`/`select` consumers, direct and indirect calls, local/global writes,
+    load/store address and value positions, unary/binary/test/compare/conversion consumers, and
+    `memory.grow`, while keeping the typed-reference unreachable join case already grounded in the
+    same file. Representative raw valid fixtures and unit tests now pin
+    `unreachable-as-func-mid`, `unreachable-as-block-value`,
+    `unreachable-as-br-table-value-index`, `unreachable-as-if-then-no-else`,
+    `unreachable-as-call-indirect-first`, `unreachable-as-local-tee-value`,
+    `unreachable-as-storeN-value`, and `unreachable-as-convert-operand`.
+  - A follow-on typed/control adjacency sweep then densified the typed reference/control frontier
+    around those now-broader call/branch/unreachable lanes instead of leaving `call_ref`,
+    `return_call_ref`, `br_on_null`, `br_on_non_null`, and `ref.as_non_null` coverage relatively
+    isolated. Active official grounding now includes nested and recursive `call_ref`, recursive
+    `return_call_ref` under `if`, explicit unreachable typing around `call_ref`, `br_on_null`, and
+    `br_on_non_null`, `br_on_non_null` + `ref.as_non_null` joins, and direct-call-to-typed-ref
+    producer/consumer flow in `ref-as-non-null-subset`. Representative raw valid fixtures and unit
+    tests now pin `call-ref-run-nested`, `call-ref-unreachable-ref-func`,
+    `call-ref-unreachable-call-drop`, `return-call-ref-count`, `br-on-null-unreachable`,
+    `br-on-non-null-ref-as-non-null`, `br-on-non-null-unreachable`, and
+    `ref-as-non-null-direct-call-ref-func`.
+  - The next invalid-pressure pass then deepened the same typed/control frontier rather than only
+    adding more happy-path official grounding. Active official invalid coverage now includes extra
+    `call_ref` / `return_call_ref` non-funcref cases, `return_call_ref` result-arity pressure, and
+    broader raw exact-offset regression fixtures for `call_ref`, `return_call_ref`,
+    `br_on_null`, `br_on_non_null`, and `ref.as_non_null` consumer/stack-shape failures.
+    Representative raw invalid fixtures and unit tests now pin
+    `call-ref-non-funcref-externref`, `call-ref-non-funcref-funcref`,
+    `return-call-ref-non-funcref-externref`, `return-call-ref-non-funcref-funcref`,
+    `return-call-ref-multi-result`, `br-on-null-stack-mismatch`,
+    `br-on-non-null-stack-mismatch`, and `ref-as-non-null-null-to-nonnull-call`.
+  - A follow-on typed result-lattice pressure pass then focused specifically on reference-result
+    subtyping and nullability joins around `call_ref`, `return_call_ref`, and structured-control
+    result boundaries. Active official invalid grounding now includes the broader
+    `return_call_ref` result-lattice slice from upstream (`ref $t` vs `ref null $t`, `ref func`,
+    and `ref null func` result interactions), while new raw exact-offset fixtures pin
+    `call_ref`-produced wrong-concrete-type failures at function, block, and `if` result
+    boundaries plus `return_call_ref` wrong-concrete-type and nullability result mismatches.
+    Representative raw invalid fixtures and unit tests now pin
+    `typed-call-ref-function-result-wrong-concrete-type`,
+    `typed-call-ref-block-result-wrong-concrete-type`,
+    `typed-call-ref-if-result-wrong-concrete-type`,
+    `typed-return-call-ref-result-wrong-concrete-type`, and
+    `typed-return-call-ref-result-nullability-mismatch`.
+  - The next typed select / ref-control result-pressure pass then widened the same result-boundary
+    scrutiny across `select`, `ref.as_non_null`, `br_on_null`, and `br_on_non_null` rather than
+    leaving that lattice pressure concentrated only around `call_ref` / `return_call_ref`.
+    Active official invalid grounding now includes additional result-boundary failures in
+    `ref-select-subset`, `ref-as-non-null-subset`, `br-on-null-subset`, and
+    `br-on-non-null-subset`, while new raw exact-offset fixtures pin typed-select function/block/
+    `if` result mismatches, typed-select nullability-result mismatch, `ref.as_non_null`
+    function-result mismatch, and `br_on_null` / `br_on_non_null` block-result mismatches.
+    Representative raw invalid fixtures and unit tests now pin
+    `typed-select-function-result-wrong-concrete-type`,
+    `typed-select-block-result-wrong-concrete-type`,
+    `typed-select-if-result-wrong-concrete-type`,
+    `typed-select-function-result-nullability-mismatch`,
+    `typed-ref-as-non-null-function-result-wrong-concrete-type`,
+    `typed-br-on-null-block-result-wrong-concrete-type`, and
+    `typed-br-on-non-null-block-result-wrong-concrete-type`.
+  - A follow-on typed branch/select join-pressure sweep then widened nullability-flow pressure
+    specifically across `br`, `br_if`, `br_table`, and `select` interactions with typed refs.
+    Active official grounding now includes select-fed branch cases in `br-subset`,
+    `br-if-subset`, and `br-table-subset`, plus a direct typed-select nullability invalid in
+    `ref-select-subset`. New raw fixtures now pin valid nullable-target select-to-branch flows for
+    `br`, `br_if`, and `br_table`, along with exact-offset invalids for direct
+    typed-select nullability mismatch, select-fed `br` / `br_if` / `br_table` non-null target
+    failures, and mixed nullable/non-null `br_table` target inconsistency.
+    Representative raw fixtures and unit tests now pin `typed-select-to-br-nullable`,
+    `typed-select-to-br-if-nullable`, `typed-select-to-br-table-nullable`,
+    `typed-select-nullability-mismatch`, `typed-select-to-br-nullability-mismatch`,
+    `typed-select-to-br-if-nullability-mismatch`,
+    `typed-select-to-br-table-nullability-mismatch`, and
+    `typed-br-table-nullability-targets-mismatch`.
+  - A further typed branch-result pressure sweep then widened nullability-specific coverage around
+    loop params, block results, and `if` joins. Active official grounding now includes nullable
+    branch-to-loop-param cases in `br-subset` and `br-if-subset`, nullable block/loop result cases
+    in `block-subset` and `loop-subset`, and nullable/non-null join pressure in `if-subset`.
+    New raw fixtures now pin valid non-null→nullable flows for block results, loop results,
+    `if` joins, `br` to loop params, and `br_if` to loop params, along with exact-offset invalids
+    for non-null block/loop/`if` result expectations fed by nullable typed refs and for nullable
+    branch values targeting non-null loop params.
+    Representative raw fixtures and unit tests now pin
+    `typed-block-result-nullable-from-nonnull`,
+    `typed-loop-result-nullable-from-nonnull`,
+    `typed-if-result-nullable-from-join`,
+    `typed-br-to-loop-param-nullable`,
+    `typed-br-if-to-loop-param-nullable`,
+    `typed-block-result-nullability-mismatch`,
+    `typed-loop-result-nullability-mismatch`,
+    `typed-if-result-nullability-mismatch`,
+    `typed-br-to-loop-param-nullability-mismatch`, and
+    `typed-br-if-to-loop-param-nullability-mismatch`.
+  - A follow-on typed nullability-consumer sweep then widened pressure across plain `return`,
+    `call_ref` consumers, and table/global storage boundaries under mixed nullable/non-null
+    structured joins. Active official grounding now includes nullable structured-join return cases
+    in `return-subset`, nullable `if`-fed `call_ref` cases in `typed-call-ref-subset`, and
+    nullable `if`-fed `global.set` / `table.set` cases in `typed-table-ref-subset`. New raw
+    fixtures now pin valid nullable joins flowing into `return`, `call_ref`, `global.set`, and
+    `table.set`, along with exact-offset invalids for non-null return/global/table expectations fed
+    by nullable structured joins and for an abstract `funcref` structured join consumed by
+    `call_ref`.
+    Representative raw fixtures and unit tests now pin `typed-return-if-nullable`,
+    `typed-call-ref-if-nullable`, `typed-global-set-if-nullable`,
+    `typed-table-set-if-nullable`, `typed-return-if-nullability-mismatch`,
+    `typed-call-ref-if-abstract-nullability-mismatch`,
+    `typed-global-set-if-nullability-mismatch`, and
+    `typed-table-set-if-nullability-mismatch`.
+  - A further typed nullability storage/dataflow sweep then widened structured-join coverage across
+    locals, globals, and tables, while extending nullability pressure through passive element and
+    `table.init` flows. Active official grounding now includes nullable structured joins stored via
+    `local.set` in `local-set-subset`, carried through `local` / `global` / `table` storage into
+    later `call_ref` consumers in `typed-call-ref-subset`, fed through non-null function-result
+    boundaries in `return-subset`, and widened passive-element / `table.init` nullability coverage
+    in `elem-table-init-subset` and `table-init-subset`.
+    New raw fixtures now pin valid structured-join storage/dataflow through locals, globals, and
+    tables into later `call_ref`, plus passive-element and `table.init` nullable flows from
+    non-null producers. Exact-offset invalids now pin nullable structured-join values escaping
+    local/global/table storage into non-null function results, nullable structured joins stored into
+    non-null locals, nullable passive-element expressions consumed as non-null typed refs, and
+    nullable typed element segments targeting non-null tables.
+    Representative raw fixtures and unit tests now pin `typed-local-set-if-nullable`,
+    `typed-local-if-nullable-to-call-ref`, `typed-global-if-nullable-to-call-ref`,
+    `typed-table-if-nullable-to-call-ref`, `typed-passive-element-nullable-from-nonnull`,
+    `typed-table-init-nullable-to-call-ref`, `typed-local-set-if-nullability-mismatch`,
+    `typed-local-if-to-return-nullability-mismatch`,
+    `typed-global-if-to-return-nullability-mismatch`,
+    `typed-table-if-to-return-nullability-mismatch`,
+    `typed-passive-element-nullability-mismatch`, and
+    `typed-table-init-nullability-mismatch`.
+  - A follow-on typed nullability transport sweep then widened indirect storage/initialization
+    coverage across `global.get -> passive elem -> table.init -> table.get` chains, with blame
+    pinned at the final semantic consumer when intermediate transport remains valid. Active official
+    grounding now includes nullable and non-null global transport into passive elements in
+    `elem-table-init-subset`, indirect nullable transport into `call_ref` consumers in
+    `typed-call-ref-subset` and `table-init-subset`, indirect nullable transport into non-null
+    function-result boundaries in `return-subset`, and indirect nullable transport into non-null
+    `global.set` in `typed-table-ref-subset`.
+    New raw fixtures now pin valid defined/imported global transport through passive elements and
+    `table.init` into later `call_ref` consumers, including non-null global values widened through
+    nullable passive-element / table boundaries. Exact-offset invalids now pin nullable transport
+    arriving at non-null function results, nullable transport arriving at non-null `global.set`,
+    and nullable passive-element segments targeting non-null tables.
+    Representative raw fixtures and unit tests now pin
+    `typed-defined-global-passive-element-table-init-nullable-to-call-ref`,
+    `typed-imported-global-passive-element-table-init-nullable-to-call-ref`,
+    `typed-defined-nonnull-global-passive-element-nullable`,
+    `typed-imported-nonnull-global-passive-element-table-init-nullable-to-call-ref`,
+    `typed-defined-global-passive-element-table-init-to-return-nullability-mismatch`,
+    `typed-imported-global-passive-element-table-init-to-return-nullability-mismatch`,
+    `typed-defined-global-passive-element-table-init-to-global-set-nullability-mismatch`, and
+    `typed-imported-global-passive-element-table-init-nullability-mismatch`.
+  - A further typed nullability consumer-lattice sweep then widened terminal-consumer pressure
+    across `return_call_ref`, `return_call_indirect`, and branch-target transport after table
+    initialization. Active official grounding now includes table-initialized function-reference
+    transport into `return_call_ref` result boundaries in `typed-return-call-ref-subset`,
+    table-initialized indirect-call-table transport into `return_call_indirect` result boundaries
+    in `return-call-indirect-subset`, and table-initialized branch-value transport into `br`,
+    `br_if`, and `br_table` target/result boundaries in `br-subset`, `br-if-subset`, and
+    `br-table-subset`.
+    New raw fixtures now pin valid nullable consumer flows for table-initialized
+    `return_call_ref`, `return_call_indirect`, `br`, `br_if`, and `br_table` cases. Exact-offset
+    invalids now pin where the terminal consumer rejects nullable transport: `ResultTypeMismatch`
+    at `return_call_ref` / `return_call_indirect`, and `BranchTypeMismatch` at `br`, `br_if`, and
+    `br_table`.
+    Representative raw fixtures and unit tests now pin
+    `typed-table-init-to-return-call-ref-result-nullable`,
+    `typed-table-init-to-return-call-indirect-result-nullable`,
+    `typed-table-init-to-br-nullable`, `typed-table-init-to-br-if-nullable`,
+    `typed-table-init-to-br-table-nullable`,
+    `typed-table-init-to-return-call-ref-result-nullability-mismatch`,
+    `typed-table-init-to-return-call-indirect-result-nullability-mismatch`,
+    `typed-table-init-to-br-nullability-mismatch`,
+    `typed-table-init-to-br-if-nullability-mismatch`, and
+    `typed-table-init-to-br-table-nullability-mismatch`.
+  - A follow-on shared-source nullability sweep then widened mixed terminal-consumer pressure
+    across `return`, `return_call_ref`, `br_if`, and `global.set` when all four consume the same
+    table-initialized nullable callee reference cached in a local before final use. Active official
+    grounding now includes shared-source terminal coverage in `return-subset`,
+    `typed-return-call-ref-subset`, `br-if-subset`, and `typed-table-ref-subset`.
+    New raw fixtures now pin valid shared-source nullable flows into each terminal consumer, while
+    exact-offset invalids pin the final blame site for the same transported source: `return`
+    rejects at `ControlResultTypeMismatch`, `return_call_ref` rejects at `ResultTypeMismatch`,
+    `br_if` rejects at `BranchTypeMismatch`, and `global.set` rejects at `TypeMismatch`.
+    Representative raw fixtures and unit tests now pin
+    `typed-table-init-shared-source-to-return-nullable`,
+    `typed-table-init-shared-source-to-return-call-ref-nullable`,
+    `typed-table-init-shared-source-to-br-if-nullable`,
+    `typed-table-init-shared-source-to-global-set-nullable`,
+    `typed-table-init-shared-source-to-return-nullability-mismatch`,
+    `typed-table-init-shared-source-to-return-call-ref-nullability-mismatch`,
+    `typed-table-init-shared-source-to-br-if-nullability-mismatch`, and
+    `typed-table-init-shared-source-to-global-set-nullability-mismatch`.
+  - A final shared-source sweep across the remaining terminal family then widened the same cached
+    transport pattern into `br`, `br_table`, and `return_call_indirect`. Active official grounding
+    now includes shared-source terminal coverage in `br-subset`, `br-table-subset`, and
+    `return-call-indirect-subset`, where the transported nullable value is first cached in a local
+    and only then consumed by the final terminal operator.
+    New raw fixtures now pin valid shared-source nullable flows into `br`, `br_table`, and
+    `return_call_indirect`, while exact-offset invalids again pin the final blame site rather than
+    the shared transport path: `br` and `br_table` reject at `BranchTypeMismatch`, and
+    `return_call_indirect` rejects at `ResultTypeMismatch`.
+    Representative raw fixtures and unit tests now pin
+    `typed-table-init-shared-source-to-br-nullable`,
+    `typed-table-init-shared-source-to-br-table-nullable`,
+    `typed-table-init-shared-source-to-return-call-indirect-result-nullable`,
+    `typed-table-init-shared-source-to-br-nullability-mismatch`,
+    `typed-table-init-shared-source-to-br-table-nullability-mismatch`, and
+    `typed-table-init-shared-source-to-return-call-indirect-result-nullability-mismatch`.
+  - `ref.as_non_null` support now also includes decoding plus validation grounding via new
+    `ref-as-non-null-subset` upstream coverage, raw valid
+    `valid/ref-as-non-null-call-ref.wasm`, and raw invalid
+    `invalid-validate/ref-as-non-null-non-ref-input.wasm`. Within the current bounded model,
+    `ref.as_non_null` accepts reference operands and produces the non-null form of that reference
+    type.
+  - Null-branch support now also includes `br_on_null` and `br_on_non_null` decoding plus
+    validation grounding via new `br-on-null-subset` and `br-on-non-null-subset` upstream files.
+    Raw fixtures now include valid `valid/br-on-null-fallthrough-narrow.wasm` and
+    `valid/br-on-non-null-branch-result.wasm`, plus invalid
+    `invalid-validate/br-on-null-non-ref-input.wasm` and
+    `invalid-validate/br-on-non-null-non-ref-target.wasm`. `br_on_null` now narrows the
+    fallthrough reference to non-null, while `br_on_non_null` requires the target label to end in a
+    reference type and routes the tested value through that branch target.
   - Raw invalid body-fixture metadata is now tighter for decode-preserving validation failures:
     the current wrapped `ValidationErrorKind::Decode` cases for truncated bulk-memory, truncated
     memarg, and unknown SIMD opcode bodies now pin exact `offset=` alongside `context=` and
     `decode_kind=`.
+  - Raw bulk-memory invalid fixtures now also pin exact `offset=` for representative
+    `memory.init`, `memory.copy`, `memory.fill`, and `data.drop` validation failures.
+  - Raw initialization/const-expression invalid fixtures now also pin exact `offset=` for
+    representative global-init, active-data, element-expression, active-element-table, and
+    `table.init` validation failures.
+  - Raw control invalid fixtures now also pin exact `offset=` for representative
+    `call_indirect` table-type validation failures.
+  - Raw table/reference invalid fixtures now also pin exact `offset=` for representative unknown
+    exported-table index failures.
+  - Raw malformed/decode fixtures now pin both exact `offset=` and direct decode `context=` across
+    the full `invalid-decode/` corpus, and `spec.rs` now asserts that all raw invalid fixtures
+    carry complete metadata (`kind`/`offset`, plus `context` for direct decode failures and nested
+    `decode_kind` for decode-preserving validation failures).
 
   - Current decode-vs-validate boundary in the raw fixture harness is:
     - `invalid-decode`: `Module::decode(...)` itself must fail.
@@ -221,42 +738,63 @@ More concretely, Phase 1 is done when all of the following are true:
    - The validator remains a spec-facing proof/type layer, clearly separated from the future
      register-based IR and interpreter core.
 
-#### Still to do before Phase 1 can be called complete
-- [ ] Cover the remaining major instruction families and backfill gaps, especially additional
-  reference-type/proposal-era validation paths, any still-missing niche numeric/proposal
-  variants, and official spec-suite-driven completeness gaps.
-- [ ] Continue broadening reference-type, const-expression, and proposal-era validation coverage in
-  line with the WebAssembly 3.0 target surface, building beyond the current `ref.null` /
-  `ref.func` / `ref.is_null` and imported-const-`global.get` subset.
-- [ ] Integrate more official spec-suite `assert_invalid` / `assert_malformed` style coverage and
-  keep compliance/defer status explicit.
-- [ ] Continue converting any newly discovered upstream friction points into either explicit tracked
-  deferred cases (`.meta` `skip=...`) or implemented support, so Phase 2 builds on a crisp
-  semantic contract rather than assumptions.
+#### Checkpoint 8 — Phase 1 closure audit
+
+**Audit verdict:** Phase 1 is materially advanced and well-grounded, but **not yet complete** under
+Baedeker’s own revised definition.
+
+**What the audit says is already true**
+- Validation diagnostics are now precise and regression-pinned across a broad raw corpus with exact
+  `offset=` metadata and decode-vs-validate separation.
+- The active upstream-derived lane remains **zero-skip** while covering **87** curated
+  `wast-upstream` files and **587** upstream directives.
+- Compile-time external parity is in the regular loop via Node/V8 for the active supported raw and
+  upstream-derived surface.
+- Typed function references, tail calls, null branches, `ref.as_non_null`, const/init flows, and a
+  large control/table/global/reference matrix are grounded well enough that remaining work is now
+  mostly closure-oriented rather than foundational.
+
+**What the audit found is still missing**
+- [ ] **Official validation-only grounding can still broaden now that the concrete post-audit
+  semantic blockers are closed.** The current lane is strong, but additional official files and
+  curated slices of `unreached-valid.wast` should continue to become active as Baedeker widens its
+  supported validation surface.
+- [ ] **Some broader WebAssembly 3.0 validation surface still remains beyond the current bounded
+  typed-reference model.** The current model is intentionally sufficient for the active supported
+  subsets, but Phase 1 closure still requires continued audit against remaining proposal-era and
+  niche validation cases.
 
 ### Recommended next steps
-1. Prioritize the highest-leverage remaining semantic gaps for both full validation and future
-   lowering: remaining numeric coverage/variants, broader reference-type/proposal-era
-   validation, and external spec-suite integration.
-2. Keep expanding the fixture corpus in lockstep with each new instruction family, including exact
-   `.meta` assertions for representative diagnostics.
-3. Begin wiring in official spec-suite inputs so Phase 1 progress is measured against external
-   ground truth as well as internal fixtures.
-4. Keep the architectural boundary explicit: validation state remains proof/type state; register IR
+1. Continue the **official spec grounding lane**, widening the active zero-skip upstream surface
+   with additional curated official validation cases rather than reintroducing skips.
+2. Continue the **broader WebAssembly 3.0 audit pass** against remaining proposal-era and niche
+   validation cases beyond the current bounded typed-reference model.
+3. Keep the architectural boundary explicit: validation state remains proof/type state; register IR
    design and lowering stay in Phase 2.
 
 ### Current verification snapshot
 - `cargo fmt -- --check`
 - `cargo test -p baedeker-core --test spec`
 - `cargo test -p baedeker-core --test spec_wast`
+- `cargo test -p baedeker-core --test spec_node`
 - `cargo test -p baedeker-core`
 - `cargo clippy -p baedeker-core --all-targets -- -D warnings`
-- Current `baedeker-core` unit test count: **203 passing**
-- Current spec-harness integration tests: **5 passing** (`spec`: 3, `spec_wast`: 2)
+- Current `baedeker-core` unit test count: **502 passing**
+- Current spec-harness integration tests: **8 passing** (`spec`: 3, `spec_wast`: 2, `spec_node`: 3)
+- Current corpus snapshot:
+  - `wast-upstream`: **87** active files / **587** directives
+  - raw `valid`: **213** fixtures
+  - raw `invalid-validate`: **172** fixtures
+  - raw `invalid-decode`: **34** fixtures
+  - custom `spec/wast`: **17** files
+- `spec_node` adds a Node/V8 compile-time cross-check over the raw fixture corpus plus the active
+  upstream-derived `wast-upstream` subset lane. Custom `spec/wast` cases remain Baedeker-shaped
+  boundary coverage and are not enforced against Node/V8.
 
 ### Current branch snapshot
-Current Phase 1 closure work continues on `feat/phase-1-part-2-closures`, with the validator and
-fixture/docs support matrix kept in sync as upstream-derived skips are narrowed or retired.
+Current Phase 1 closure work continues on `feat/phase-1-part-3-larger-test-batches`, with the
+validator and fixture/docs support matrix kept in sync as upstream-derived skips are narrowed or
+retired.
 
 ### Phase 1 note
 The validator stack remains the spec-facing abstract operand/control stack used for proof of
