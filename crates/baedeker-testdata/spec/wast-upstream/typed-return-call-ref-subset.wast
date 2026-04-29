@@ -81,6 +81,25 @@
           (i64.sub (local.get 0) (i64.const 1))
           (global.get $even))))))
 
+(module
+  (type $t0 (func (param i32) (result i32)))
+  (type $callee (func (result (ref null $t0))))
+  (func $f (type $t0)
+    (local.get 0))
+  (export "f" (func $f))
+  (func $g (type $callee)
+    (ref.null $t0))
+  (export "g" (func $g))
+  (global $gref (ref null $callee)
+    (ref.func $g))
+  (table $t 1 (ref null $callee))
+  (elem (ref null $callee)
+    (global.get $gref))
+  (func (result (ref null $t0))
+    (table.init $t 0 (i32.const 0) (i32.const 0) (i32.const 1))
+    (return_call_ref $callee
+      (table.get $t (i32.const 0)))))
+
 (assert_invalid
   (module
     (type $t (func))
@@ -165,6 +184,28 @@
           (local.get $cond)
           (then (ref.func $f))
           (else (ref.null $t0))))))
+  "type mismatch"
+)
+
+(assert_invalid
+  (module
+    (type $t0 (func (param i32) (result i32)))
+    (type $callee (func (result (ref null $t0))))
+    (func $f (type $t0)
+      (local.get 0))
+    (export "f" (func $f))
+    (func $g (type $callee)
+      (ref.null $t0))
+    (export "g" (func $g))
+    (global $gref (ref null $callee)
+      (ref.func $g))
+    (table $t 1 (ref null $callee))
+    (elem (ref null $callee)
+      (global.get $gref))
+    (func (result (ref $t0))
+      (table.init $t 0 (i32.const 0) (i32.const 0) (i32.const 1))
+      (return_call_ref $callee
+        (table.get $t (i32.const 0)))))
   "type mismatch"
 )
 

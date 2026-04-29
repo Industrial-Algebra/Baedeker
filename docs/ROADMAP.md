@@ -619,6 +619,29 @@ interpreter-first with AOT as a future layer.
     `typed-imported-global-passive-element-table-init-to-return-nullability-mismatch`,
     `typed-defined-global-passive-element-table-init-to-global-set-nullability-mismatch`, and
     `typed-imported-global-passive-element-table-init-nullability-mismatch`.
+  - A further typed nullability consumer-lattice sweep then widened terminal-consumer pressure
+    across `return_call_ref`, `return_call_indirect`, and branch-target transport after table
+    initialization. Active official grounding now includes table-initialized function-reference
+    transport into `return_call_ref` result boundaries in `typed-return-call-ref-subset`,
+    table-initialized indirect-call-table transport into `return_call_indirect` result boundaries
+    in `return-call-indirect-subset`, and table-initialized branch-value transport into `br`,
+    `br_if`, and `br_table` target/result boundaries in `br-subset`, `br-if-subset`, and
+    `br-table-subset`.
+    New raw fixtures now pin valid nullable consumer flows for table-initialized
+    `return_call_ref`, `return_call_indirect`, `br`, `br_if`, and `br_table` cases. Exact-offset
+    invalids now pin where the terminal consumer rejects nullable transport: `ResultTypeMismatch`
+    at `return_call_ref` / `return_call_indirect`, and `BranchTypeMismatch` at `br`, `br_if`, and
+    `br_table`.
+    Representative raw fixtures and unit tests now pin
+    `typed-table-init-to-return-call-ref-result-nullable`,
+    `typed-table-init-to-return-call-indirect-result-nullable`,
+    `typed-table-init-to-br-nullable`, `typed-table-init-to-br-if-nullable`,
+    `typed-table-init-to-br-table-nullable`,
+    `typed-table-init-to-return-call-ref-result-nullability-mismatch`,
+    `typed-table-init-to-return-call-indirect-result-nullability-mismatch`,
+    `typed-table-init-to-br-nullability-mismatch`,
+    `typed-table-init-to-br-if-nullability-mismatch`, and
+    `typed-table-init-to-br-table-nullability-mismatch`.
   - `ref.as_non_null` support now also includes decoding plus validation grounding via new
     `ref-as-non-null-subset` upstream coverage, raw valid
     `valid/ref-as-non-null-call-ref.wasm`, and raw invalid
@@ -690,7 +713,7 @@ Baedeker’s own revised definition.
 - Validation diagnostics are now precise and regression-pinned across a broad raw corpus with exact
   `offset=` metadata and decode-vs-validate separation.
 - The active upstream-derived lane remains **zero-skip** while covering **87** curated
-  `wast-upstream` files and **563** upstream directives.
+  `wast-upstream` files and **573** upstream directives.
 - Compile-time external parity is in the regular loop via Node/V8 for the active supported raw and
   upstream-derived surface.
 - Typed function references, tail calls, null branches, `ref.as_non_null`, const/init flows, and a
@@ -722,12 +745,12 @@ Baedeker’s own revised definition.
 - `cargo test -p baedeker-core --test spec_node`
 - `cargo test -p baedeker-core`
 - `cargo clippy -p baedeker-core --all-targets -- -D warnings`
-- Current `baedeker-core` unit test count: **478 passing**
+- Current `baedeker-core` unit test count: **488 passing**
 - Current spec-harness integration tests: **8 passing** (`spec`: 3, `spec_wast`: 2, `spec_node`: 3)
 - Current corpus snapshot:
-  - `wast-upstream`: **87** active files / **563** directives
-  - raw `valid`: **201** fixtures
-  - raw `invalid-validate`: **160** fixtures
+  - `wast-upstream`: **87** active files / **573** directives
+  - raw `valid`: **206** fixtures
+  - raw `invalid-validate`: **165** fixtures
   - raw `invalid-decode`: **34** fixtures
   - custom `spec/wast`: **17** files
 - `spec_node` adds a Node/V8 compile-time cross-check over the raw fixture corpus plus the active

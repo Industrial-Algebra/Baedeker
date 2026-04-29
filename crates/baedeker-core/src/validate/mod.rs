@@ -3973,6 +3973,38 @@ mod tests {
     }
 
     #[test]
+    fn validate_typed_table_init_to_br_nullable_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/typed-table-init-to-br-nullable.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn reject_typed_table_init_to_br_nullability_mismatch() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/typed-table-init-to-br-nullability-mismatch.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(86));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::BranchTypeMismatch { label, expected, found }
+                if label == crate::types::LabelIdx(0)
+                    && expected == vec![ValType::Ref(RefType::Typed {
+                        nullable: false,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })]
+                    && found == vec![ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })]
+        ));
+    }
+
+    #[test]
     fn validate_imported_global_get_and_set() {
         let bytes = [
             0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
@@ -5756,6 +5788,38 @@ mod tests {
     }
 
     #[test]
+    fn validate_typed_table_init_to_br_if_nullable_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/typed-table-init-to-br-if-nullable.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn reject_typed_table_init_to_br_if_nullability_mismatch() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/typed-table-init-to-br-if-nullability-mismatch.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(89));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::BranchTypeMismatch { label, expected, found }
+                if label == crate::types::LabelIdx(0)
+                    && expected == vec![ValType::Ref(RefType::Typed {
+                        nullable: false,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })]
+                    && found == vec![ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })]
+        ));
+    }
+
+    #[test]
     fn validate_typed_br_to_loop_param_with_equivalent_signature() {
         let bytes = [
             0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x17, 0x04, 0x60, 0x01, 0x7f,
@@ -5926,6 +5990,38 @@ mod tests {
         let module = Module::decode(bytes).unwrap();
         let err = module.validate().unwrap_err();
         assert_eq!(err.offset, ByteOffset(59));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::BranchTypeMismatch { label, expected, found }
+                if label == crate::types::LabelIdx(0)
+                    && expected == vec![ValType::Ref(RefType::Typed {
+                        nullable: false,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })]
+                    && found == vec![ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })]
+        ));
+    }
+
+    #[test]
+    fn validate_typed_table_init_to_br_table_nullable_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/typed-table-init-to-br-table-nullable.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn reject_typed_table_init_to_br_table_nullability_mismatch() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/typed-table-init-to-br-table-nullability-mismatch.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(88));
         assert!(matches!(
             err.kind,
             ValidationErrorKind::BranchTypeMismatch { label, expected, found }
@@ -6704,6 +6800,15 @@ mod tests {
     }
 
     #[test]
+    fn validate_typed_table_init_to_return_call_indirect_result_nullable_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/typed-table-init-to-return-call-indirect-result-nullable.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
     fn validate_typed_if_result_to_return_call_indirect_ref_param_with_equivalent_signature() {
         let bytes = include_bytes!(
             "../../../baedeker-testdata/spec/valid/typed-if-to-return-call-indirect-ref-param-equivalent-signature.wasm",
@@ -6732,6 +6837,27 @@ mod tests {
                         nullable: true,
                         heap: crate::types::HeapType::Type(TypeIdx(0)),
                     })
+        ));
+    }
+
+    #[test]
+    fn reject_typed_table_init_to_return_call_indirect_result_nullability_mismatch() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/typed-table-init-to-return-call-indirect-result-nullability-mismatch.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(81));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::ResultTypeMismatch { expected, found }
+                if expected == vec![ValType::Ref(RefType::Typed {
+                    nullable: false,
+                    heap: crate::types::HeapType::Type(TypeIdx(0)),
+                })] && found == vec![ValType::Ref(RefType::Typed {
+                    nullable: true,
+                    heap: crate::types::HeapType::Type(TypeIdx(0)),
+                })]
         ));
     }
 
@@ -7605,6 +7731,15 @@ mod tests {
     }
 
     #[test]
+    fn validate_typed_table_init_to_return_call_ref_result_nullable_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/typed-table-init-to-return-call-ref-result-nullable.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
     fn reject_typed_return_call_ref_result_wrong_concrete_type() {
         let bytes = include_bytes!(
             "../../../baedeker-testdata/spec/invalid-validate/typed-return-call-ref-result-wrong-concrete-type.wasm",
@@ -7666,6 +7801,27 @@ mod tests {
                         nullable: true,
                         heap: crate::types::HeapType::Type(TypeIdx(0)),
                     })
+        ));
+    }
+
+    #[test]
+    fn reject_typed_table_init_to_return_call_ref_result_nullability_mismatch() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/typed-table-init-to-return-call-ref-result-nullability-mismatch.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(98));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::ResultTypeMismatch { expected, found }
+                if expected == vec![ValType::Ref(RefType::Typed {
+                    nullable: false,
+                    heap: crate::types::HeapType::Type(TypeIdx(0)),
+                })] && found == vec![ValType::Ref(RefType::Typed {
+                    nullable: true,
+                    heap: crate::types::HeapType::Type(TypeIdx(0)),
+                })]
         ));
     }
 
