@@ -151,6 +151,26 @@
 (assert_invalid
   (module
     (type $t0 (func (param i32) (result i32)))
+    (func $f (type $t0)
+      (local.get 0))
+    (export "f" (func $f))
+    (global $g0 (ref null $t0)
+      (ref.func $f))
+    (table $t 1 (ref null $t0))
+    (elem (ref null $t0)
+      (global.get $g0))
+    (global $sink (mut (ref $t0))
+      (ref.func $f))
+    (func
+      (table.init $t 0 (i32.const 0) (i32.const 0) (i32.const 1))
+      (global.set $sink
+        (table.get $t (i32.const 0)))))
+  "type mismatch"
+)
+
+(assert_invalid
+  (module
+    (type $t0 (func (param i32) (result i32)))
     (type $t1 (func (param i64) (result i64)))
     (import "env" "g" (global (ref null $t0)))
     (import "env" "t" (table 1 (ref null $t1)))

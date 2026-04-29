@@ -7055,9 +7055,48 @@ mod tests {
     }
 
     #[test]
+    fn validate_typed_defined_nonnull_global_passive_element_nullable_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/typed-defined-nonnull-global-passive-element-nullable.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
     fn validate_typed_table_init_nullable_to_call_ref_official_case() {
         let bytes = include_bytes!(
             "../../../baedeker-testdata/spec/valid/typed-table-init-nullable-to-call-ref.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_typed_defined_global_passive_element_table_init_nullable_to_call_ref_official_case()
+    {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/typed-defined-global-passive-element-table-init-nullable-to-call-ref.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_typed_imported_global_passive_element_table_init_nullable_to_call_ref_official_case()
+     {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/typed-imported-global-passive-element-table-init-nullable-to-call-ref.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_typed_imported_nonnull_global_passive_element_table_init_nullable_to_call_ref_official_case()
+     {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/typed-imported-nonnull-global-passive-element-table-init-nullable-to-call-ref.wasm",
         );
         let module = Module::decode(bytes).unwrap();
         module.validate().unwrap();
@@ -8034,6 +8073,93 @@ mod tests {
         let module = Module::decode(bytes).unwrap();
         let err = module.validate().unwrap_err();
         assert_eq!(err.offset, ByteOffset(71));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::ElementTableTypeMismatch { expected, found }
+                if expected == RefType::Typed {
+                    nullable: false,
+                    heap: crate::types::HeapType::Type(TypeIdx(0)),
+                }
+                    && found == RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    }
+        ));
+    }
+
+    #[test]
+    fn reject_typed_defined_global_passive_element_table_init_to_return_nullability_mismatch() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/typed-defined-global-passive-element-table-init-to-return-nullability-mismatch.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(83));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::FunctionResultTypeMismatch { expected, found, .. }
+                if expected == vec![ValType::Ref(RefType::Typed {
+                    nullable: false,
+                    heap: crate::types::HeapType::Type(TypeIdx(0)),
+                })] && found == vec![ValType::Ref(RefType::Typed {
+                    nullable: true,
+                    heap: crate::types::HeapType::Type(TypeIdx(0)),
+                })]
+        ));
+    }
+
+    #[test]
+    fn reject_typed_imported_global_passive_element_table_init_to_return_nullability_mismatch() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/typed-imported-global-passive-element-table-init-to-return-nullability-mismatch.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(74));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::FunctionResultTypeMismatch { expected, found, .. }
+                if expected == vec![ValType::Ref(RefType::Typed {
+                    nullable: false,
+                    heap: crate::types::HeapType::Type(TypeIdx(0)),
+                })] && found == vec![ValType::Ref(RefType::Typed {
+                    nullable: true,
+                    heap: crate::types::HeapType::Type(TypeIdx(0)),
+                })]
+        ));
+    }
+
+    #[test]
+    fn reject_typed_defined_global_passive_element_table_init_to_global_set_nullability_mismatch() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/typed-defined-global-passive-element-table-init-to-global-set-nullability-mismatch.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(87));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::TypeMismatch { op, expected, found }
+                if op == "global.set"
+                    && expected == ValType::Ref(RefType::Typed {
+                        nullable: false,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })
+                    && found == ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })
+        ));
+    }
+
+    #[test]
+    fn reject_typed_imported_global_passive_element_table_init_nullability_mismatch() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/typed-imported-global-passive-element-table-init-nullability-mismatch.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(74));
         assert!(matches!(
             err.kind,
             ValidationErrorKind::ElementTableTypeMismatch { expected, found }

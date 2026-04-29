@@ -26,6 +26,16 @@
   (elem (ref null $t0)
     (ref.func $f)))
 
+(module
+  (type $t0 (func (param i32) (result i32)))
+  (func $f (type $t0)
+    (local.get 0))
+  (export "f" (func $f))
+  (global $g0 (ref $t0)
+    (ref.func $f))
+  (elem (ref null $t0)
+    (global.get $g0)))
+
 (assert_invalid
   (module
     (global $ofs (import "test" "g") (mut i32))

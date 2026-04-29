@@ -597,6 +597,28 @@ interpreter-first with AOT as a future layer.
     `typed-table-if-to-return-nullability-mismatch`,
     `typed-passive-element-nullability-mismatch`, and
     `typed-table-init-nullability-mismatch`.
+  - A follow-on typed nullability transport sweep then widened indirect storage/initialization
+    coverage across `global.get -> passive elem -> table.init -> table.get` chains, with blame
+    pinned at the final semantic consumer when intermediate transport remains valid. Active official
+    grounding now includes nullable and non-null global transport into passive elements in
+    `elem-table-init-subset`, indirect nullable transport into `call_ref` consumers in
+    `typed-call-ref-subset` and `table-init-subset`, indirect nullable transport into non-null
+    function-result boundaries in `return-subset`, and indirect nullable transport into non-null
+    `global.set` in `typed-table-ref-subset`.
+    New raw fixtures now pin valid defined/imported global transport through passive elements and
+    `table.init` into later `call_ref` consumers, including non-null global values widened through
+    nullable passive-element / table boundaries. Exact-offset invalids now pin nullable transport
+    arriving at non-null function results, nullable transport arriving at non-null `global.set`,
+    and nullable passive-element segments targeting non-null tables.
+    Representative raw fixtures and unit tests now pin
+    `typed-defined-global-passive-element-table-init-nullable-to-call-ref`,
+    `typed-imported-global-passive-element-table-init-nullable-to-call-ref`,
+    `typed-defined-nonnull-global-passive-element-nullable`,
+    `typed-imported-nonnull-global-passive-element-table-init-nullable-to-call-ref`,
+    `typed-defined-global-passive-element-table-init-to-return-nullability-mismatch`,
+    `typed-imported-global-passive-element-table-init-to-return-nullability-mismatch`,
+    `typed-defined-global-passive-element-table-init-to-global-set-nullability-mismatch`, and
+    `typed-imported-global-passive-element-table-init-nullability-mismatch`.
   - `ref.as_non_null` support now also includes decoding plus validation grounding via new
     `ref-as-non-null-subset` upstream coverage, raw valid
     `valid/ref-as-non-null-call-ref.wasm`, and raw invalid
@@ -668,7 +690,7 @@ Baedeker’s own revised definition.
 - Validation diagnostics are now precise and regression-pinned across a broad raw corpus with exact
   `offset=` metadata and decode-vs-validate separation.
 - The active upstream-derived lane remains **zero-skip** while covering **87** curated
-  `wast-upstream` files and **556** upstream directives.
+  `wast-upstream` files and **563** upstream directives.
 - Compile-time external parity is in the regular loop via Node/V8 for the active supported raw and
   upstream-derived surface.
 - Typed function references, tail calls, null branches, `ref.as_non_null`, const/init flows, and a
@@ -700,12 +722,12 @@ Baedeker’s own revised definition.
 - `cargo test -p baedeker-core --test spec_node`
 - `cargo test -p baedeker-core`
 - `cargo clippy -p baedeker-core --all-targets -- -D warnings`
-- Current `baedeker-core` unit test count: **470 passing**
+- Current `baedeker-core` unit test count: **478 passing**
 - Current spec-harness integration tests: **8 passing** (`spec`: 3, `spec_wast`: 2, `spec_node`: 3)
 - Current corpus snapshot:
-  - `wast-upstream`: **87** active files / **556** directives
-  - raw `valid`: **197** fixtures
-  - raw `invalid-validate`: **156** fixtures
+  - `wast-upstream`: **87** active files / **563** directives
+  - raw `valid`: **201** fixtures
+  - raw `invalid-validate`: **160** fixtures
   - raw `invalid-decode`: **34** fixtures
   - custom `spec/wast`: **17** files
 - `spec_node` adds a Node/V8 compile-time cross-check over the raw fixture corpus plus the active

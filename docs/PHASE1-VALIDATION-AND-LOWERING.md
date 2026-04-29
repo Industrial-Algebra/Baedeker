@@ -679,6 +679,28 @@ Representative raw fixtures and unit tests now pin `typed-local-set-if-nullable`
 `typed-passive-element-nullability-mismatch`, and
 `typed-table-init-nullability-mismatch`.
 
+A follow-on typed nullability transport sweep then widened indirect storage/initialization coverage
+across `global.get -> passive elem -> table.init -> table.get` chains, with blame pinned at the
+final semantic consumer when intermediate transport remains valid. Active official grounding now
+includes nullable and non-null global transport into passive elements in `elem-table-init-subset`,
+indirect nullable transport into `call_ref` consumers in `typed-call-ref-subset` and
+`table-init-subset`, indirect nullable transport into non-null function-result boundaries in
+`return-subset`, and indirect nullable transport into non-null `global.set` in
+`typed-table-ref-subset`. New raw fixtures now pin valid defined/imported global transport through
+passive elements and `table.init` into later `call_ref` consumers, including non-null global
+values widened through nullable passive-element / table boundaries. Exact-offset invalids now pin
+nullable transport arriving at non-null function results, nullable transport arriving at non-null
+`global.set`, and nullable passive-element segments targeting non-null tables. Representative raw
+fixtures and unit tests now pin
+`typed-defined-global-passive-element-table-init-nullable-to-call-ref`,
+`typed-imported-global-passive-element-table-init-nullable-to-call-ref`,
+`typed-defined-nonnull-global-passive-element-nullable`,
+`typed-imported-nonnull-global-passive-element-table-init-nullable-to-call-ref`,
+`typed-defined-global-passive-element-table-init-to-return-nullability-mismatch`,
+`typed-imported-global-passive-element-table-init-to-return-nullability-mismatch`,
+`typed-defined-global-passive-element-table-init-to-global-set-nullability-mismatch`, and
+`typed-imported-global-passive-element-table-init-nullability-mismatch`.
+
 `ref.as_non_null` now also has dedicated grounding via `ref-as-non-null-subset`, along with raw
 valid fixture `ref-as-non-null-call-ref.wasm` and raw invalid fixture
 `ref-as-non-null-non-ref-input.wasm`. Within the current bounded typed-reference model it accepts
@@ -704,9 +726,9 @@ broadly grounded and structurally stable.
   `invalid-validate` fails after decoding, and decode-preserving body failures are pinned through
   `ValidationErrorKind::Decode { context, kind }`.
 - The active upstream-derived lane is zero-skip and now covers **87** curated upstream subset files
-  with **556** directives, all enforced in both `spec_wast` and `spec_node`.
+  with **563** directives, all enforced in both `spec_wast` and `spec_node`.
 - The raw corpus is now large enough to act as a real regression floor:
-  **197** valid fixtures, **156** invalid-validate fixtures, and **34** invalid-decode fixtures.
+  **201** valid fixtures, **160** invalid-validate fixtures, and **34** invalid-decode fixtures.
 - The typed-function-reference / tail-call / nullability / const-init / table-global-element
   campaigns all broadened coverage without forcing architecture drift away from the current
   spec-facing validator model.
