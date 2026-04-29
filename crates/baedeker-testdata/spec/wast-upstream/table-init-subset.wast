@@ -49,6 +49,20 @@
     (table.init 0 0 (i32.const 0) (i32.const 0) (i32.const 1))
     (table.get 0 (i32.const 0))))
 
+(module
+  (type $t0 (func (param i32) (result i32)))
+  (func $f (type $t0)
+    (local.get 0))
+  (export "f" (func $f))
+  (table $t 1 (ref null $t0))
+  (elem (ref null $t0)
+    (ref.func $f))
+  (func (param $x i32) (result i32)
+    (table.init $t 0 (i32.const 0) (i32.const 0) (i32.const 1))
+    (call_ref $t0
+      (local.get $x)
+      (table.get $t (i32.const 0)))))
+
 (assert_invalid
   (module
     (func (export "test")
@@ -96,5 +110,19 @@
     (elem (ref null $t0) (ref.func $f))
     (func (export "init")
       (table.init 0 0 (i32.const 0) (i32.const 0) (i32.const 1))))
+  "type mismatch"
+)
+
+(assert_invalid
+  (module
+    (type $t0 (func (param i32) (result i32)))
+    (func $f (type $t0)
+      (local.get 0))
+    (export "f" (func $f))
+    (table $t 1 (ref $t0))
+    (elem (ref null $t0)
+      (ref.func $f))
+    (func (export "init")
+      (table.init $t 0 (i32.const 0) (i32.const 0) (i32.const 1))))
   "type mismatch"
 )

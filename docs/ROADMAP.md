@@ -575,6 +575,28 @@ interpreter-first with AOT as a future layer.
     `typed-call-ref-if-abstract-nullability-mismatch`,
     `typed-global-set-if-nullability-mismatch`, and
     `typed-table-set-if-nullability-mismatch`.
+  - A further typed nullability storage/dataflow sweep then widened structured-join coverage across
+    locals, globals, and tables, while extending nullability pressure through passive element and
+    `table.init` flows. Active official grounding now includes nullable structured joins stored via
+    `local.set` in `local-set-subset`, carried through `local` / `global` / `table` storage into
+    later `call_ref` consumers in `typed-call-ref-subset`, fed through non-null function-result
+    boundaries in `return-subset`, and widened passive-element / `table.init` nullability coverage
+    in `elem-table-init-subset` and `table-init-subset`.
+    New raw fixtures now pin valid structured-join storage/dataflow through locals, globals, and
+    tables into later `call_ref`, plus passive-element and `table.init` nullable flows from
+    non-null producers. Exact-offset invalids now pin nullable structured-join values escaping
+    local/global/table storage into non-null function results, nullable structured joins stored into
+    non-null locals, nullable passive-element expressions consumed as non-null typed refs, and
+    nullable typed element segments targeting non-null tables.
+    Representative raw fixtures and unit tests now pin `typed-local-set-if-nullable`,
+    `typed-local-if-nullable-to-call-ref`, `typed-global-if-nullable-to-call-ref`,
+    `typed-table-if-nullable-to-call-ref`, `typed-passive-element-nullable-from-nonnull`,
+    `typed-table-init-nullable-to-call-ref`, `typed-local-set-if-nullability-mismatch`,
+    `typed-local-if-to-return-nullability-mismatch`,
+    `typed-global-if-to-return-nullability-mismatch`,
+    `typed-table-if-to-return-nullability-mismatch`,
+    `typed-passive-element-nullability-mismatch`, and
+    `typed-table-init-nullability-mismatch`.
   - `ref.as_non_null` support now also includes decoding plus validation grounding via new
     `ref-as-non-null-subset` upstream coverage, raw valid
     `valid/ref-as-non-null-call-ref.wasm`, and raw invalid
@@ -646,7 +668,7 @@ Baedeker’s own revised definition.
 - Validation diagnostics are now precise and regression-pinned across a broad raw corpus with exact
   `offset=` metadata and decode-vs-validate separation.
 - The active upstream-derived lane remains **zero-skip** while covering **87** curated
-  `wast-upstream` files and **544** upstream directives.
+  `wast-upstream` files and **556** upstream directives.
 - Compile-time external parity is in the regular loop via Node/V8 for the active supported raw and
   upstream-derived surface.
 - Typed function references, tail calls, null branches, `ref.as_non_null`, const/init flows, and a
@@ -678,12 +700,12 @@ Baedeker’s own revised definition.
 - `cargo test -p baedeker-core --test spec_node`
 - `cargo test -p baedeker-core`
 - `cargo clippy -p baedeker-core --all-targets -- -D warnings`
-- Current `baedeker-core` unit test count: **458 passing**
+- Current `baedeker-core` unit test count: **470 passing**
 - Current spec-harness integration tests: **8 passing** (`spec`: 3, `spec_wast`: 2, `spec_node`: 3)
 - Current corpus snapshot:
-  - `wast-upstream`: **87** active files / **544** directives
-  - raw `valid`: **191** fixtures
-  - raw `invalid-validate`: **150** fixtures
+  - `wast-upstream`: **87** active files / **556** directives
+  - raw `valid`: **197** fixtures
+  - raw `invalid-validate`: **156** fixtures
   - raw `invalid-decode`: **34** fixtures
   - custom `spec/wast`: **17** files
 - `spec_node` adds a Node/V8 compile-time cross-check over the raw fixture corpus plus the active

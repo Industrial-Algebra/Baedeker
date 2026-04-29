@@ -138,6 +138,61 @@
         (else
           (ref.null $t0))))))
 
+(module
+  (type $t0 (func (param i32) (result i32)))
+  (func $f (type $t0)
+    (local.get 0))
+  (export "f" (func $f))
+  (func (param $c i32) (param $x i32) (result i32)
+    (local $r (ref null $t0))
+    (local.set $r
+      (if (result (ref null $t0))
+        (local.get $c)
+        (then
+          (ref.func $f))
+        (else
+          (ref.null $t0))))
+    (call_ref $t0
+      (local.get $x)
+      (local.get $r))))
+
+(module
+  (type $t0 (func (param i32) (result i32)))
+  (func $f (type $t0)
+    (local.get 0))
+  (export "f" (func $f))
+  (global $g (mut (ref null $t0)) (ref.null $t0))
+  (func (param $c i32) (param $x i32) (result i32)
+    (global.set $g
+      (if (result (ref null $t0))
+        (local.get $c)
+        (then
+          (ref.func $f))
+        (else
+          (ref.null $t0))))
+    (call_ref $t0
+      (local.get $x)
+      (global.get $g))))
+
+(module
+  (type $t0 (func (param i32) (result i32)))
+  (func $f (type $t0)
+    (local.get 0))
+  (export "f" (func $f))
+  (table $t 1 (ref null $t0))
+  (func (param $c i32) (param $x i32) (result i32)
+    (table.set $t
+      (i32.const 0)
+      (if (result (ref null $t0))
+        (local.get $c)
+        (then
+          (ref.func $f))
+        (else
+          (ref.null $t0))))
+    (call_ref $t0
+      (local.get $x)
+      (table.get $t (i32.const 0)))))
+
 (assert_invalid
   (module
     (type $t0 (func (param i32) (result i32)))

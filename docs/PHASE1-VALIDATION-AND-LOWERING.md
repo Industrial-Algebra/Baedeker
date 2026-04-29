@@ -657,6 +657,28 @@ fixtures and unit tests now pin `typed-return-if-nullable`, `typed-call-ref-if-n
 `typed-global-set-if-nullability-mismatch`, and
 `typed-table-set-if-nullability-mismatch`.
 
+A further typed nullability storage/dataflow sweep then widened structured-join coverage across
+locals, globals, and tables, while extending nullability pressure through passive element and
+`table.init` flows. Active official grounding now includes nullable structured joins stored via
+`local.set` in `local-set-subset`, carried through `local` / `global` / `table` storage into later
+`call_ref` consumers in `typed-call-ref-subset`, fed through non-null function-result boundaries
+in `return-subset`, and widened passive-element / `table.init` nullability coverage in
+`elem-table-init-subset` and `table-init-subset`. New raw fixtures now pin valid structured-join
+storage/dataflow through locals, globals, and tables into later `call_ref`, plus passive-element
+and `table.init` nullable flows from non-null producers. Exact-offset invalids now pin nullable
+structured-join values escaping local/global/table storage into non-null function results,
+nullable structured joins stored into non-null locals, nullable passive-element expressions
+consumed as non-null typed refs, and nullable typed element segments targeting non-null tables.
+Representative raw fixtures and unit tests now pin `typed-local-set-if-nullable`,
+`typed-local-if-nullable-to-call-ref`, `typed-global-if-nullable-to-call-ref`,
+`typed-table-if-nullable-to-call-ref`, `typed-passive-element-nullable-from-nonnull`,
+`typed-table-init-nullable-to-call-ref`, `typed-local-set-if-nullability-mismatch`,
+`typed-local-if-to-return-nullability-mismatch`,
+`typed-global-if-to-return-nullability-mismatch`,
+`typed-table-if-to-return-nullability-mismatch`,
+`typed-passive-element-nullability-mismatch`, and
+`typed-table-init-nullability-mismatch`.
+
 `ref.as_non_null` now also has dedicated grounding via `ref-as-non-null-subset`, along with raw
 valid fixture `ref-as-non-null-call-ref.wasm` and raw invalid fixture
 `ref-as-non-null-non-ref-input.wasm`. Within the current bounded typed-reference model it accepts
@@ -682,9 +704,9 @@ broadly grounded and structurally stable.
   `invalid-validate` fails after decoding, and decode-preserving body failures are pinned through
   `ValidationErrorKind::Decode { context, kind }`.
 - The active upstream-derived lane is zero-skip and now covers **87** curated upstream subset files
-  with **544** directives, all enforced in both `spec_wast` and `spec_node`.
+  with **556** directives, all enforced in both `spec_wast` and `spec_node`.
 - The raw corpus is now large enough to act as a real regression floor:
-  **191** valid fixtures, **150** invalid-validate fixtures, and **34** invalid-decode fixtures.
+  **197** valid fixtures, **156** invalid-validate fixtures, and **34** invalid-decode fixtures.
 - The typed-function-reference / tail-call / nullability / const-init / table-global-element
   campaigns all broadened coverage without forcing architecture drift away from the current
   spec-facing validator model.

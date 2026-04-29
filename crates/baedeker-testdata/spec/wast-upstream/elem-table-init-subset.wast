@@ -18,6 +18,14 @@
   (func $f)
   (elem (table $t1) (global.get $ofs) func $f))
 
+(module
+  (type $t0 (func (param i32) (result i32)))
+  (func $f (type $t0)
+    (local.get 0))
+  (export "f" (func $f))
+  (elem (ref null $t0)
+    (ref.func $f)))
+
 (assert_invalid
   (module
     (global $ofs (import "test" "g") (mut i32))
@@ -35,6 +43,16 @@
     (table 1 externref)
     (func $f)
     (elem (table 1) (i32.const 0) funcref (global.get 0)))
+  "type mismatch"
+)
+
+(assert_invalid
+  (module
+    (type $t0 (func (param i32) (result i32)))
+    (global $g (ref null $t0)
+      (ref.null $t0))
+    (elem (ref $t0)
+      (global.get $g)))
   "type mismatch"
 )
 

@@ -82,6 +82,64 @@
 )
 
 (assert_invalid
+  (module
+    (type $t0 (func (param i32) (result i32)))
+    (func $f (type $t0)
+      (local.get 0))
+    (export "f" (func $f))
+    (func (param $c i32) (result (ref $t0))
+      (local $r (ref null $t0))
+      (local.set $r
+        (if (result (ref null $t0))
+          (local.get $c)
+          (then
+            (ref.func $f))
+          (else
+            (ref.null $t0))))
+      (local.get $r)))
+  "type mismatch"
+)
+
+(assert_invalid
+  (module
+    (type $t0 (func (param i32) (result i32)))
+    (func $f (type $t0)
+      (local.get 0))
+    (export "f" (func $f))
+    (global $g (mut (ref null $t0)) (ref.null $t0))
+    (func (param $c i32) (result (ref $t0))
+      (global.set $g
+        (if (result (ref null $t0))
+          (local.get $c)
+          (then
+            (ref.func $f))
+          (else
+            (ref.null $t0))))
+      (global.get $g)))
+  "type mismatch"
+)
+
+(assert_invalid
+  (module
+    (type $t0 (func (param i32) (result i32)))
+    (func $f (type $t0)
+      (local.get 0))
+    (export "f" (func $f))
+    (table $t 1 (ref null $t0))
+    (func (param $c i32) (result (ref $t0))
+      (table.set $t
+        (i32.const 0)
+        (if (result (ref null $t0))
+          (local.get $c)
+          (then
+            (ref.func $f))
+          (else
+            (ref.null $t0))))
+      (table.get $t (i32.const 0))))
+  "type mismatch"
+)
+
+(assert_invalid
   (module (func $type-value-empty-vs-num (result i32) (return)))
   "type mismatch"
 )

@@ -6992,6 +6992,24 @@ mod tests {
     }
 
     #[test]
+    fn validate_typed_local_set_if_nullable_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/typed-local-set-if-nullable.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_typed_local_if_nullable_to_call_ref_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/typed-local-if-nullable-to-call-ref.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
     fn validate_typed_global_set_if_nullable_official_case() {
         let bytes = include_bytes!(
             "../../../baedeker-testdata/spec/valid/typed-global-set-if-nullable.wasm",
@@ -7001,9 +7019,45 @@ mod tests {
     }
 
     #[test]
+    fn validate_typed_global_if_nullable_to_call_ref_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/typed-global-if-nullable-to-call-ref.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
     fn validate_typed_table_set_if_nullable_official_case() {
         let bytes = include_bytes!(
             "../../../baedeker-testdata/spec/valid/typed-table-set-if-nullable.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_typed_table_if_nullable_to_call_ref_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/typed-table-if-nullable-to-call-ref.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_typed_passive_element_nullable_from_nonnull_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/typed-passive-element-nullable-from-nonnull.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_typed_table_init_nullable_to_call_ref_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/typed-table-init-nullable-to-call-ref.wasm",
         );
         let module = Module::decode(bytes).unwrap();
         module.validate().unwrap();
@@ -7819,6 +7873,50 @@ mod tests {
     }
 
     #[test]
+    fn reject_typed_local_set_if_nullability_mismatch() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/typed-local-set-if-nullability-mismatch.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(56));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::TypeMismatch { op, expected, found }
+                if op == "local.set"
+                    && expected == ValType::Ref(RefType::Typed {
+                        nullable: false,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })
+                    && found == ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })
+        ));
+    }
+
+    #[test]
+    fn reject_typed_local_if_to_return_nullability_mismatch() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/typed-local-if-to-return-nullability-mismatch.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(62));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::FunctionResultTypeMismatch { expected, found, .. }
+                if expected == vec![ValType::Ref(RefType::Typed {
+                    nullable: false,
+                    heap: crate::types::HeapType::Type(TypeIdx(0)),
+                })] && found == vec![ValType::Ref(RefType::Typed {
+                    nullable: true,
+                    heap: crate::types::HeapType::Type(TypeIdx(0)),
+                })]
+        ));
+    }
+
+    #[test]
     fn reject_typed_global_set_if_nullability_mismatch() {
         let bytes = include_bytes!(
             "../../../baedeker-testdata/spec/invalid-validate/typed-global-set-if-nullability-mismatch.wasm",
@@ -7842,6 +7940,27 @@ mod tests {
     }
 
     #[test]
+    fn reject_typed_global_if_to_return_nullability_mismatch() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/typed-global-if-to-return-nullability-mismatch.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(68));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::FunctionResultTypeMismatch { expected, found, .. }
+                if expected == vec![ValType::Ref(RefType::Typed {
+                    nullable: false,
+                    heap: crate::types::HeapType::Type(TypeIdx(0)),
+                })] && found == vec![ValType::Ref(RefType::Typed {
+                    nullable: true,
+                    heap: crate::types::HeapType::Type(TypeIdx(0)),
+                })]
+        ));
+    }
+
+    #[test]
     fn reject_typed_table_set_if_nullability_mismatch() {
         let bytes = include_bytes!(
             "../../../baedeker-testdata/spec/invalid-validate/typed-table-set-if-nullability-mismatch.wasm",
@@ -7861,6 +7980,71 @@ mod tests {
                         nullable: true,
                         heap: crate::types::HeapType::Type(TypeIdx(0)),
                     })
+        ));
+    }
+
+    #[test]
+    fn reject_typed_table_if_to_return_nullability_mismatch() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/typed-table-if-to-return-nullability-mismatch.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(70));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::FunctionResultTypeMismatch { expected, found, .. }
+                if expected == vec![ValType::Ref(RefType::Typed {
+                    nullable: false,
+                    heap: crate::types::HeapType::Type(TypeIdx(0)),
+                })] && found == vec![ValType::Ref(RefType::Typed {
+                    nullable: true,
+                    heap: crate::types::HeapType::Type(TypeIdx(0)),
+                })]
+        ));
+    }
+
+    #[test]
+    fn reject_typed_passive_element_nullability_mismatch() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/typed-passive-element-nullability-mismatch.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(32));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::ElementExprTypeMismatch { expected, found }
+                if expected == ValType::Ref(RefType::Typed {
+                    nullable: false,
+                    heap: crate::types::HeapType::Type(TypeIdx(0)),
+                })
+                    && found == ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })
+        ));
+    }
+
+    #[test]
+    fn reject_typed_table_init_nullability_mismatch() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/typed-table-init-nullability-mismatch.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(71));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::ElementTableTypeMismatch { expected, found }
+                if expected == RefType::Typed {
+                    nullable: false,
+                    heap: crate::types::HeapType::Type(TypeIdx(0)),
+                }
+                    && found == RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    }
         ));
     }
 
