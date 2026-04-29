@@ -5820,6 +5820,38 @@ mod tests {
     }
 
     #[test]
+    fn validate_typed_table_init_shared_source_to_br_if_nullable_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/typed-table-init-shared-source-to-br-if-nullable.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn reject_typed_table_init_shared_source_to_br_if_nullability_mismatch() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/typed-table-init-shared-source-to-br-if-nullability-mismatch.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(100));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::BranchTypeMismatch { label, expected, found }
+                if label == crate::types::LabelIdx(0)
+                    && expected == vec![ValType::Ref(RefType::Typed {
+                        nullable: false,
+                        heap: crate::types::HeapType::Type(TypeIdx(1)),
+                    })]
+                    && found == vec![ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(1)),
+                    })]
+        ));
+    }
+
+    #[test]
     fn validate_typed_br_to_loop_param_with_equivalent_signature() {
         let bytes = [
             0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x17, 0x04, 0x60, 0x01, 0x7f,
@@ -7145,6 +7177,15 @@ mod tests {
     }
 
     #[test]
+    fn validate_typed_table_init_shared_source_to_global_set_nullable_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/typed-table-init-shared-source-to-global-set-nullable.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
     fn validate_typed_global_if_nullable_to_call_ref_official_case() {
         let bytes = include_bytes!(
             "../../../baedeker-testdata/spec/valid/typed-global-if-nullable-to-call-ref.wasm",
@@ -7690,6 +7731,36 @@ mod tests {
     }
 
     #[test]
+    fn validate_typed_table_init_shared_source_to_return_nullable_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/typed-table-init-shared-source-to-return-nullable.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn reject_typed_table_init_shared_source_to_return_nullability_mismatch() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/typed-table-init-shared-source-to-return-nullability-mismatch.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(94));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::ControlResultTypeMismatch { expected, found }
+                if expected == vec![ValType::Ref(RefType::Typed {
+                    nullable: false,
+                    heap: crate::types::HeapType::Type(TypeIdx(1)),
+                })] && found == vec![ValType::Ref(RefType::Typed {
+                    nullable: true,
+                    heap: crate::types::HeapType::Type(TypeIdx(1)),
+                })]
+        ));
+    }
+
+    #[test]
     fn validate_return_call_ref() {
         let bytes = [
             0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7F,
@@ -7734,6 +7805,15 @@ mod tests {
     fn validate_typed_table_init_to_return_call_ref_result_nullable_official_case() {
         let bytes = include_bytes!(
             "../../../baedeker-testdata/spec/valid/typed-table-init-to-return-call-ref-result-nullable.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_typed_table_init_shared_source_to_return_call_ref_nullable_official_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/typed-table-init-shared-source-to-return-call-ref-nullable.wasm",
         );
         let module = Module::decode(bytes).unwrap();
         module.validate().unwrap();
@@ -7812,6 +7892,27 @@ mod tests {
         let module = Module::decode(bytes).unwrap();
         let err = module.validate().unwrap_err();
         assert_eq!(err.offset, ByteOffset(98));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::ResultTypeMismatch { expected, found }
+                if expected == vec![ValType::Ref(RefType::Typed {
+                    nullable: false,
+                    heap: crate::types::HeapType::Type(TypeIdx(0)),
+                })] && found == vec![ValType::Ref(RefType::Typed {
+                    nullable: true,
+                    heap: crate::types::HeapType::Type(TypeIdx(0)),
+                })]
+        ));
+    }
+
+    #[test]
+    fn reject_typed_table_init_shared_source_to_return_call_ref_nullability_mismatch() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/typed-table-init-shared-source-to-return-call-ref-nullability-mismatch.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(94));
         assert!(matches!(
             err.kind,
             ValidationErrorKind::ResultTypeMismatch { expected, found }
@@ -8130,6 +8231,29 @@ mod tests {
                     && found == ValType::Ref(RefType::Typed {
                         nullable: true,
                         heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })
+        ));
+    }
+
+    #[test]
+    fn reject_typed_table_init_shared_source_to_global_set_nullability_mismatch() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/typed-table-init-shared-source-to-global-set-nullability-mismatch.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(98));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::TypeMismatch { op, expected, found }
+                if op == "global.set"
+                    && expected == ValType::Ref(RefType::Typed {
+                        nullable: false,
+                        heap: crate::types::HeapType::Type(TypeIdx(1)),
+                    })
+                    && found == ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(1)),
                     })
         ));
     }

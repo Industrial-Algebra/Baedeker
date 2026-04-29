@@ -723,6 +723,24 @@ Representative raw fixtures and unit tests now pin
 `typed-table-init-to-br-if-nullability-mismatch`, and
 `typed-table-init-to-br-table-nullability-mismatch`.
 
+A follow-on shared-source nullability sweep then widened mixed terminal-consumer pressure across
+`return`, `return_call_ref`, `br_if`, and `global.set` when all four consume the same
+table-initialized nullable callee reference cached in a local before final use. Active official
+grounding now includes shared-source terminal coverage in `return-subset`,
+`typed-return-call-ref-subset`, `br-if-subset`, and `typed-table-ref-subset`. New raw fixtures now
+pin valid shared-source nullable flows into each terminal consumer, while exact-offset invalids pin
+the final blame site for the same transported source: `return` rejects at
+`ControlResultTypeMismatch`, `return_call_ref` rejects at `ResultTypeMismatch`, `br_if` rejects at
+`BranchTypeMismatch`, and `global.set` rejects at `TypeMismatch`. Representative raw fixtures and
+unit tests now pin `typed-table-init-shared-source-to-return-nullable`,
+`typed-table-init-shared-source-to-return-call-ref-nullable`,
+`typed-table-init-shared-source-to-br-if-nullable`,
+`typed-table-init-shared-source-to-global-set-nullable`,
+`typed-table-init-shared-source-to-return-nullability-mismatch`,
+`typed-table-init-shared-source-to-return-call-ref-nullability-mismatch`,
+`typed-table-init-shared-source-to-br-if-nullability-mismatch`, and
+`typed-table-init-shared-source-to-global-set-nullability-mismatch`.
+
 `ref.as_non_null` now also has dedicated grounding via `ref-as-non-null-subset`, along with raw
 valid fixture `ref-as-non-null-call-ref.wasm` and raw invalid fixture
 `ref-as-non-null-non-ref-input.wasm`. Within the current bounded typed-reference model it accepts
@@ -748,9 +766,9 @@ broadly grounded and structurally stable.
   `invalid-validate` fails after decoding, and decode-preserving body failures are pinned through
   `ValidationErrorKind::Decode { context, kind }`.
 - The active upstream-derived lane is zero-skip and now covers **87** curated upstream subset files
-  with **573** directives, all enforced in both `spec_wast` and `spec_node`.
+  with **581** directives, all enforced in both `spec_wast` and `spec_node`.
 - The raw corpus is now large enough to act as a real regression floor:
-  **206** valid fixtures, **165** invalid-validate fixtures, and **34** invalid-decode fixtures.
+  **210** valid fixtures, **169** invalid-validate fixtures, and **34** invalid-decode fixtures.
 - The typed-function-reference / tail-call / nullability / const-init / table-global-element
   campaigns all broadened coverage without forcing architecture drift away from the current
   spec-facing validator model.
