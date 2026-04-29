@@ -57,6 +57,67 @@
     (return_call_indirect (type $callee)
       (i32.const 0))))
 
+(module
+  (type $t0 (func (param i32) (result i32)))
+  (type $src (func (result (ref null $t0))))
+  (type $callee (func (param (ref null $t0)) (result (ref null $t0))))
+  (func $f (type $t0)
+    (local.get 0))
+  (func $g (type $src)
+    (ref.null $t0))
+  (func $id (type $callee)
+    (local.get 0))
+  (global $gref (ref null $src)
+    (ref.func $g))
+  (table $ft 1 funcref)
+  (table $src-table 1 (ref null $src))
+  (elem funcref
+    (ref.func $id))
+  (elem (ref null $src)
+    (global.get $gref))
+  (func (result (ref null $t0))
+    (local $r (ref null $t0))
+    (table.init $ft 0 (i32.const 0) (i32.const 0) (i32.const 1))
+    (table.init $src-table 1 (i32.const 0) (i32.const 0) (i32.const 1))
+    (local.set $r
+      (call_ref $src
+        (table.get $src-table (i32.const 0))))
+    (return_call_indirect (type $callee)
+      (local.get $r)
+      (i32.const 0))))
+
+(assert_invalid
+  (module
+    (type $t0 (func (param i32) (result i32)))
+    (type $src (func (result (ref null $t0))))
+    (type $callee (func (param (ref null $t0)) (result (ref null $t0))))
+    (func $f (type $t0)
+      (local.get 0))
+    (func $g (type $src)
+      (ref.null $t0))
+    (func $id (type $callee)
+      (local.get 0))
+    (global $gref (ref null $src)
+      (ref.func $g))
+    (table $ft 1 funcref)
+    (table $src-table 1 (ref null $src))
+    (elem funcref
+      (ref.func $id))
+    (elem (ref null $src)
+      (global.get $gref))
+    (func (result (ref $t0))
+      (local $r (ref null $t0))
+      (table.init $ft 0 (i32.const 0) (i32.const 0) (i32.const 1))
+      (table.init $src-table 1 (i32.const 0) (i32.const 0) (i32.const 1))
+      (local.set $r
+        (call_ref $src
+          (table.get $src-table (i32.const 0))))
+      (return_call_indirect (type $callee)
+        (local.get $r)
+        (i32.const 0))))
+  "type mismatch"
+)
+
 (assert_invalid
   (module
     (type $t0 (func (param i32) (result i32)))

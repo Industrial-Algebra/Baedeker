@@ -741,6 +741,21 @@ unit tests now pin `typed-table-init-shared-source-to-return-nullable`,
 `typed-table-init-shared-source-to-br-if-nullability-mismatch`, and
 `typed-table-init-shared-source-to-global-set-nullability-mismatch`.
 
+A final shared-source sweep across the remaining terminal family then widened the same cached
+transport pattern into `br`, `br_table`, and `return_call_indirect`. Active official grounding now
+includes shared-source terminal coverage in `br-subset`, `br-table-subset`, and
+`return-call-indirect-subset`, where the transported nullable value is first cached in a local and
+only then consumed by the final terminal operator. New raw fixtures now pin valid shared-source
+nullable flows into `br`, `br_table`, and `return_call_indirect`, while exact-offset invalids again
+pin the final blame site rather than the shared transport path: `br` and `br_table` reject at
+`BranchTypeMismatch`, and `return_call_indirect` rejects at `ResultTypeMismatch`. Representative
+raw fixtures and unit tests now pin `typed-table-init-shared-source-to-br-nullable`,
+`typed-table-init-shared-source-to-br-table-nullable`,
+`typed-table-init-shared-source-to-return-call-indirect-result-nullable`,
+`typed-table-init-shared-source-to-br-nullability-mismatch`,
+`typed-table-init-shared-source-to-br-table-nullability-mismatch`, and
+`typed-table-init-shared-source-to-return-call-indirect-result-nullability-mismatch`.
+
 `ref.as_non_null` now also has dedicated grounding via `ref-as-non-null-subset`, along with raw
 valid fixture `ref-as-non-null-call-ref.wasm` and raw invalid fixture
 `ref-as-non-null-non-ref-input.wasm`. Within the current bounded typed-reference model it accepts
@@ -766,9 +781,9 @@ broadly grounded and structurally stable.
   `invalid-validate` fails after decoding, and decode-preserving body failures are pinned through
   `ValidationErrorKind::Decode { context, kind }`.
 - The active upstream-derived lane is zero-skip and now covers **87** curated upstream subset files
-  with **581** directives, all enforced in both `spec_wast` and `spec_node`.
+  with **587** directives, all enforced in both `spec_wast` and `spec_node`.
 - The raw corpus is now large enough to act as a real regression floor:
-  **210** valid fixtures, **169** invalid-validate fixtures, and **34** invalid-decode fixtures.
+  **213** valid fixtures, **172** invalid-validate fixtures, and **34** invalid-decode fixtures.
 - The typed-function-reference / tail-call / nullability / const-init / table-global-element
   campaigns all broadened coverage without forcing architecture drift away from the current
   spec-facing validator model.

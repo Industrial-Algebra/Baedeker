@@ -426,6 +426,53 @@
         (table.get $t (i32.const 0))
         (i32.const 0)))))
 
+(module
+  (type $t0 (func (param i32) (result i32)))
+  (type $callee (func (result (ref null $t0))))
+  (func $f (type $t0)
+    (local.get 0))
+  (func $g (type $callee)
+    (ref.null $t0))
+  (global $gref (ref null $callee)
+    (ref.func $g))
+  (table $t 1 (ref null $callee))
+  (elem (ref null $callee)
+    (global.get $gref))
+  (func (result (ref null $callee))
+    (local $r (ref null $callee))
+    (block (result (ref null $callee))
+      (table.init $t 0 (i32.const 0) (i32.const 0) (i32.const 1))
+      (local.set $r
+        (table.get $t (i32.const 0)))
+      (br_table 0 0
+        (local.get $r)
+        (i32.const 0)))))
+
+(assert_invalid
+  (module
+    (type $t0 (func (param i32) (result i32)))
+    (type $callee (func (result (ref null $t0))))
+    (func $f (type $t0)
+      (local.get 0))
+    (func $g (type $callee)
+      (ref.null $t0))
+    (global $gref (ref null $callee)
+      (ref.func $g))
+    (table $t 1 (ref null $callee))
+    (elem (ref null $callee)
+      (global.get $gref))
+    (func (result (ref $callee))
+      (local $r (ref null $callee))
+      (block (result (ref $callee))
+        (table.init $t 0 (i32.const 0) (i32.const 0) (i32.const 1))
+        (local.set $r
+          (table.get $t (i32.const 0)))
+        (br_table 0 0
+          (local.get $r)
+          (i32.const 0)))))
+  "type mismatch"
+)
+
 (assert_invalid
   (module
     (type $t0 (func (param i32) (result i32)))
