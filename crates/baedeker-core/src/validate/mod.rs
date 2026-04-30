@@ -81,8 +81,8 @@ fn validate_type_definitions(module: &Module<'_>) -> Result<(), ValidationError>
         .map(|section| section.offset)
         .unwrap_or(0);
 
-    for ty in &module.types {
-        validate_func_type_type_indices(module, ty, None, offset)?;
+    for (idx, ty) in module.types.iter().enumerate() {
+        validate_func_type_definition_type_indices(module, TypeIdx(idx as u32), ty, offset)?;
     }
 
     Ok(())
@@ -2984,17 +2984,17 @@ fn reftype_equivalent_inner(
         }
 }
 
-fn validate_func_type_type_indices(
+fn validate_func_type_definition_type_indices(
     module: &Module<'_>,
+    current_type: TypeIdx,
     ty: &FuncType,
-    function: Option<FuncIdx>,
     offset: usize,
 ) -> Result<(), ValidationError> {
     for &param in &ty.params {
-        validate_valtype_type_indices(module, param, function, offset)?;
+        validate_valtype_type_indices_in_type_definition(module, current_type, param, offset)?;
     }
     for &result in &ty.results {
-        validate_valtype_type_indices(module, result, function, offset)?;
+        validate_valtype_type_indices_in_type_definition(module, current_type, result, offset)?;
     }
     Ok(())
 }
@@ -3011,6 +3011,18 @@ fn validate_valtype_type_indices(
     Ok(())
 }
 
+fn validate_valtype_type_indices_in_type_definition(
+    module: &Module<'_>,
+    current_type: TypeIdx,
+    ty: ValType,
+    offset: usize,
+) -> Result<(), ValidationError> {
+    if let ValType::Ref(ref_type) = ty {
+        validate_reftype_type_indices_in_type_definition(module, current_type, ref_type, offset)?;
+    }
+    Ok(())
+}
+
 fn validate_reftype_type_indices(
     module: &Module<'_>,
     ty: RefType,
@@ -3023,6 +3035,25 @@ fn validate_reftype_type_indices(
         return Err(ValidationError {
             offset: ByteOffset(offset),
             function,
+            kind: ValidationErrorKind::UnknownTypeIdx { idx },
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_reftype_type_indices_in_type_definition(
+    module: &Module<'_>,
+    current_type: TypeIdx,
+    ty: RefType,
+    offset: usize,
+) -> Result<(), ValidationError> {
+    if let crate::types::HeapType::Type(idx) = ty.heap_type()
+        && (idx.0 > current_type.0 || module.types.get(idx.0 as usize).is_none())
+    {
+        return Err(ValidationError {
+            offset: ByteOffset(offset),
+            function: None,
             kind: ValidationErrorKind::UnknownTypeIdx { idx },
         });
     }
@@ -3843,6 +3874,20 @@ mod tests {
         let module = Module::decode(&bytes).unwrap();
         let err = module.validate().unwrap_err();
         assert_eq!(err.offset, ByteOffset(23));
+        assert!(matches!(
+            err.kind,
+            ValidationErrorKind::UnknownTypeIdx { idx: TypeIdx(1) }
+        ));
+    }
+
+    #[test]
+    fn reject_forward_type_reference_outside_rec_group() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-validate/type-forward-ref-outside-rec-group.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        let err = module.validate().unwrap_err();
+        assert_eq!(err.offset, ByteOffset(10));
         assert!(matches!(
             err.kind,
             ValidationErrorKind::UnknownTypeIdx { idx: TypeIdx(1) }
@@ -5859,6 +5904,14 @@ mod tests {
     fn validate_official_switch_arg_case() {
         let bytes =
             include_bytes!("../../../baedeker-testdata/spec/valid/official-switch-arg.wasm",);
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_official_ref_typed_syntax_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/official-ref-typed-syntax.wasm",);
         let module = Module::decode(bytes).unwrap();
         module.validate().unwrap();
     }
