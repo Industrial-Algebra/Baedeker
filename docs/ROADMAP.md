@@ -676,6 +676,40 @@ interpreter-first with AOT as a future layer.
     `typed-table-init-shared-source-to-br-nullability-mismatch`,
     `typed-table-init-shared-source-to-br-table-nullability-mismatch`, and
     `typed-table-init-shared-source-to-return-call-indirect-result-nullability-mismatch`.
+  - Checkpoint 1 closure work then resumed the adjacent official validation-only lane by densifying
+    `labels-subset` with additional supported official control-flow cases drawn from `labels.wast`.
+    Active official grounding now includes loop-result labels, `br_if` result threading through
+    nested blocks, label shadowing, and nested `br_table` label routing from the official labels
+    file, backed by raw valid fixtures for representative labels/switch shapes.
+    Representative raw fixtures and unit tests now pin `official-labels-loop5`,
+    `official-labels-loop6`, `official-labels-br-if1`, `official-labels-br-if2`,
+    `official-labels-shadowing`, `official-labels-switch`, and `official-switch-corner`.
+  - Checkpoint 1 then widened that same official validation-only lane again with a denser
+    labels/control batch: `labels-subset` now also carries official `block`, `loop1`, `loop2`,
+    `if`, `return`, `br_if0`, and `br` shapes from `labels.wast`, while `switch-subset` now also
+    carries the official statement-style `br_table` tower from `switch.wast`.
+    Representative raw fixtures and unit tests now pin `official-labels-block`,
+    `official-labels-loop1`, `official-labels-loop2`, `official-labels-if`,
+    `official-labels-return`, `official-labels-br-if0`, `official-labels-br`, and
+    `official-switch-stmt`.
+  - Checkpoint 1 then extended the same official lane once more with adjacent loop/if/branch
+    shapes from `labels.wast` plus the expression-style switch tower from `switch.wast`.
+    `labels-subset` now also carries official `loop3`, `loop4`, `if2`, and `br_if3`, while
+    `switch-subset` now also carries the official `expr` case.
+    Representative raw fixtures and unit tests now pin `official-labels-loop3`,
+    `official-labels-loop4`, `official-labels-if2`, `official-labels-br-if3`, and
+    `official-switch-expr`. The remaining adjacent blockers stayed explicit during scouting, so
+    neither the official `labels` `redefinition` case nor the official `switch` `arg` case was
+    activated prematurely.
+  - Checkpoint 1 then closed the adjacent `labels` redefinition blocker itself. The validator’s
+    frame-closing path now preserves stack-polymorphic result popping relative to the frame being
+    closed, rather than the enclosing frame, so same-frame branches no longer consume outer
+    operands while materializing block results.
+    `labels-subset` now also carries the official `redefinition` case, with representative raw
+    fixture and unit test `official-labels-redefinition`.
+  - That same frame-closing / stack-polymorphic fix also closed the adjacent `switch` `arg`
+    blocker. `switch-subset` now also carries the official `arg` case, with representative raw
+    fixture and unit test `official-switch-arg`.
   - `ref.as_non_null` support now also includes decoding plus validation grounding via new
     `ref-as-non-null-subset` upstream coverage, raw valid
     `valid/ref-as-non-null-call-ref.wasm`, and raw invalid
@@ -747,7 +781,7 @@ Baedeker’s own revised definition.
 - Validation diagnostics are now precise and regression-pinned across a broad raw corpus with exact
   `offset=` metadata and decode-vs-validate separation.
 - The active upstream-derived lane remains **zero-skip** while covering **87** curated
-  `wast-upstream` files and **587** upstream directives.
+  `wast-upstream` files and **608** upstream directives.
 - Compile-time external parity is in the regular loop via Node/V8 for the active supported raw and
   upstream-derived surface.
 - Typed function references, tail calls, null branches, `ref.as_non_null`, const/init flows, and a
@@ -779,11 +813,11 @@ Baedeker’s own revised definition.
 - `cargo test -p baedeker-core --test spec_node`
 - `cargo test -p baedeker-core`
 - `cargo clippy -p baedeker-core --all-targets -- -D warnings`
-- Current `baedeker-core` unit test count: **502 passing**
+- Current `baedeker-core` unit test count: **524 passing**
 - Current spec-harness integration tests: **8 passing** (`spec`: 3, `spec_wast`: 2, `spec_node`: 3)
 - Current corpus snapshot:
-  - `wast-upstream`: **87** active files / **587** directives
-  - raw `valid`: **213** fixtures
+  - `wast-upstream`: **87** active files / **608** directives
+  - raw `valid`: **235** fixtures
   - raw `invalid-validate`: **172** fixtures
   - raw `invalid-decode`: **34** fixtures
   - custom `spec/wast`: **17** files
@@ -792,7 +826,7 @@ Baedeker’s own revised definition.
   boundary coverage and are not enforced against Node/V8.
 
 ### Current branch snapshot
-Current Phase 1 closure work continues on `feat/phase-1-part-3-larger-test-batches`, with the
+Current Phase 1 closure work continues on `feat/phase-1-part-4-final-checklist`, with the
 validator and fixture/docs support matrix kept in sync as upstream-derived skips are narrowed or
 retired.
 

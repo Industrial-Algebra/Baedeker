@@ -756,6 +756,42 @@ raw fixtures and unit tests now pin `typed-table-init-shared-source-to-br-nullab
 `typed-table-init-shared-source-to-br-table-nullability-mismatch`, and
 `typed-table-init-shared-source-to-return-call-indirect-result-nullability-mismatch`.
 
+Checkpoint 1 closure work then resumed the adjacent official validation-only lane by densifying
+`labels-subset` with additional supported official control-flow cases drawn from `labels.wast`.
+Active official grounding now includes loop-result labels, `br_if` result threading through nested
+blocks, label shadowing, and nested `br_table` label routing from the official labels file, backed
+by raw valid fixtures for representative labels/switch shapes. Representative raw fixtures and unit
+tests now pin `official-labels-loop5`, `official-labels-loop6`, `official-labels-br-if1`,
+`official-labels-br-if2`, `official-labels-shadowing`, `official-labels-switch`, and
+`official-switch-corner`.
+
+Checkpoint 1 then widened that same official validation-only lane again with a denser
+labels/control batch: `labels-subset` now also carries official `block`, `loop1`, `loop2`, `if`,
+`return`, `br_if0`, and `br` shapes from `labels.wast`, while `switch-subset` now also carries
+the official statement-style `br_table` tower from `switch.wast`. Representative raw fixtures and
+unit tests now pin `official-labels-block`, `official-labels-loop1`, `official-labels-loop2`,
+`official-labels-if`, `official-labels-return`, `official-labels-br-if0`, `official-labels-br`,
+and `official-switch-stmt`.
+
+Checkpoint 1 then extended the same official lane once more with adjacent loop/if/branch shapes
+from `labels.wast` plus the expression-style switch tower from `switch.wast`. `labels-subset` now
+also carries official `loop3`, `loop4`, `if2`, and `br_if3`, while `switch-subset` now also
+carries the official `expr` case. Representative raw fixtures and unit tests now pin
+`official-labels-loop3`, `official-labels-loop4`, `official-labels-if2`,
+`official-labels-br-if3`, and `official-switch-expr`. The remaining adjacent blockers stayed
+explicit during scouting, so neither the official `labels` `redefinition` case nor the official
+`switch` `arg` case was activated prematurely.
+
+Checkpoint 1 then closed the adjacent `labels` redefinition blocker itself. The validator’s
+frame-closing path now preserves stack-polymorphic result popping relative to the frame being
+closed, rather than the enclosing frame, so same-frame branches no longer consume outer operands
+while materializing block results. `labels-subset` now also carries the official `redefinition`
+case, with representative raw fixture and unit test `official-labels-redefinition`.
+
+That same frame-closing / stack-polymorphic fix also closed the adjacent `switch` `arg` blocker.
+`switch-subset` now also carries the official `arg` case, with representative raw fixture and unit
+test `official-switch-arg`.
+
 `ref.as_non_null` now also has dedicated grounding via `ref-as-non-null-subset`, along with raw
 valid fixture `ref-as-non-null-call-ref.wasm` and raw invalid fixture
 `ref-as-non-null-non-ref-input.wasm`. Within the current bounded typed-reference model it accepts
@@ -781,9 +817,9 @@ broadly grounded and structurally stable.
   `invalid-validate` fails after decoding, and decode-preserving body failures are pinned through
   `ValidationErrorKind::Decode { context, kind }`.
 - The active upstream-derived lane is zero-skip and now covers **87** curated upstream subset files
-  with **587** directives, all enforced in both `spec_wast` and `spec_node`.
+  with **608** directives, all enforced in both `spec_wast` and `spec_node`.
 - The raw corpus is now large enough to act as a real regression floor:
-  **213** valid fixtures, **172** invalid-validate fixtures, and **34** invalid-decode fixtures.
+  **235** valid fixtures, **172** invalid-validate fixtures, and **34** invalid-decode fixtures.
 - The typed-function-reference / tail-call / nullability / const-init / table-global-element
   campaigns all broadened coverage without forcing architecture drift away from the current
   spec-facing validator model.

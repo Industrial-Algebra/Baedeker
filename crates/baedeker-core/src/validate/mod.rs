@@ -2857,11 +2857,15 @@ fn finish_frame(
     state: &mut ValidationState,
     offset: usize,
 ) -> Result<(), ValidationError> {
-    let frame = state.pop_frame().ok_or(ValidationError {
-        offset: ByteOffset(offset),
-        function: Some(function),
-        kind: ValidationErrorKind::UnexpectedEnd,
-    })?;
+    let frame = state.current_frame().clone();
+
+    if frame.kind == Function {
+        return Err(ValidationError {
+            offset: ByteOffset(offset),
+            function: Some(function),
+            kind: ValidationErrorKind::UnexpectedEnd,
+        });
+    }
 
     if frame.kind == If && !frame.has_else && !frame.end_types.is_empty() {
         return Err(ValidationError {
@@ -2883,6 +2887,11 @@ fn finish_frame(
     }
 
     pop_control_result_types(function, state, &frame.end_types, offset)?;
+    let _closed = state.pop_frame().ok_or(ValidationError {
+        offset: ByteOffset(offset),
+        function: Some(function),
+        kind: ValidationErrorKind::UnexpectedEnd,
+    })?;
     state.operands.truncate(frame.outer_height);
     state.local_inits = frame.local_inits;
     for ty in frame.end_types {
@@ -3093,7 +3102,7 @@ fn valtype_vec_matches(found: &[ValType], expected: &[ValType]) -> bool {
 
 fn is_stack_polymorphic(state: &ValidationState) -> bool {
     state.reachability == Reachability::Unreachable
-        && state.operands.len() == state.current_frame().stack_floor
+        && state.operands.len() == state.current_frame().outer_height
 }
 
 fn operand_matches(found: OperandType, expected: ValType) -> bool {
@@ -3170,9 +3179,12 @@ fn pop_operand(
     op: &'static str,
     expected: &[ValType],
 ) -> Result<OperandType, ValidationError> {
+    if is_stack_polymorphic(state) {
+        return Ok(OperandType::Bottom);
+    }
+
     match state.operands.pop() {
         Some(found) => Ok(found),
-        None if is_stack_polymorphic(state) => Ok(OperandType::Bottom),
         None => Err(underflow_error(function, state, op, expected, offset)),
     }
 }
@@ -5743,6 +5755,183 @@ mod tests {
         let bytes = include_bytes!(
             "../../../baedeker-testdata/spec/valid/br-table-as-memory-grow-size.wasm",
         );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_official_labels_block_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/official-labels-block.wasm",);
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_official_labels_loop1_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/official-labels-loop1.wasm",);
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_official_labels_loop2_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/official-labels-loop2.wasm",);
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_official_labels_loop3_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/official-labels-loop3.wasm",);
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_official_labels_loop4_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/official-labels-loop4.wasm",);
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_official_labels_if_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/official-labels-if.wasm",);
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_official_labels_if2_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/official-labels-if2.wasm",);
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_official_labels_return_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/official-labels-return.wasm",);
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_official_labels_br_if0_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/official-labels-br-if0.wasm",);
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_official_labels_br_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/official-labels-br.wasm",);
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_official_switch_stmt_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/official-switch-stmt.wasm",);
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_official_switch_expr_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/official-switch-expr.wasm",);
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_official_switch_arg_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/official-switch-arg.wasm",);
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_official_labels_loop5_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/official-labels-loop5.wasm",);
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_official_labels_loop6_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/official-labels-loop6.wasm",);
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_official_labels_br_if1_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/official-labels-br-if1.wasm",);
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_official_labels_br_if2_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/official-labels-br-if2.wasm",);
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_official_labels_br_if3_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/official-labels-br-if3.wasm",);
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_official_labels_shadowing_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/official-labels-shadowing.wasm",);
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_official_labels_redefinition_case() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/valid/official-labels-redefinition.wasm",
+        );
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_official_labels_switch_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/official-labels-switch.wasm",);
+        let module = Module::decode(bytes).unwrap();
+        module.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_official_switch_corner_case() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/official-switch-corner.wasm",);
         let module = Module::decode(bytes).unwrap();
         module.validate().unwrap();
     }
