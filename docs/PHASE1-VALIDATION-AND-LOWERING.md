@@ -792,6 +792,13 @@ That same frame-closing / stack-polymorphic fix also closed the adjacent `switch
 `switch-subset` now also carries the official `arg` case, with representative raw fixture and unit
 test `official-switch-arg`.
 
+A follow-on broader WebAssembly 3.0 type-surface audit then pinned the current bounded-model
+decode boundary for recursive / non-function GC type definitions. Representative raw invalid-
+decode fixtures now cover `rec` groups plus `sub`, `struct`, and `array` type definitions, all
+currently rejected at the type-section functype tag boundary. Node/V8 parity is skipped for these
+fixtures so Baedeker can keep explicit malformed-boundary assertions even though external runtimes
+accept a broader GC-era type space.
+
 `ref.as_non_null` now also has dedicated grounding via `ref-as-non-null-subset`, along with raw
 valid fixture `ref-as-non-null-call-ref.wasm` and raw invalid fixture
 `ref-as-non-null-non-ref-input.wasm`. Within the current bounded typed-reference model it accepts
@@ -819,7 +826,7 @@ broadly grounded and structurally stable.
 - The active upstream-derived lane is zero-skip and now covers **87** curated upstream subset files
   with **608** directives, all enforced in both `spec_wast` and `spec_node`.
 - The raw corpus is now large enough to act as a real regression floor:
-  **235** valid fixtures, **172** invalid-validate fixtures, and **34** invalid-decode fixtures.
+  **235** valid fixtures, **172** invalid-validate fixtures, and **38** invalid-decode fixtures.
 - The typed-function-reference / tail-call / nullability / const-init / table-global-element
   campaigns all broadened coverage without forcing architecture drift away from the current
   spec-facing validator model.

@@ -710,6 +710,12 @@ interpreter-first with AOT as a future layer.
   - That same frame-closing / stack-polymorphic fix also closed the adjacent `switch` `arg`
     blocker. `switch-subset` now also carries the official `arg` case, with representative raw
     fixture and unit test `official-switch-arg`.
+  - A follow-on broader WebAssembly 3.0 type-surface audit then pinned the current bounded-model
+    decode boundary for recursive / non-function GC type definitions. Representative raw invalid-
+    decode fixtures now cover `rec` groups plus `sub`, `struct`, and `array` type definitions,
+    all currently rejected at the type-section functype tag boundary. Node/V8 parity is skipped for
+    these fixtures so Baedeker can keep explicit malformed-boundary assertions even though external
+    runtimes accept a broader GC-era type space.
   - `ref.as_non_null` support now also includes decoding plus validation grounding via new
     `ref-as-non-null-subset` upstream coverage, raw valid
     `valid/ref-as-non-null-call-ref.wasm`, and raw invalid
@@ -813,13 +819,13 @@ Baedeker’s own revised definition.
 - `cargo test -p baedeker-core --test spec_node`
 - `cargo test -p baedeker-core`
 - `cargo clippy -p baedeker-core --all-targets -- -D warnings`
-- Current `baedeker-core` unit test count: **524 passing**
+- Current `baedeker-core` unit test count: **528 passing**
 - Current spec-harness integration tests: **8 passing** (`spec`: 3, `spec_wast`: 2, `spec_node`: 3)
 - Current corpus snapshot:
   - `wast-upstream`: **87** active files / **608** directives
   - raw `valid`: **235** fixtures
   - raw `invalid-validate`: **172** fixtures
-  - raw `invalid-decode`: **34** fixtures
+  - raw `invalid-decode`: **38** fixtures
   - custom `spec/wast`: **17** files
 - `spec_node` adds a Node/V8 compile-time cross-check over the raw fixture corpus plus the active
   upstream-derived `wast-upstream` subset lane. Custom `spec/wast` cases remain Baedeker-shaped

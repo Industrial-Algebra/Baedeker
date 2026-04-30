@@ -342,6 +342,73 @@ mod tests {
     }
 
     #[test]
+    fn reject_gc_rec_type_group_boundary() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/invalid-decode/gc-rec-type-group.wasm");
+        let err = Module::decode(bytes).unwrap_err();
+        assert_eq!(err.offset, ByteOffset(11));
+        assert_eq!(err.context, crate::error::DecodeContext::TypeSection);
+        assert!(matches!(
+            err.kind,
+            DecodeErrorKind::UnexpectedByte {
+                expected: 0x60,
+                found: 0x4E,
+            }
+        ));
+    }
+
+    #[test]
+    fn reject_gc_sub_type_definition_boundary() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-decode/gc-sub-type-definition.wasm",
+        );
+        let err = Module::decode(bytes).unwrap_err();
+        assert_eq!(err.offset, ByteOffset(11));
+        assert_eq!(err.context, crate::error::DecodeContext::TypeSection);
+        assert!(matches!(
+            err.kind,
+            DecodeErrorKind::UnexpectedByte {
+                expected: 0x60,
+                found: 0x50,
+            }
+        ));
+    }
+
+    #[test]
+    fn reject_gc_struct_type_definition_boundary() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-decode/gc-struct-type-definition.wasm",
+        );
+        let err = Module::decode(bytes).unwrap_err();
+        assert_eq!(err.offset, ByteOffset(11));
+        assert_eq!(err.context, crate::error::DecodeContext::TypeSection);
+        assert!(matches!(
+            err.kind,
+            DecodeErrorKind::UnexpectedByte {
+                expected: 0x60,
+                found: 0x5F,
+            }
+        ));
+    }
+
+    #[test]
+    fn reject_gc_array_type_definition_boundary() {
+        let bytes = include_bytes!(
+            "../../../baedeker-testdata/spec/invalid-decode/gc-array-type-definition.wasm",
+        );
+        let err = Module::decode(bytes).unwrap_err();
+        assert_eq!(err.offset, ByteOffset(11));
+        assert_eq!(err.context, crate::error::DecodeContext::TypeSection);
+        assert!(matches!(
+            err.kind,
+            DecodeErrorKind::UnexpectedByte {
+                expected: 0x60,
+                found: 0x5E,
+            }
+        ));
+    }
+
+    #[test]
     fn decode_empty_fixture() {
         let bytes = baedeker_testdata::fixture_bytes("empty");
         let module = Module::decode(&bytes).unwrap();

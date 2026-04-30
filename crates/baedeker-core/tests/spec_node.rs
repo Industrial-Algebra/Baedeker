@@ -232,6 +232,10 @@ fn raw_expectation(path: &Path) -> RawExpectation {
                     | "unknown-ref-type-in-global-type"
                     | "unknown-ref-type-in-element-type"
                     | "unknown-ref-type-in-local-type"
+                    | "gc-rec-type-group"
+                    | "gc-sub-type-definition"
+                    | "gc-struct-type-definition"
+                    | "gc-array-type-definition"
             ) {
                 RawExpectation::Skip
             } else {
