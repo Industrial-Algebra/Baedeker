@@ -167,7 +167,7 @@ impl ValidationState {
     }
 
     pub fn enter_unreachable(&mut self) {
-        let floor = self.current_frame().stack_floor;
+        let floor = self.current_frame().outer_height;
         self.operands.truncate(floor);
         self.reachability = Reachability::Unreachable;
     }

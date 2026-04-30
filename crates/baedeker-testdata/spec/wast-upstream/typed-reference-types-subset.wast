@@ -1,6 +1,28 @@
 ;; Source fragments:
+;; - https://github.com/WebAssembly/spec/blob/main/test/core/ref.wast
 ;; - https://github.com/WebAssembly/spec/blob/main/test/core/ref_null.wast
 ;; - https://github.com/WebAssembly/spec/blob/main/test/core/call_ref.wast
+
+(module
+  (type $t (func))
+
+  (func
+    (param
+      funcref
+      externref
+      (ref func)
+      (ref extern)
+      (ref 0)
+      (ref $t)
+      (ref 0)
+      (ref $t)
+      (ref null func)
+      (ref null extern)
+      (ref null 0)
+      (ref null $t)
+    )
+  )
+)
 
 (module
   (type $ii (func (param i32) (result i32)))

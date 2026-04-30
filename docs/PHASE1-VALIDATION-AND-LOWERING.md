@@ -756,6 +756,60 @@ raw fixtures and unit tests now pin `typed-table-init-shared-source-to-br-nullab
 `typed-table-init-shared-source-to-br-table-nullability-mismatch`, and
 `typed-table-init-shared-source-to-return-call-indirect-result-nullability-mismatch`.
 
+Checkpoint 1 closure work then resumed the adjacent official validation-only lane by densifying
+`labels-subset` with additional supported official control-flow cases drawn from `labels.wast`.
+Active official grounding now includes loop-result labels, `br_if` result threading through nested
+blocks, label shadowing, and nested `br_table` label routing from the official labels file, backed
+by raw valid fixtures for representative labels/switch shapes. Representative raw fixtures and unit
+tests now pin `official-labels-loop5`, `official-labels-loop6`, `official-labels-br-if1`,
+`official-labels-br-if2`, `official-labels-shadowing`, `official-labels-switch`, and
+`official-switch-corner`.
+
+Checkpoint 1 then widened that same official validation-only lane again with a denser
+labels/control batch: `labels-subset` now also carries official `block`, `loop1`, `loop2`, `if`,
+`return`, `br_if0`, and `br` shapes from `labels.wast`, while `switch-subset` now also carries
+the official statement-style `br_table` tower from `switch.wast`. Representative raw fixtures and
+unit tests now pin `official-labels-block`, `official-labels-loop1`, `official-labels-loop2`,
+`official-labels-if`, `official-labels-return`, `official-labels-br-if0`, `official-labels-br`,
+and `official-switch-stmt`.
+
+Checkpoint 1 then extended the same official lane once more with adjacent loop/if/branch shapes
+from `labels.wast` plus the expression-style switch tower from `switch.wast`. `labels-subset` now
+also carries official `loop3`, `loop4`, `if2`, and `br_if3`, while `switch-subset` now also
+carries the official `expr` case. Representative raw fixtures and unit tests now pin
+`official-labels-loop3`, `official-labels-loop4`, `official-labels-if2`,
+`official-labels-br-if3`, and `official-switch-expr`. The remaining adjacent blockers stayed
+explicit during scouting, so neither the official `labels` `redefinition` case nor the official
+`switch` `arg` case was activated prematurely.
+
+Checkpoint 1 then closed the adjacent `labels` redefinition blocker itself. The validator’s
+frame-closing path now preserves stack-polymorphic result popping relative to the frame being
+closed, rather than the enclosing frame, so same-frame branches no longer consume outer operands
+while materializing block results. `labels-subset` now also carries the official `redefinition`
+case, with representative raw fixture and unit test `official-labels-redefinition`.
+
+That same frame-closing / stack-polymorphic fix also closed the adjacent `switch` `arg` blocker.
+`switch-subset` now also carries the official `arg` case, with representative raw fixture and unit
+test `official-switch-arg`.
+
+A follow-on broader WebAssembly 3.0 type-surface audit then pinned the current bounded-model
+decode boundary for recursive / non-function GC type definitions. Representative raw invalid-
+decode fixtures now cover `rec` groups plus `sub`, `struct`, and `array` type definitions, all
+currently rejected at the type-section functype tag boundary. Node/V8 parity is skipped for these
+fixtures so Baedeker can keep explicit malformed-boundary assertions even though external runtimes
+accept a broader GC-era type space.
+
+The next broader 3.0 audit/classification pass then split the adjacent official recursive/type
+files into currently supportable versus needs-implementation buckets. Curated supportable fragments
+from `ref.wast` are now active in the zero-skip lane: `typed-reference-types-subset` now carries
+the official typed-reference syntax module, while `typed-invalid-typeidx-subset` now carries the
+official unknown-type invalids from `ref.wast` plus the invalid forward-type-reference recursion
+case from `type-equivalence.wast`. At the same time, Baedeker now rejects forward concrete type
+references outside explicit recursive groups via a pinned raw invalid fixture
+`type-forward-ref-outside-rec-group`, while `type-canon.wast` and the explicit-rec / non-function
+portions of `type-rec.wast` remain classified as broader type-system work beyond the current flat
+functype decoder.
+
 `ref.as_non_null` now also has dedicated grounding via `ref-as-non-null-subset`, along with raw
 valid fixture `ref-as-non-null-call-ref.wasm` and raw invalid fixture
 `ref-as-non-null-non-ref-input.wasm`. Within the current bounded typed-reference model it accepts
@@ -771,36 +825,78 @@ reference-typed target label suffix and routes the tested value through that bra
 Historical active upstream files have also been normalized to `-subset.wast` names; for example,
 `ref-func-undeclared-reference-subset.wast` is active coverage rather than a deferred skip.
 
-## Phase 1 closure audit snapshot
+## Phase 1 closure checklist snapshot
 
-Current audit verdict: **Phase 1 is not yet complete**, even though the validation front-end is now
-broadly grounded and structurally stable.
+**Checklist verdict:** Phase 1 is now closed for the current milestone. This does **not** claim
+full recursive/GC-era WebAssembly 3.0 support; it records a stable, verified semantic-validation
+baseline and explicitly defers the remaining recursive / non-function type-system work rather than
+leaving it as silent Phase 1 debt.
 
-### What is already strong enough to carry into Phase 2 later
-- The validator/harness boundary is crisp: raw `invalid-decode` fails at `Module::decode(...)`, raw
-  `invalid-validate` fails after decoding, and decode-preserving body failures are pinned through
-  `ValidationErrorKind::Decode { context, kind }`.
-- The active upstream-derived lane is zero-skip and now covers **87** curated upstream subset files
-  with **587** directives, all enforced in both `spec_wast` and `spec_node`.
-- The raw corpus is now large enough to act as a real regression floor:
-  **213** valid fixtures, **172** invalid-validate fixtures, and **34** invalid-decode fixtures.
-- The typed-function-reference / tail-call / nullability / const-init / table-global-element
-  campaigns all broadened coverage without forcing architecture drift away from the current
-  spec-facing validator model.
+### Checklist status
+1. **Active official-lane semantic blockers removed** — **Done**
+   - Closed the adjacent official `labels` / `switch` blockers (`redefinition`, `arg`) without
+     weakening the zero-skip lane.
+2. **Stable zero-skip official validation baseline established** — **Done**
+   - Active upstream grounding remains **87** files / **622** directives with no active-file skips.
+   - Additional micro-densification is no longer required for Phase 1 closure; if more official
+     slices are added later, they should be real cohorts again rather than checklist tail work.
+3. **Raw malformed/validation regression floor established** — **Done**
+   - Exact-offset metadata, decode-vs-validate separation, decode-preserving validation assertions,
+     and Node/V8 parity exceptions for bounded-model/raw-boundary cases are all in place.
+4. **Broader WebAssembly 3.0 audit/classification completed for the remaining adjacent
+   recursive/type surfaces** — **Done**
+   - **Active now:** supportable slices from `ref.wast` plus the forward-reference invalid from
+     `type-equivalence.wast`.
+   - **Raw-boundary-only in Phase 1:** `gc-rec-type-group`, `gc-sub-type-definition`,
+     `gc-struct-type-definition`, and `gc-array-type-definition`.
+   - **Deferred beyond Phase 1:** `type-canon.wast`, and the explicit-`rec` / non-function portions
+     of `type-rec.wast`, along with the broader recursive canonicalization and non-function GC heap
+     lattice they imply.
+5. **Explicit Phase 1 support boundary written down** — **Done**
+   - Phase 1 supports a flat functype type section, typed references over `func` / `extern` /
+     concrete function types in non-recursive groups, self/earlier concrete type references, and
+     subtype-aware matching/canonicalization across structurally equivalent function signatures.
+   - Phase 1 does **not** yet implement explicit recursive type groups, `sub` / `struct` / `array`
+     type definitions, or the broader GC-era non-function heap lattice.
+6. **Final verification snapshot taken** — **Done**
+   - `cargo fmt -- --check`
+   - `cargo test -p baedeker-core --test spec`
+   - `cargo test -p baedeker-core --test spec_wast`
+   - `cargo test -p baedeker-core --test spec_node`
+   - `cargo test -p baedeker-core`
+   - `cargo clippy -p baedeker-core --all-targets -- -D warnings`
+7. **Early-Phase-2 follow-ons recorded explicitly** — **Deferred (not a Phase 1 blocker)**
+   - Full recursive type-group decoding/validation
+   - Non-function GC type definitions (`sub`, `struct`, `array`)
+   - Recursive canonicalization / richer GC-era heap-type relations
 
-### What the audit says still blocks calling Phase 1 complete
-1. **Official spec grounding should continue.** The next high-value official files to activate are
-   additional curated slices of `unreached-valid.wast` and adjacent official validation-only
-   files.
-2. **Broader WebAssembly 3.0 audit pressure still remains beyond the current bounded typed-ref
-   model.** The current model is appropriate for the active supported subsets, but Phase 1 closure
-   still requires continued auditing against remaining proposal-era and niche validation cases.
+### Phase 1 boundary snapshot
+- **Supported / grounded now**
+  - Core validation front-end with precise diagnostics and exact-offset regression coverage
+  - Zero-skip curated official subset lane
+  - Typed function references within the current bounded model
+  - Flat functype definitions with self/earlier concrete-type references only
+  - Typed nullability/control/table/global/element flows already grounded in the active corpus
+- **Represented as raw boundary assertions, not active official support**
+  - GC-era type-section forms that Baedeker does not yet decode (`rec`, `sub`, `struct`, `array`)
+  - Raw malformed/decode boundaries where Node/V8 accepts a broader space than Baedeker currently
+    models
+- **Explicitly deferred beyond Phase 1**
+  - `type-canon.wast`
+  - Explicit recursive-group and non-function-type portions of `type-rec.wast`
+  - Broader recursive/GC type-system work needed for those files
 
-### Most direct post-audit path
-1. Continue widening the official zero-skip upstream lane with more curated `unreached-valid`
-   subsets and adjacent validation-only files.
-2. Continue auditing the remaining WebAssembly 3.0 validation surface beyond the currently bounded
-   typed-reference model.
+### Final verification snapshot
+- Current `baedeker-core` unit test count: **530 passing**
+- Current spec-harness integration tests: **8 passing** (`spec`: 3, `spec_wast`: 2, `spec_node`: 3)
+- Current corpus snapshot:
+  - `wast-upstream`: **87** active files / **622** directives
+  - raw `valid`: **236** fixtures
+  - raw `invalid-validate`: **173** fixtures
+  - raw `invalid-decode`: **38** fixtures
+  - custom `spec/wast`: **17** files
+- `spec_node` continues to cross-check the active supported raw and upstream-derived surface, while
+  Baedeker-specific boundary assertions remain outside strict Node/V8 enforcement where documented.
 
 That bookkeeping matters for Phase 2 because the register-lowering work should inherit a semantic
 front-end with known boundaries, not an ambiguous notion of "probably enough validation."
