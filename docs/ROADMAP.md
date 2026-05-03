@@ -766,14 +766,18 @@ interpreter-first with AOT as a future layer.
       metadata where useful.
 
 #### Revised Phase 1 completion definition
-Phase 1 is complete only when Baedeker provides a robust, diagnostics-oriented validation front-end
-for the full intended WebAssembly 3.0 surface, sufficient to serve as the semantic foundation for
-later register-based lowering and execution.
+Phase 1 is complete when Baedeker provides a robust, diagnostics-oriented validation front-end
+that is strong enough to serve as the semantic foundation for register-based lowering and
+execution.
+
+That is intentionally **not** the same as saying every adjacent WebAssembly 3.0 type-system or
+proposal-era surface is fully implemented before Phase 2 begins. Full WebAssembly 3.0 remains the
+program goal, but it is the destination, not the entrance exam for starting the runtime.
 
 More concretely, Phase 1 is done when all of the following are true:
 1. **Validation coverage**
-   - The decoder and validator cover the intended WebAssembly 3.0 instruction and module surface,
-     or any explicitly excluded areas are documented as out of scope for the current release.
+   - The decoder and validator cover the runtime-facing surface Baedeker is ready to build on, and
+     any unsupported or deferred areas are rejected explicitly and documented clearly.
 2. **Semantic reliability**
    - Control-flow typing, operand stack typing, label/result propagation, const-expression rules,
      and index-space resolution are stable enough that later lowering does not need to rediscover
@@ -787,6 +791,24 @@ More concretely, Phase 1 is done when all of the following are true:
 5. **Architectural clarity**
    - The validator remains a spec-facing proof/type layer, clearly separated from the future
      register-based IR and interpreter core.
+
+What Phase 1 does **not** require before Phase 2 starts:
+- full recursive type-group decoding/validation
+- full non-function GC type support (`sub`, `struct`, `array`)
+- `type-canon.wast` support
+- broader recursive canonicalization / GC heap-lattice completeness
+
+### Reading path to retain from Phase 1
+- [Types](https://webassembly.github.io/spec/core/syntax/types.html)
+- [Validation](https://webassembly.github.io/spec/core/valid/index.html)
+- [Appendix: Validation Algorithm](https://webassembly.github.io/spec/core/appendix/algorithm.html)
+- Official tests worth rereading with the current boundary in mind:
+  - `ref.wast`
+  - `type-equivalence.wast`
+  - `type-rec.wast`
+  - `type-canon.wast`
+  - `labels.wast`
+  - `switch.wast`
 
 #### Checkpoint 8 — Phase 1 closure checklist
 
@@ -862,9 +884,9 @@ leaving it as silent Phase 1 debt.
   Baedeker-specific boundary assertions remain outside strict Node/V8 enforcement where documented.
 
 ### Current branch snapshot
-Current Phase 1 wrap-up work remains on `feat/phase-1-part-4-final-checklist`, with the validator
-and fixture/docs support matrix kept in sync as Phase 1 closes and explicit follow-ons are pushed
-out of the critical path.
+Phase 1 wrap-up was completed on `feat/phase-1-part-4-final-checklist` and merged into `develop`.
+The validator and fixture/docs support matrix are now treated as the completed semantic baseline,
+with explicit follow-ons pushed out of the critical path.
 
 ### Phase 1 note
 The validator stack remains the spec-facing abstract operand/control stack used for proof of
@@ -882,38 +904,135 @@ open-ended while the project needs to move on.
 
 ---
 
-## Phase 2 — The Interpreter Core
+## Phase 2 — Register-Based Lowering and Runtime Bring-Up
 
-**Focus:** Execution semantics, stack frames, the operational heart of the runtime.
+**Focus:** This is now the critical path. Phase 2 turns the validated semantic front-end into an
+actual runtime without waiting for every remaining WebAssembly 3.0 completeness item to land
+first.
 
-- Design the internal IR. Two options, with a strong recommendation:
-  - **Register-based IR** (recommended): Transform WASM's stack machine into a register-based
-    representation during a lowering pass after validation. This is the wasm3 / wasm-micro-runtime
-    approach and yields 30–50% speedup over naive stack interpretation. More complex to implement
-    but far more instructive and performant.
-  - Stack-based direct interpretation: Simpler, useful as a reference implementation for
-    differential testing against the register-based path.
-- Implement the core execution loop: instruction dispatch, operand handling, control flow
-  (block entry/exit, branch, return).
-- Implement all numeric instructions: i32/i64/f32/f64 arithmetic, comparisons, conversions,
-  reinterpretations. This is ~120 opcodes of mostly mechanical work, but the IEEE 754 edge
-  cases (NaN propagation, rounding modes, min/max semantics) will test your patience and
-  your understanding of the spec's determinism requirements.
-- Implement v128 (SIMD) instructions — these matter on iOS/ARM where NEON is available and
-  your geometric algebra workloads will benefit directly.
-- Implement call/return, including indirect calls through tables.
-- **Milestone:** Can execute `(module (func (export "add") (param i32 i32) (result i32) (local.get 0) (local.get 1) (i32.add)))` and return the correct result through the embedding API. Then: pass the full spec test suite for numeric and control flow instructions.
+### Phase 2 charter
+- Lower validated stack-machine code into a register-based IR.
+- Execute that IR with a small, auditable runtime core.
+- Keep validation as the gatekeeper for unsupported modules and unsupported type-system surfaces.
+- Avoid baking the current flat-functype limitation too deeply into runtime internals.
 
-### Spec sections to internalize
-- [Execution](https://webassembly.github.io/spec/core/exec/index.html) — the reduction rules.
-- [Numerics](https://webassembly.github.io/spec/core/exec/numerics.html) — every edge case.
+### Phase 2 design guardrails
+- **No more micro-expansion by default.** Validation-only work should now happen when it fixes a
+  soundness issue or unblocks runtime architecture, not just because another nearby spec case
+  exists.
+- **Keep type handles abstract.** Lowering/runtime data structures should assume richer recursive
+  and GC-era relations may exist later.
+- **Keep execution support explicit.** A module may validate before every feature it uses is
+  executable; when that happens, lowering/runtime should fail clearly and intentionally.
+- **Use the validator's shape, not a new ad hoc semantics.** Lowering should reuse the control-flow
+  and stack-shape knowledge Phase 1 already established.
+
+### Checkpoint 1 — IR shape and lowering skeleton
+**Goal:** define the execution-side vocabulary.
+
+- Introduce `RegModule`, `RegFunc`, `RegBlock`, `RegInstr`, and whatever typed value / virtual
+  register representation best fits Baedeker.
+- Decide how block parameters, block results, branch transfers, locals, and constants appear in IR.
+- Lower a simple validated function into inspectable IR without executing it yet.
+- Keep the IR spec-shaped enough that validation concepts still map onto it cleanly.
+
+**Milestone:** lower the exported `add` example into register IR and snapshot/assert its shape in
+unit tests.
+
+**Reading path**
+- [Execution](https://webassembly.github.io/spec/core/exec/index.html)
 - [Instructions](https://webassembly.github.io/spec/core/syntax/instructions.html)
+- Re-read [Appendix: Validation Algorithm](https://webassembly.github.io/spec/core/appendix/algorithm.html)
+  with the question: "what type/control facts must lowering preserve as value-flow facts?"
+
+### Checkpoint 2 — Function frames and numeric execution core
+**Goal:** execute straight-line code correctly.
+
+- Implement runtime values, locals, call frames, and exported-function entry.
+- Execute constants, local access, basic numeric arithmetic, comparisons, and conversions.
+- Build a small runtime test harness that exercises the execution core independently from validation.
+
+**Milestone:** execute exported arithmetic functions such as `add` through the embedding API.
+
+**Reading path**
+- [Execution](https://webassembly.github.io/spec/core/exec/index.html)
+- [Numerics](https://webassembly.github.io/spec/core/exec/numerics.html)
+- [Runtime Structure](https://webassembly.github.io/spec/core/exec/runtime.html)
+
+### Checkpoint 3 — Structured control flow in the runtime
+**Goal:** make validated structured control actually run.
+
+- Implement `block`, `loop`, `if`, `else`, `br`, `br_if`, `br_table`, `return`, `unreachable`, and
+  `select` in the lowered/runtime model.
+- Preserve the branch-result and block-result discipline already proven by the validator.
+- Add runtime-focused tests for branch transfer, loop back-edges, and result threading.
+
+**Milestone:** pass the core control/numeric execution slices needed for nontrivial functions.
+
+**Reading path**
+- [Execution Instructions](https://webassembly.github.io/spec/core/exec/instructions.html)
+- [Control Instructions](https://webassembly.github.io/spec/core/syntax/instructions.html#control-instructions)
+- Revisit `labels.wast`, `switch.wast`, `br.wast`, `br_if.wast`, and `br_table.wast`
+
+### Checkpoint 4 — Calls, tables, memory, and globals on the execution path
+**Goal:** make real modules start working, not just arithmetic kernels.
+
+- Implement direct calls, indirect calls, tables, globals, linear memory, and the first bulk-memory
+  execution slices actually needed by the active test corpus.
+- Keep execution support staged: runtime parity should broaden in deliberate cohorts just like the
+  validator did, but now in service of actual execution milestones.
+- Use Node/V8 / external-runtime parity where useful once runtime semantics are comparable.
+
+**Milestone:** run modules that use locals, control flow, memory access, globals, and indirect
+calls through tables.
+
+**Reading path**
+- [Function Instances](https://webassembly.github.io/spec/core/exec/runtime.html#function-instances)
+- [Table Instances](https://webassembly.github.io/spec/core/exec/runtime.html#table-instances)
+- [Memory Instances](https://webassembly.github.io/spec/core/exec/runtime.html#memory-instances)
+- [Global Instances](https://webassembly.github.io/spec/core/exec/runtime.html#global-instances)
+
+### Why Phase 2 starts now
+Phase 1 is finished as a semantic foundation. Remaining recursive/GC-era completeness work still
+matters to the overall WebAssembly 3.0 goal, but it now belongs in a deferred backlog unless it
+becomes a concrete runtime blocker.
 
 ### Where your toolkit applies
 This is where Orlando's transducer philosophy becomes relevant. The stack-to-register lowering
 pass is a transformation of transformations: you're rewriting a sequence of stack effects into
 a sequence of register transfers. If you can express this as a composable transducer pipeline,
 you get a clean architecture for layering optimization passes later.
+
+---
+
+## Deferred WebAssembly 3.0 Completeness Backlog
+
+These items remain strategically important because full WebAssembly 3.0 support is still the
+long-term target. They are no longer the gate in front of Phase 2.
+
+1. **Recursive type groups and canonicalization**
+   - Matters for: full support of recursive function-type surfaces and later richer heap typing.
+   - Deferred because: the current validator already rejects unsupported forms explicitly, and the
+     runtime can begin on the validated active surface.
+   - Reading path: `type-equivalence.wast`, `type-rec.wast`, `type-canon.wast`, plus the spec's
+     type and validation chapters.
+2. **Non-function GC type definitions (`sub`, `struct`, `array`)**
+   - Matters for: the broader GC proposal and heap-allocated non-linear-memory objects.
+   - Deferred because: Baedeker currently treats these as explicit malformed/decode boundaries,
+     which is good enough for Phase 2 bring-up.
+   - Reading path: `ref.wast`, `type-rec.wast`, and the spec/proposal material around reference and
+     heap types.
+3. **Richer heap-type relations beyond the current bounded model**
+   - Matters for: eventually supporting a fuller recursive/GC-era subtype lattice.
+   - Deferred because: current typed-function-reference work is enough to start lowering/runtime
+     design without freezing the final lattice now.
+   - Reading path: typed reference cases already active in the corpus, plus the type chapters with
+     an eye toward subtyping and canonicalization.
+4. **Additional validation-only spec expansion that does not change runtime architecture**
+   - Matters for: eventual completeness and confidence.
+   - Deferred because: Phase 2 should not stall on another long tail of validation micro-edits.
+   - Reading path: revisit the existing curated upstream subsets in thematic batches rather than one
+     isolated case at a time.
 
 ---
 
@@ -1011,8 +1130,10 @@ These are ordered by relevance to your use cases:
 
 The official [WebAssembly spec test suite](https://github.com/AnisBoss/WebAssembly-spec-testsuite)
 is the ground truth. Every phase should be accompanied by running the relevant subset of spec
-tests. Track compliance percentage as a first-class project metric. The goal is 100% on
-WASM 2.0 core before moving to proposals.
+tests. Track compliance percentage as a first-class project metric, but track it by active surface:
+validation, lowering, runtime, and deferred completeness work should not be collapsed into one
+misleading number. The near-term goal is strong parity on each active implementation slice as it
+comes online; the long-term goal remains the full intended WebAssembly 3.0 surface.
 
 ## Ongoing: Differential Testing
 

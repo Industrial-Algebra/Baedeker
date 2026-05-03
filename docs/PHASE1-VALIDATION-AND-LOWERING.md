@@ -832,6 +832,11 @@ full recursive/GC-era WebAssembly 3.0 support; it records a stable, verified sem
 baseline and explicitly defers the remaining recursive / non-function type-system work rather than
 leaving it as silent Phase 1 debt.
 
+That line matters: Phase 1 closed when Baedeker had a trustworthy semantic front-end for Phase 2,
+not when every adjacent WebAssembly 3.0 completeness item was already implemented. Full
+WebAssembly 3.0 remains the long-term target, but it is the destination, not the entrance exam for
+starting the runtime.
+
 ### Checklist status
 1. **Active official-lane semantic blockers removed** — **Done**
    - Closed the adjacent official `labels` / `switch` blockers (`redefinition`, `arg`) without
@@ -886,6 +891,18 @@ leaving it as silent Phase 1 debt.
   - Explicit recursive-group and non-function-type portions of `type-rec.wast`
   - Broader recursive/GC type-system work needed for those files
 
+### Phase 1 reading path to retain
+- [Types](https://webassembly.github.io/spec/core/syntax/types.html)
+- [Validation](https://webassembly.github.io/spec/core/valid/index.html)
+- [Appendix: Validation Algorithm](https://webassembly.github.io/spec/core/appendix/algorithm.html)
+- Official files worth rereading with the support boundary in mind:
+  - `ref.wast`
+  - `type-equivalence.wast`
+  - `type-rec.wast`
+  - `type-canon.wast`
+  - `labels.wast`
+  - `switch.wast`
+
 ### Final verification snapshot
 - Current `baedeker-core` unit test count: **530 passing**
 - Current spec-harness integration tests: **8 passing** (`spec`: 3, `spec_wast`: 2, `spec_node`: 3)
@@ -900,3 +917,88 @@ leaving it as silent Phase 1 debt.
 
 That bookkeeping matters for Phase 2 because the register-lowering work should inherit a semantic
 front-end with known boundaries, not an ambiguous notion of "probably enough validation."
+
+## Transition to Phase 2
+
+Phase 2 is now the critical path.
+
+The immediate goal is to turn the validated semantic front-end into an actual register-based
+runtime without stalling on every remaining validation-only completeness item. Validation remains
+the gatekeeper for unsupported modules and unsupported recursive/GC-era type-system surfaces.
+
+### Phase 2 guardrails
+- Do not resume validation micro-expansion by default.
+- Keep type handles abstract enough that richer recursive / GC-era relations can be added later.
+- Let lowering/runtime fail explicitly when execution support is not implemented yet.
+- Reuse the validator's control-flow and stack-shape knowledge instead of inventing a second
+  semantics model.
+
+## First concrete Phase 2 implementation checklist
+
+### Checkpoint 1 — IR shape and lowering skeleton
+**Goal:** define the execution-side vocabulary before broad runtime semantics.
+
+- [ ] Introduce execution IR types such as `RegModule`, `RegFunc`, `RegBlock`, and `RegInstr`.
+- [ ] Decide how typed values / virtual registers are represented.
+- [ ] Decide how block parameters, block results, branch transfers, locals, and constants map into
+      IR.
+- [ ] Lower a validated straight-line function into inspectable IR.
+- [ ] Add unit tests that snapshot/assert the lowered IR shape for the exported `add` example.
+
+**Reading path**
+- [Execution](https://webassembly.github.io/spec/core/exec/index.html)
+- [Instructions](https://webassembly.github.io/spec/core/syntax/instructions.html)
+- Re-read [Appendix: Validation Algorithm](https://webassembly.github.io/spec/core/appendix/algorithm.html)
+  with the question: what type/control facts must lowering preserve as value-flow facts?
+
+### Checkpoint 2 — Function frames and straight-line execution
+**Goal:** execute simple validated functions correctly.
+
+- [ ] Define runtime values and call-frame layout.
+- [ ] Implement locals, constant materialization, and exported-function entry.
+- [ ] Execute basic integer arithmetic, comparisons, and conversions.
+- [ ] Build a runtime-focused test harness that exercises execution independently from validation.
+- [ ] Run the exported `add` example end-to-end through the embedding API.
+
+**Reading path**
+- [Execution](https://webassembly.github.io/spec/core/exec/index.html)
+- [Numerics](https://webassembly.github.io/spec/core/exec/numerics.html)
+- [Runtime Structure](https://webassembly.github.io/spec/core/exec/runtime.html)
+
+### Checkpoint 3 — Structured control execution
+**Goal:** make validated control flow actually run.
+
+- [ ] Implement `block`, `loop`, `if`, `else`, `br`, `br_if`, `br_table`, `return`,
+      `unreachable`, and `select` in the lowered/runtime model.
+- [ ] Preserve the branch-result and block-result discipline already proven by validation.
+- [ ] Add runtime tests for loop back-edges, branch transfers, and result threading.
+
+**Reading path**
+- [Execution Instructions](https://webassembly.github.io/spec/core/exec/instructions.html)
+- [Control Instructions](https://webassembly.github.io/spec/core/syntax/instructions.html#control-instructions)
+- Revisit `labels.wast`, `switch.wast`, `br.wast`, `br_if.wast`, and `br_table.wast`
+
+### Checkpoint 4 — Calls, tables, memory, and globals on the execution path
+**Goal:** make real modules start working.
+
+- [ ] Implement direct calls and indirect calls.
+- [ ] Implement linear memory loads/stores and basic memory growth semantics.
+- [ ] Implement globals and table access needed by the active corpus.
+- [ ] Broaden runtime parity in deliberate cohorts tied to execution milestones rather than
+      validation-only tail work.
+
+**Reading path**
+- [Function Instances](https://webassembly.github.io/spec/core/exec/runtime.html#function-instances)
+- [Table Instances](https://webassembly.github.io/spec/core/exec/runtime.html#table-instances)
+- [Memory Instances](https://webassembly.github.io/spec/core/exec/runtime.html#memory-instances)
+- [Global Instances](https://webassembly.github.io/spec/core/exec/runtime.html#global-instances)
+
+## Deferred WebAssembly 3.0 completeness backlog
+
+These items still matter to the long-term goal, but they are no longer the gate in front of Phase
+2 unless they become concrete runtime blockers.
+
+- Recursive type groups and broader recursive canonicalization
+- Non-function GC type definitions (`sub`, `struct`, `array`)
+- Richer heap-type relations beyond the current bounded model
+- Additional validation-only spec expansion that does not change runtime architecture
