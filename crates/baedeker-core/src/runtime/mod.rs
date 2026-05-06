@@ -245,9 +245,7 @@ mod tests {
 
     #[test]
     fn execute_exported_add_by_name() {
-        let bytes = baedeker_testdata::fixture_bytes("add");
-        let module = Module::decode(&bytes).unwrap();
-        let reg_module = module.lower().unwrap();
+        let reg_module = lowered_add_module();
 
         let result = execute_export(&reg_module, "add", &[Value::I32(20), Value::I32(22)]).unwrap();
 
@@ -256,9 +254,7 @@ mod tests {
 
     #[test]
     fn reject_unknown_export_name() {
-        let bytes = baedeker_testdata::fixture_bytes("add");
-        let module = Module::decode(&bytes).unwrap();
-        let reg_module = module.lower().unwrap();
+        let reg_module = lowered_add_module();
 
         let err = execute_export(&reg_module, "missing", &[]).unwrap_err();
 
@@ -268,5 +264,62 @@ mod tests {
                 name: "missing".into(),
             }
         );
+    }
+
+    #[test]
+    fn reject_export_call_with_missing_arg() {
+        let reg_module = lowered_add_module();
+
+        let err = execute_export(&reg_module, "add", &[Value::I32(20)]).unwrap_err();
+
+        assert_eq!(
+            err.kind,
+            RuntimeErrorKind::ArityMismatch {
+                expected: 2,
+                found: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn reject_export_call_with_extra_arg() {
+        let reg_module = lowered_add_module();
+
+        let err = execute_export(
+            &reg_module,
+            "add",
+            &[Value::I32(20), Value::I32(22), Value::I32(1)],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.kind,
+            RuntimeErrorKind::ArityMismatch {
+                expected: 2,
+                found: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn reject_export_call_with_wrong_arg_type() {
+        let reg_module = lowered_add_module();
+
+        let err =
+            execute_export(&reg_module, "add", &[Value::I64(20), Value::I32(22)]).unwrap_err();
+
+        assert_eq!(
+            err.kind,
+            RuntimeErrorKind::TypeMismatch {
+                expected: ValType::Num(NumType::I32),
+                found: ValType::Num(NumType::I64),
+            }
+        );
+    }
+
+    fn lowered_add_module() -> RegModule {
+        let bytes = baedeker_testdata::fixture_bytes("add");
+        let module = Module::decode(&bytes).unwrap();
+        module.lower().unwrap()
     }
 }

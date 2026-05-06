@@ -323,7 +323,7 @@ impl FuncBuilder {
                 ValType::Num(NumType::I64),
                 |dst, lhs, rhs| RegOp::I64Add { dst, lhs, rhs },
             )?,
-            Instr::End => {
+            Instr::Return | Instr::End => {
                 let values = self.pop_results(offset)?;
                 self.emit(offset, RegOp::Return { values });
                 return Ok(true);
@@ -787,6 +787,52 @@ mod tests {
             0x42, 0x14, // i64.const 20
             0x42, 0x16, // i64.const 22
             0x7c, // i64.add
+            0x0b, // end
+        ]
+    }
+
+    #[test]
+    fn lower_explicit_return_instruction() {
+        let module = Module::decode(explicit_return_module()).unwrap();
+        let reg_module = module.lower().unwrap();
+        let func = &reg_module.funcs[0];
+
+        assert_eq!(
+            func.instrs
+                .iter()
+                .map(|instr| &instr.op)
+                .collect::<Vec<_>>(),
+            vec![
+                &RegOp::I32Const {
+                    dst: Reg(0),
+                    value: 42,
+                },
+                &RegOp::Return {
+                    values: vec![Reg(0)],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn execute_explicit_return_instruction() {
+        let module = Module::decode(explicit_return_module()).unwrap();
+        let reg_module = module.lower().unwrap();
+
+        let result = crate::runtime::execute_func(&reg_module.funcs[0], &[]).unwrap();
+
+        assert_eq!(result, vec![crate::runtime::Value::I32(42)]);
+    }
+
+    fn explicit_return_module() -> &'static [u8] {
+        &[
+            0x00, 0x61, 0x73, 0x6d, // magic
+            0x01, 0x00, 0x00, 0x00, // version
+            0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, // type: [] -> [i32]
+            0x03, 0x02, 0x01, 0x00, // function type 0
+            0x0a, 0x07, 0x01, 0x05, 0x00, // one body, no locals
+            0x41, 0x2a, // i32.const 42
+            0x0f, // return
             0x0b, // end
         ]
     }
