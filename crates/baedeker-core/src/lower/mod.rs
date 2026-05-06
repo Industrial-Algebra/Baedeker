@@ -77,6 +77,7 @@ pub enum RegOp {
     I32Sub { dst: Reg, lhs: Reg, rhs: Reg },
     I32Mul { dst: Reg, lhs: Reg, rhs: Reg },
     I64Add { dst: Reg, lhs: Reg, rhs: Reg },
+    I32Eqz { dst: Reg, value: Reg },
     Return { values: Vec<Reg> },
 }
 
@@ -323,6 +324,13 @@ impl FuncBuilder {
                 ValType::Num(NumType::I64),
                 |dst, lhs, rhs| RegOp::I64Add { dst, lhs, rhs },
             )?,
+            Instr::I32Eqz => self.lower_unary(
+                offset,
+                "i32.eqz",
+                ValType::Num(NumType::I32),
+                ValType::Num(NumType::I32),
+                |dst, value| RegOp::I32Eqz { dst, value },
+            )?,
             Instr::Return | Instr::End => {
                 let values = self.pop_results(offset)?;
                 self.emit(offset, RegOp::Return { values });
@@ -387,6 +395,24 @@ impl FuncBuilder {
         let dst = self.alloc_reg(ty);
         self.stack.push(RegValue { reg: dst, ty });
         self.emit(offset, make_op(dst, lhs.reg, rhs.reg));
+        Ok(())
+    }
+
+    fn lower_unary(
+        &mut self,
+        offset: ByteOffset,
+        op: &'static str,
+        input: ValType,
+        output: ValType,
+        make_op: impl FnOnce(Reg, Reg) -> RegOp,
+    ) -> Result<(), LowerError> {
+        let value = self.pop_expect(offset, op, input)?;
+        let dst = self.alloc_reg(output);
+        self.stack.push(RegValue {
+            reg: dst,
+            ty: output,
+        });
+        self.emit(offset, make_op(dst, value.reg));
         Ok(())
     }
 
@@ -787,6 +813,63 @@ mod tests {
             0x42, 0x14, // i64.const 20
             0x42, 0x16, // i64.const 22
             0x7c, // i64.add
+            0x0b, // end
+        ]
+    }
+
+    #[test]
+    fn lower_i32_eqz_cohort() {
+        let module = Module::decode(i32_eqz_module()).unwrap();
+        let reg_module = module.lower().unwrap();
+        let func = &reg_module.funcs[0];
+
+        assert_eq!(func.reg_types, vec![ValType::Num(NumType::I32); 2]);
+        assert_eq!(
+            func.instrs
+                .iter()
+                .map(|instr| &instr.op)
+                .collect::<Vec<_>>(),
+            vec![
+                &RegOp::LocalGet {
+                    dst: Reg(0),
+                    local: LocalIdx(0),
+                },
+                &RegOp::I32Eqz {
+                    dst: Reg(1),
+                    value: Reg(0),
+                },
+                &RegOp::Return {
+                    values: vec![Reg(1)],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn execute_i32_eqz_cohort() {
+        let module = Module::decode(i32_eqz_module()).unwrap();
+        let reg_module = module.lower().unwrap();
+
+        let zero =
+            crate::runtime::execute_func(&reg_module.funcs[0], &[crate::runtime::Value::I32(0)])
+                .unwrap();
+        let nonzero =
+            crate::runtime::execute_func(&reg_module.funcs[0], &[crate::runtime::Value::I32(7)])
+                .unwrap();
+
+        assert_eq!(zero, vec![crate::runtime::Value::I32(1)]);
+        assert_eq!(nonzero, vec![crate::runtime::Value::I32(0)]);
+    }
+
+    fn i32_eqz_module() -> &'static [u8] {
+        &[
+            0x00, 0x61, 0x73, 0x6d, // magic
+            0x01, 0x00, 0x00, 0x00, // version
+            0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f, // type: [i32] -> [i32]
+            0x03, 0x02, 0x01, 0x00, // function type 0
+            0x0a, 0x07, 0x01, 0x05, 0x00, // one body, no locals
+            0x20, 0x00, // local.get 0
+            0x45, // i32.eqz
             0x0b, // end
         ]
     }

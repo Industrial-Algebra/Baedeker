@@ -155,6 +155,9 @@ pub fn execute_func(func: &RegFunc, args: &[Value]) -> Result<Vec<Value>, Runtim
                     lhs.wrapping_add(rhs)
                 })?
             }
+            RegOp::I32Eqz { dst, value } => {
+                execute_i32_unary(&mut registers, *dst, *value, |value| i32::from(value == 0))?
+            }
             RegOp::Return { values } => {
                 let mut results = Vec::with_capacity(values.len());
                 for &reg in values {
@@ -200,6 +203,16 @@ fn execute_i32_binary(
     let lhs = expect_i32(get_reg(registers, lhs)?)?;
     let rhs = expect_i32(get_reg(registers, rhs)?)?;
     set_reg(registers, dst, Value::I32(op(lhs, rhs)))
+}
+
+fn execute_i32_unary(
+    registers: &mut [Option<Value>],
+    dst: Reg,
+    value: Reg,
+    op: impl FnOnce(i32) -> i32,
+) -> Result<(), RuntimeError> {
+    let value = expect_i32(get_reg(registers, value)?)?;
+    set_reg(registers, dst, Value::I32(op(value)))
 }
 
 fn execute_i64_binary(
