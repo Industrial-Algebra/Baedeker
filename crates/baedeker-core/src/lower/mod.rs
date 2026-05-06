@@ -56,6 +56,8 @@ pub struct RegInstr {
 #[derive(Debug, Clone, PartialEq)]
 pub enum RegOp {
     LocalGet { dst: Reg, local: LocalIdx },
+    LocalSet { local: LocalIdx, value: Reg },
+    LocalTee { local: LocalIdx, value: Reg },
     Drop { value: Reg },
     I32Const { dst: Reg, value: i32 },
     I64Const { dst: Reg, value: i64 },
@@ -212,6 +214,29 @@ impl FuncBuilder {
                 let dst = self.alloc_reg(ty);
                 self.stack.push(RegValue { reg: dst, ty });
                 self.emit(offset, RegOp::LocalGet { dst, local });
+            }
+            Instr::LocalSet(local) => {
+                let expected = self.locals[local.0 as usize];
+                let value = self.pop_expect(offset, "local.set", expected)?;
+                self.emit(
+                    offset,
+                    RegOp::LocalSet {
+                        local,
+                        value: value.reg,
+                    },
+                );
+            }
+            Instr::LocalTee(local) => {
+                let expected = self.locals[local.0 as usize];
+                let value = self.pop_expect(offset, "local.tee", expected)?;
+                self.stack.push(value);
+                self.emit(
+                    offset,
+                    RegOp::LocalTee {
+                        local,
+                        value: value.reg,
+                    },
+                );
             }
             Instr::Drop => {
                 let value = self.pop_any(offset, "drop")?;
@@ -463,5 +488,134 @@ mod tests {
         .unwrap();
 
         assert_eq!(result, vec![crate::runtime::Value::I32(42)]);
+    }
+
+    #[test]
+    fn lower_local_set_temp_storage() {
+        let module = Module::decode(local_set_temp_module()).unwrap();
+        let reg_module = module.lower().unwrap();
+        let func = &reg_module.funcs[0];
+
+        assert_eq!(func.reg_types, vec![ValType::Num(NumType::I32); 4]);
+        assert_eq!(
+            func.instrs
+                .iter()
+                .map(|instr| &instr.op)
+                .collect::<Vec<_>>(),
+            vec![
+                &RegOp::I32Const {
+                    dst: Reg(0),
+                    value: 40,
+                },
+                &RegOp::LocalSet {
+                    local: LocalIdx(0),
+                    value: Reg(0),
+                },
+                &RegOp::LocalGet {
+                    dst: Reg(1),
+                    local: LocalIdx(0),
+                },
+                &RegOp::I32Const {
+                    dst: Reg(2),
+                    value: 2,
+                },
+                &RegOp::I32Add {
+                    dst: Reg(3),
+                    lhs: Reg(1),
+                    rhs: Reg(2),
+                },
+                &RegOp::Return {
+                    values: vec![Reg(3)],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn execute_local_set_temp_storage() {
+        let module = Module::decode(local_set_temp_module()).unwrap();
+        let reg_module = module.lower().unwrap();
+
+        let result = crate::runtime::execute_func(&reg_module.funcs[0], &[]).unwrap();
+
+        assert_eq!(result, vec![crate::runtime::Value::I32(42)]);
+    }
+
+    #[test]
+    fn lower_local_tee_keeps_value_on_stack() {
+        let module = Module::decode(local_tee_stack_module()).unwrap();
+        let reg_module = module.lower().unwrap();
+        let func = &reg_module.funcs[0];
+
+        assert_eq!(func.reg_types, vec![ValType::Num(NumType::I32); 3]);
+        assert_eq!(
+            func.instrs
+                .iter()
+                .map(|instr| &instr.op)
+                .collect::<Vec<_>>(),
+            vec![
+                &RegOp::I32Const {
+                    dst: Reg(0),
+                    value: 40,
+                },
+                &RegOp::LocalTee {
+                    local: LocalIdx(0),
+                    value: Reg(0),
+                },
+                &RegOp::I32Const {
+                    dst: Reg(1),
+                    value: 2,
+                },
+                &RegOp::I32Add {
+                    dst: Reg(2),
+                    lhs: Reg(0),
+                    rhs: Reg(1),
+                },
+                &RegOp::Return {
+                    values: vec![Reg(2)],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn execute_local_tee_stack_value() {
+        let module = Module::decode(local_tee_stack_module()).unwrap();
+        let reg_module = module.lower().unwrap();
+
+        let result = crate::runtime::execute_func(&reg_module.funcs[0], &[]).unwrap();
+
+        assert_eq!(result, vec![crate::runtime::Value::I32(42)]);
+    }
+
+    fn local_set_temp_module() -> &'static [u8] {
+        &[
+            0x00, 0x61, 0x73, 0x6d, // magic
+            0x01, 0x00, 0x00, 0x00, // version
+            0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, // type: [] -> [i32]
+            0x03, 0x02, 0x01, 0x00, // function type 0
+            0x0a, 0x0f, 0x01, 0x0d, 0x01, 0x01, 0x7f, // one i32 local
+            0x41, 0x28, // i32.const 40
+            0x21, 0x00, // local.set 0
+            0x20, 0x00, // local.get 0
+            0x41, 0x02, // i32.const 2
+            0x6a, // i32.add
+            0x0b, // end
+        ]
+    }
+
+    fn local_tee_stack_module() -> &'static [u8] {
+        &[
+            0x00, 0x61, 0x73, 0x6d, // magic
+            0x01, 0x00, 0x00, 0x00, // version
+            0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, // type: [] -> [i32]
+            0x03, 0x02, 0x01, 0x00, // function type 0
+            0x0a, 0x0d, 0x01, 0x0b, 0x01, 0x01, 0x7f, // one i32 local
+            0x41, 0x28, // i32.const 40
+            0x22, 0x00, // local.tee 0
+            0x41, 0x02, // i32.const 2
+            0x6a, // i32.add
+            0x0b, // end
+        ]
     }
 }

@@ -84,6 +84,13 @@ pub fn execute_func(func: &RegFunc, args: &[Value]) -> Result<Vec<Value>, Runtim
                     })?;
                 set_reg(&mut registers, *dst, value)?;
             }
+            RegOp::LocalSet { local, value } | RegOp::LocalTee { local, value } => {
+                let value = get_reg(&registers, *value)?;
+                let slot = locals.get_mut(local.0 as usize).ok_or(RuntimeError {
+                    kind: RuntimeErrorKind::UninitializedLocal { local: local.0 },
+                })?;
+                *slot = Some(value);
+            }
             RegOp::Drop { value } => {
                 get_reg(&registers, *value)?;
             }
