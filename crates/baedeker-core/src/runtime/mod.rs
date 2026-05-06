@@ -4,9 +4,9 @@
 //! independently from validation. Broader control flow, calls, memory, tables,
 //! traps, and host integration are added in later checkpoints.
 
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 
-use crate::lower::{Reg, RegFunc, RegOp};
+use crate::lower::{Reg, RegFunc, RegModule, RegOp};
 use crate::types::{NumType, ValType};
 
 /// A runtime WebAssembly value.
@@ -43,7 +43,36 @@ pub enum RuntimeErrorKind {
     UninitializedLocal { local: u32 },
     UninitializedRegister { reg: Reg },
     UnknownRegister { reg: Reg },
+    UnknownExport { name: String },
+    ExportedFunctionNotLowered { func: u32 },
     MissingReturn,
+}
+
+/// Execute an exported lowered function by name.
+pub fn execute_export(
+    module: &RegModule,
+    name: &str,
+    args: &[Value],
+) -> Result<Vec<Value>, RuntimeError> {
+    let export = module
+        .exports
+        .iter()
+        .find(|export| export.name == name)
+        .ok_or_else(|| RuntimeError {
+            kind: RuntimeErrorKind::UnknownExport { name: name.into() },
+        })?;
+
+    let func = module
+        .funcs
+        .iter()
+        .find(|func| func.idx == export.func)
+        .ok_or(RuntimeError {
+            kind: RuntimeErrorKind::ExportedFunctionNotLowered {
+                func: export.func.0,
+            },
+        })?;
+
+    execute_func(func, args)
 }
 
 /// Execute a single lowered function with positional arguments.
@@ -107,9 +136,24 @@ pub fn execute_func(func: &RegFunc, args: &[Value]) -> Result<Vec<Value>, Runtim
                 set_reg(&mut registers, *dst, Value::F64(*value))?;
             }
             RegOp::I32Add { dst, lhs, rhs } => {
-                let lhs = expect_i32(get_reg(&registers, *lhs)?)?;
-                let rhs = expect_i32(get_reg(&registers, *rhs)?)?;
-                set_reg(&mut registers, *dst, Value::I32(lhs.wrapping_add(rhs)))?;
+                execute_i32_binary(&mut registers, *dst, *lhs, *rhs, |lhs, rhs| {
+                    lhs.wrapping_add(rhs)
+                })?
+            }
+            RegOp::I32Sub { dst, lhs, rhs } => {
+                execute_i32_binary(&mut registers, *dst, *lhs, *rhs, |lhs, rhs| {
+                    lhs.wrapping_sub(rhs)
+                })?
+            }
+            RegOp::I32Mul { dst, lhs, rhs } => {
+                execute_i32_binary(&mut registers, *dst, *lhs, *rhs, |lhs, rhs| {
+                    lhs.wrapping_mul(rhs)
+                })?
+            }
+            RegOp::I64Add { dst, lhs, rhs } => {
+                execute_i64_binary(&mut registers, *dst, *lhs, *rhs, |lhs, rhs| {
+                    lhs.wrapping_add(rhs)
+                })?
             }
             RegOp::Return { values } => {
                 let mut results = Vec::with_capacity(values.len());
@@ -146,6 +190,30 @@ fn get_reg(registers: &[Option<Value>], reg: Reg) -> Result<Value, RuntimeError>
         })
 }
 
+fn execute_i32_binary(
+    registers: &mut [Option<Value>],
+    dst: Reg,
+    lhs: Reg,
+    rhs: Reg,
+    op: impl FnOnce(i32, i32) -> i32,
+) -> Result<(), RuntimeError> {
+    let lhs = expect_i32(get_reg(registers, lhs)?)?;
+    let rhs = expect_i32(get_reg(registers, rhs)?)?;
+    set_reg(registers, dst, Value::I32(op(lhs, rhs)))
+}
+
+fn execute_i64_binary(
+    registers: &mut [Option<Value>],
+    dst: Reg,
+    lhs: Reg,
+    rhs: Reg,
+    op: impl FnOnce(i64, i64) -> i64,
+) -> Result<(), RuntimeError> {
+    let lhs = expect_i64(get_reg(registers, lhs)?)?;
+    let rhs = expect_i64(get_reg(registers, rhs)?)?;
+    set_reg(registers, dst, Value::I64(op(lhs, rhs)))
+}
+
 fn expect_i32(value: Value) -> Result<i32, RuntimeError> {
     match value {
         Value::I32(value) => Ok(value),
@@ -155,5 +223,50 @@ fn expect_i32(value: Value) -> Result<i32, RuntimeError> {
                 found: value.val_type(),
             },
         }),
+    }
+}
+
+fn expect_i64(value: Value) -> Result<i64, RuntimeError> {
+    match value {
+        Value::I64(value) => Ok(value),
+        value => Err(RuntimeError {
+            kind: RuntimeErrorKind::TypeMismatch {
+                expected: ValType::Num(NumType::I64),
+                found: value.val_type(),
+            },
+        }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::binary::module::Module;
+
+    #[test]
+    fn execute_exported_add_by_name() {
+        let bytes = baedeker_testdata::fixture_bytes("add");
+        let module = Module::decode(&bytes).unwrap();
+        let reg_module = module.lower().unwrap();
+
+        let result = execute_export(&reg_module, "add", &[Value::I32(20), Value::I32(22)]).unwrap();
+
+        assert_eq!(result, alloc::vec![Value::I32(42)]);
+    }
+
+    #[test]
+    fn reject_unknown_export_name() {
+        let bytes = baedeker_testdata::fixture_bytes("add");
+        let module = Module::decode(&bytes).unwrap();
+        let reg_module = module.lower().unwrap();
+
+        let err = execute_export(&reg_module, "missing", &[]).unwrap_err();
+
+        assert_eq!(
+            err.kind,
+            RuntimeErrorKind::UnknownExport {
+                name: "missing".into(),
+            }
+        );
     }
 }

@@ -5,12 +5,14 @@
 //! establishes the execution-side vocabulary and lowers straight-line functions
 //! before broader control-flow/runtime semantics are added.
 
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 
 use crate::binary::instr::{DecodedInstr, Instr};
 use crate::binary::module::Module;
 use crate::error::{ByteOffset, DecodeContext, DecodeErrorKind};
-use crate::types::{CodeBody, FuncIdx, FuncType, LocalDecl, LocalIdx, NumType, TypeIdx, ValType};
+use crate::types::{
+    CodeBody, ExportDesc, FuncIdx, FuncType, LocalDecl, LocalIdx, NumType, TypeIdx, ValType,
+};
 use crate::validate;
 use crate::validate::error::{ValidationError, ValidationErrorKind};
 
@@ -29,6 +31,14 @@ pub struct RegValue {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RegModule {
     pub funcs: Vec<RegFunc>,
+    pub exports: Vec<RegExport>,
+}
+
+/// A function export in lowered register IR.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegExport {
+    pub name: String,
+    pub func: FuncIdx,
 }
 
 /// A defined function lowered into register IR.
@@ -64,6 +74,9 @@ pub enum RegOp {
     F32Const { dst: Reg, value: f32 },
     F64Const { dst: Reg, value: f64 },
     I32Add { dst: Reg, lhs: Reg, rhs: Reg },
+    I32Sub { dst: Reg, lhs: Reg, rhs: Reg },
+    I32Mul { dst: Reg, lhs: Reg, rhs: Reg },
+    I64Add { dst: Reg, lhs: Reg, rhs: Reg },
     Return { values: Vec<Reg> },
 }
 
@@ -129,7 +142,19 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
         funcs.push(lower_function(func_idx, *type_idx, ty, code)?);
     }
 
-    Ok(RegModule { funcs })
+    let exports = module
+        .exports()
+        .iter()
+        .filter_map(|export| match export.desc {
+            ExportDesc::Func(func) => Some(RegExport {
+                name: export.name.clone(),
+                func,
+            }),
+            ExportDesc::Table(_) | ExportDesc::Mem(_) | ExportDesc::Global(_) => None,
+        })
+        .collect();
+
+    Ok(RegModule { funcs, exports })
 }
 
 fn lower_function(
@@ -274,23 +299,30 @@ impl FuncBuilder {
                 });
                 self.emit(offset, RegOp::F64Const { dst, value });
             }
-            Instr::I32Add => {
-                let rhs = self.pop_expect(offset, "i32.add", ValType::Num(NumType::I32))?;
-                let lhs = self.pop_expect(offset, "i32.add", ValType::Num(NumType::I32))?;
-                let dst = self.alloc_reg(ValType::Num(NumType::I32));
-                self.stack.push(RegValue {
-                    reg: dst,
-                    ty: ValType::Num(NumType::I32),
-                });
-                self.emit(
-                    offset,
-                    RegOp::I32Add {
-                        dst,
-                        lhs: lhs.reg,
-                        rhs: rhs.reg,
-                    },
-                );
-            }
+            Instr::I32Add => self.lower_binary(
+                offset,
+                "i32.add",
+                ValType::Num(NumType::I32),
+                |dst, lhs, rhs| RegOp::I32Add { dst, lhs, rhs },
+            )?,
+            Instr::I32Sub => self.lower_binary(
+                offset,
+                "i32.sub",
+                ValType::Num(NumType::I32),
+                |dst, lhs, rhs| RegOp::I32Sub { dst, lhs, rhs },
+            )?,
+            Instr::I32Mul => self.lower_binary(
+                offset,
+                "i32.mul",
+                ValType::Num(NumType::I32),
+                |dst, lhs, rhs| RegOp::I32Mul { dst, lhs, rhs },
+            )?,
+            Instr::I64Add => self.lower_binary(
+                offset,
+                "i64.add",
+                ValType::Num(NumType::I64),
+                |dst, lhs, rhs| RegOp::I64Add { dst, lhs, rhs },
+            )?,
             Instr::End => {
                 let values = self.pop_results(offset)?;
                 self.emit(offset, RegOp::Return { values });
@@ -341,6 +373,21 @@ impl FuncBuilder {
                 expected: ValType::Num(NumType::I32),
             },
         })
+    }
+
+    fn lower_binary(
+        &mut self,
+        offset: ByteOffset,
+        op: &'static str,
+        ty: ValType,
+        make_op: impl FnOnce(Reg, Reg, Reg) -> RegOp,
+    ) -> Result<(), LowerError> {
+        let rhs = self.pop_expect(offset, op, ty)?;
+        let lhs = self.pop_expect(offset, op, ty)?;
+        let dst = self.alloc_reg(ty);
+        self.stack.push(RegValue { reg: dst, ty });
+        self.emit(offset, make_op(dst, lhs.reg, rhs.reg));
+        Ok(())
     }
 
     fn pop_expect(
@@ -615,6 +662,131 @@ mod tests {
             0x22, 0x00, // local.tee 0
             0x41, 0x02, // i32.const 2
             0x6a, // i32.add
+            0x0b, // end
+        ]
+    }
+
+    #[test]
+    fn lower_i32_sub_and_mul_cohort() {
+        let module = Module::decode(i32_sub_mul_module()).unwrap();
+        let reg_module = module.lower().unwrap();
+        let func = &reg_module.funcs[0];
+
+        assert_eq!(func.reg_types, vec![ValType::Num(NumType::I32); 5]);
+        assert_eq!(
+            func.instrs
+                .iter()
+                .map(|instr| &instr.op)
+                .collect::<Vec<_>>(),
+            vec![
+                &RegOp::I32Const {
+                    dst: Reg(0),
+                    value: 50,
+                },
+                &RegOp::I32Const {
+                    dst: Reg(1),
+                    value: 8,
+                },
+                &RegOp::I32Sub {
+                    dst: Reg(2),
+                    lhs: Reg(0),
+                    rhs: Reg(1),
+                },
+                &RegOp::I32Const {
+                    dst: Reg(3),
+                    value: 3,
+                },
+                &RegOp::I32Mul {
+                    dst: Reg(4),
+                    lhs: Reg(2),
+                    rhs: Reg(3),
+                },
+                &RegOp::Return {
+                    values: vec![Reg(4)],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn execute_i32_sub_and_mul_cohort() {
+        let module = Module::decode(i32_sub_mul_module()).unwrap();
+        let reg_module = module.lower().unwrap();
+
+        let result = crate::runtime::execute_func(&reg_module.funcs[0], &[]).unwrap();
+
+        assert_eq!(result, vec![crate::runtime::Value::I32(126)]);
+    }
+
+    #[test]
+    fn lower_i64_add_cohort() {
+        let module = Module::decode(i64_add_module()).unwrap();
+        let reg_module = module.lower().unwrap();
+        let func = &reg_module.funcs[0];
+
+        assert_eq!(func.reg_types, vec![ValType::Num(NumType::I64); 3]);
+        assert_eq!(
+            func.instrs
+                .iter()
+                .map(|instr| &instr.op)
+                .collect::<Vec<_>>(),
+            vec![
+                &RegOp::I64Const {
+                    dst: Reg(0),
+                    value: 20,
+                },
+                &RegOp::I64Const {
+                    dst: Reg(1),
+                    value: 22,
+                },
+                &RegOp::I64Add {
+                    dst: Reg(2),
+                    lhs: Reg(0),
+                    rhs: Reg(1),
+                },
+                &RegOp::Return {
+                    values: vec![Reg(2)],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn execute_i64_add_cohort() {
+        let module = Module::decode(i64_add_module()).unwrap();
+        let reg_module = module.lower().unwrap();
+
+        let result = crate::runtime::execute_func(&reg_module.funcs[0], &[]).unwrap();
+
+        assert_eq!(result, vec![crate::runtime::Value::I64(42)]);
+    }
+
+    fn i32_sub_mul_module() -> &'static [u8] {
+        &[
+            0x00, 0x61, 0x73, 0x6d, // magic
+            0x01, 0x00, 0x00, 0x00, // version
+            0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, // type: [] -> [i32]
+            0x03, 0x02, 0x01, 0x00, // function type 0
+            0x0a, 0x0c, 0x01, 0x0a, 0x00, // one body, no locals
+            0x41, 0x32, // i32.const 50
+            0x41, 0x08, // i32.const 8
+            0x6b, // i32.sub
+            0x41, 0x03, // i32.const 3
+            0x6c, // i32.mul
+            0x0b, // end
+        ]
+    }
+
+    fn i64_add_module() -> &'static [u8] {
+        &[
+            0x00, 0x61, 0x73, 0x6d, // magic
+            0x01, 0x00, 0x00, 0x00, // version
+            0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7e, // type: [] -> [i64]
+            0x03, 0x02, 0x01, 0x00, // function type 0
+            0x0a, 0x09, 0x01, 0x07, 0x00, // one body, no locals
+            0x42, 0x14, // i64.const 20
+            0x42, 0x16, // i64.const 22
+            0x7c, // i64.add
             0x0b, // end
         ]
     }
