@@ -65,20 +65,194 @@ pub struct RegInstr {
 /// Register-oriented operations.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RegOp {
-    LocalGet { dst: Reg, local: LocalIdx },
-    LocalSet { local: LocalIdx, value: Reg },
-    LocalTee { local: LocalIdx, value: Reg },
-    Drop { value: Reg },
-    I32Const { dst: Reg, value: i32 },
-    I64Const { dst: Reg, value: i64 },
-    F32Const { dst: Reg, value: f32 },
-    F64Const { dst: Reg, value: f64 },
-    I32Add { dst: Reg, lhs: Reg, rhs: Reg },
-    I32Sub { dst: Reg, lhs: Reg, rhs: Reg },
-    I32Mul { dst: Reg, lhs: Reg, rhs: Reg },
-    I64Add { dst: Reg, lhs: Reg, rhs: Reg },
-    I32Eqz { dst: Reg, value: Reg },
-    Return { values: Vec<Reg> },
+    LocalGet {
+        dst: Reg,
+        local: LocalIdx,
+    },
+    LocalSet {
+        local: LocalIdx,
+        value: Reg,
+    },
+    LocalTee {
+        local: LocalIdx,
+        value: Reg,
+    },
+    Drop {
+        value: Reg,
+    },
+    I32Const {
+        dst: Reg,
+        value: i32,
+    },
+    I64Const {
+        dst: Reg,
+        value: i64,
+    },
+    F32Const {
+        dst: Reg,
+        value: f32,
+    },
+    F64Const {
+        dst: Reg,
+        value: f64,
+    },
+    Unary {
+        op: UnaryOp,
+        dst: Reg,
+        value: Reg,
+    },
+    Binary {
+        op: BinaryOp,
+        dst: Reg,
+        lhs: Reg,
+        rhs: Reg,
+    },
+    Return {
+        values: Vec<Reg>,
+    },
+}
+
+/// Unary numeric operation lowered into register IR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnaryOp {
+    I32Eqz,
+    I64Eqz,
+}
+
+/// Binary numeric operation lowered into register IR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinaryOp {
+    I32Add,
+    I32Sub,
+    I32Mul,
+    I32Eq,
+    I32Ne,
+    I32LtS,
+    I32LtU,
+    I32GtS,
+    I32GtU,
+    I32LeS,
+    I32LeU,
+    I32GeS,
+    I32GeU,
+    I64Add,
+    I64Eq,
+    I64Ne,
+    I64LtS,
+    I64LtU,
+    I64GtS,
+    I64GtU,
+    I64LeS,
+    I64LeU,
+    I64GeS,
+    I64GeU,
+}
+
+impl UnaryOp {
+    fn name(self) -> &'static str {
+        match self {
+            UnaryOp::I32Eqz => "i32.eqz",
+            UnaryOp::I64Eqz => "i64.eqz",
+        }
+    }
+
+    fn input_type(self) -> ValType {
+        match self {
+            UnaryOp::I32Eqz => ValType::Num(NumType::I32),
+            UnaryOp::I64Eqz => ValType::Num(NumType::I64),
+        }
+    }
+
+    fn result_type(self) -> ValType {
+        ValType::Num(NumType::I32)
+    }
+}
+
+impl BinaryOp {
+    fn name(self) -> &'static str {
+        match self {
+            BinaryOp::I32Add => "i32.add",
+            BinaryOp::I32Sub => "i32.sub",
+            BinaryOp::I32Mul => "i32.mul",
+            BinaryOp::I32Eq => "i32.eq",
+            BinaryOp::I32Ne => "i32.ne",
+            BinaryOp::I32LtS => "i32.lt_s",
+            BinaryOp::I32LtU => "i32.lt_u",
+            BinaryOp::I32GtS => "i32.gt_s",
+            BinaryOp::I32GtU => "i32.gt_u",
+            BinaryOp::I32LeS => "i32.le_s",
+            BinaryOp::I32LeU => "i32.le_u",
+            BinaryOp::I32GeS => "i32.ge_s",
+            BinaryOp::I32GeU => "i32.ge_u",
+            BinaryOp::I64Add => "i64.add",
+            BinaryOp::I64Eq => "i64.eq",
+            BinaryOp::I64Ne => "i64.ne",
+            BinaryOp::I64LtS => "i64.lt_s",
+            BinaryOp::I64LtU => "i64.lt_u",
+            BinaryOp::I64GtS => "i64.gt_s",
+            BinaryOp::I64GtU => "i64.gt_u",
+            BinaryOp::I64LeS => "i64.le_s",
+            BinaryOp::I64LeU => "i64.le_u",
+            BinaryOp::I64GeS => "i64.ge_s",
+            BinaryOp::I64GeU => "i64.ge_u",
+        }
+    }
+
+    fn input_type(self) -> ValType {
+        match self {
+            BinaryOp::I32Add
+            | BinaryOp::I32Sub
+            | BinaryOp::I32Mul
+            | BinaryOp::I32Eq
+            | BinaryOp::I32Ne
+            | BinaryOp::I32LtS
+            | BinaryOp::I32LtU
+            | BinaryOp::I32GtS
+            | BinaryOp::I32GtU
+            | BinaryOp::I32LeS
+            | BinaryOp::I32LeU
+            | BinaryOp::I32GeS
+            | BinaryOp::I32GeU => ValType::Num(NumType::I32),
+            BinaryOp::I64Add
+            | BinaryOp::I64Eq
+            | BinaryOp::I64Ne
+            | BinaryOp::I64LtS
+            | BinaryOp::I64LtU
+            | BinaryOp::I64GtS
+            | BinaryOp::I64GtU
+            | BinaryOp::I64LeS
+            | BinaryOp::I64LeU
+            | BinaryOp::I64GeS
+            | BinaryOp::I64GeU => ValType::Num(NumType::I64),
+        }
+    }
+
+    fn result_type(self) -> ValType {
+        match self {
+            BinaryOp::I32Add | BinaryOp::I32Sub | BinaryOp::I32Mul => ValType::Num(NumType::I32),
+            BinaryOp::I64Add => ValType::Num(NumType::I64),
+            BinaryOp::I32Eq
+            | BinaryOp::I32Ne
+            | BinaryOp::I32LtS
+            | BinaryOp::I32LtU
+            | BinaryOp::I32GtS
+            | BinaryOp::I32GtU
+            | BinaryOp::I32LeS
+            | BinaryOp::I32LeU
+            | BinaryOp::I32GeS
+            | BinaryOp::I32GeU
+            | BinaryOp::I64Eq
+            | BinaryOp::I64Ne
+            | BinaryOp::I64LtS
+            | BinaryOp::I64LtU
+            | BinaryOp::I64GtS
+            | BinaryOp::I64GtU
+            | BinaryOp::I64LeS
+            | BinaryOp::I64LeU
+            | BinaryOp::I64GeS
+            | BinaryOp::I64GeU => ValType::Num(NumType::I32),
+        }
+    }
 }
 
 /// Lowering error with byte offset and optional function context.
@@ -300,50 +474,25 @@ impl FuncBuilder {
                 });
                 self.emit(offset, RegOp::F64Const { dst, value });
             }
-            Instr::I32Add => self.lower_binary(
-                offset,
-                "i32.add",
-                ValType::Num(NumType::I32),
-                |dst, lhs, rhs| RegOp::I32Add { dst, lhs, rhs },
-            )?,
-            Instr::I32Sub => self.lower_binary(
-                offset,
-                "i32.sub",
-                ValType::Num(NumType::I32),
-                |dst, lhs, rhs| RegOp::I32Sub { dst, lhs, rhs },
-            )?,
-            Instr::I32Mul => self.lower_binary(
-                offset,
-                "i32.mul",
-                ValType::Num(NumType::I32),
-                |dst, lhs, rhs| RegOp::I32Mul { dst, lhs, rhs },
-            )?,
-            Instr::I64Add => self.lower_binary(
-                offset,
-                "i64.add",
-                ValType::Num(NumType::I64),
-                |dst, lhs, rhs| RegOp::I64Add { dst, lhs, rhs },
-            )?,
-            Instr::I32Eqz => self.lower_unary(
-                offset,
-                "i32.eqz",
-                ValType::Num(NumType::I32),
-                ValType::Num(NumType::I32),
-                |dst, value| RegOp::I32Eqz { dst, value },
-            )?,
             Instr::Return | Instr::End => {
                 let values = self.pop_results(offset)?;
                 self.emit(offset, RegOp::Return { values });
                 return Ok(true);
             }
             instr => {
-                return Err(LowerError {
-                    offset,
-                    function: Some(self.func_idx),
-                    kind: LowerErrorKind::UnsupportedInstr {
-                        op: instr_name(&instr),
-                    },
-                });
+                if let Some(op) = unary_op(&instr) {
+                    self.lower_unary_op(offset, op)?;
+                } else if let Some(op) = binary_op(&instr) {
+                    self.lower_binary_op(offset, op)?;
+                } else {
+                    return Err(LowerError {
+                        offset,
+                        function: Some(self.func_idx),
+                        kind: LowerErrorKind::UnsupportedInstr {
+                            op: instr_name(&instr),
+                        },
+                    });
+                }
             }
         }
 
@@ -383,36 +532,45 @@ impl FuncBuilder {
         })
     }
 
-    fn lower_binary(
-        &mut self,
-        offset: ByteOffset,
-        op: &'static str,
-        ty: ValType,
-        make_op: impl FnOnce(Reg, Reg, Reg) -> RegOp,
-    ) -> Result<(), LowerError> {
-        let rhs = self.pop_expect(offset, op, ty)?;
-        let lhs = self.pop_expect(offset, op, ty)?;
-        let dst = self.alloc_reg(ty);
-        self.stack.push(RegValue { reg: dst, ty });
-        self.emit(offset, make_op(dst, lhs.reg, rhs.reg));
-        Ok(())
-    }
-
-    fn lower_unary(
-        &mut self,
-        offset: ByteOffset,
-        op: &'static str,
-        input: ValType,
-        output: ValType,
-        make_op: impl FnOnce(Reg, Reg) -> RegOp,
-    ) -> Result<(), LowerError> {
-        let value = self.pop_expect(offset, op, input)?;
+    fn lower_binary_op(&mut self, offset: ByteOffset, op: BinaryOp) -> Result<(), LowerError> {
+        let input = op.input_type();
+        let output = op.result_type();
+        let rhs = self.pop_expect(offset, op.name(), input)?;
+        let lhs = self.pop_expect(offset, op.name(), input)?;
         let dst = self.alloc_reg(output);
         self.stack.push(RegValue {
             reg: dst,
             ty: output,
         });
-        self.emit(offset, make_op(dst, value.reg));
+        self.emit(
+            offset,
+            RegOp::Binary {
+                op,
+                dst,
+                lhs: lhs.reg,
+                rhs: rhs.reg,
+            },
+        );
+        Ok(())
+    }
+
+    fn lower_unary_op(&mut self, offset: ByteOffset, op: UnaryOp) -> Result<(), LowerError> {
+        let input = op.input_type();
+        let output = op.result_type();
+        let value = self.pop_expect(offset, op.name(), input)?;
+        let dst = self.alloc_reg(output);
+        self.stack.push(RegValue {
+            reg: dst,
+            ty: output,
+        });
+        self.emit(
+            offset,
+            RegOp::Unary {
+                op,
+                dst,
+                value: value.reg,
+            },
+        );
         Ok(())
     }
 
@@ -452,6 +610,44 @@ impl FuncBuilder {
         }
         values.reverse();
         Ok(values)
+    }
+}
+
+fn unary_op(instr: &Instr) -> Option<UnaryOp> {
+    match instr {
+        Instr::I32Eqz => Some(UnaryOp::I32Eqz),
+        Instr::I64Eqz => Some(UnaryOp::I64Eqz),
+        _ => None,
+    }
+}
+
+fn binary_op(instr: &Instr) -> Option<BinaryOp> {
+    match instr {
+        Instr::I32Add => Some(BinaryOp::I32Add),
+        Instr::I32Sub => Some(BinaryOp::I32Sub),
+        Instr::I32Mul => Some(BinaryOp::I32Mul),
+        Instr::I32Eq => Some(BinaryOp::I32Eq),
+        Instr::I32Ne => Some(BinaryOp::I32Ne),
+        Instr::I32LtS => Some(BinaryOp::I32LtS),
+        Instr::I32LtU => Some(BinaryOp::I32LtU),
+        Instr::I32GtS => Some(BinaryOp::I32GtS),
+        Instr::I32GtU => Some(BinaryOp::I32GtU),
+        Instr::I32LeS => Some(BinaryOp::I32LeS),
+        Instr::I32LeU => Some(BinaryOp::I32LeU),
+        Instr::I32GeS => Some(BinaryOp::I32GeS),
+        Instr::I32GeU => Some(BinaryOp::I32GeU),
+        Instr::I64Add => Some(BinaryOp::I64Add),
+        Instr::I64Eq => Some(BinaryOp::I64Eq),
+        Instr::I64Ne => Some(BinaryOp::I64Ne),
+        Instr::I64LtS => Some(BinaryOp::I64LtS),
+        Instr::I64LtU => Some(BinaryOp::I64LtU),
+        Instr::I64GtS => Some(BinaryOp::I64GtS),
+        Instr::I64GtU => Some(BinaryOp::I64GtU),
+        Instr::I64LeS => Some(BinaryOp::I64LeS),
+        Instr::I64LeU => Some(BinaryOp::I64LeU),
+        Instr::I64GeS => Some(BinaryOp::I64GeS),
+        Instr::I64GeU => Some(BinaryOp::I64GeU),
+        _ => None,
     }
 }
 
@@ -515,7 +711,8 @@ mod tests {
                     dst: Reg(1),
                     local: LocalIdx(0),
                 },
-                &RegOp::I32Add {
+                &RegOp::Binary {
+                    op: BinaryOp::I32Add,
                     dst: Reg(2),
                     lhs: Reg(0),
                     rhs: Reg(1),
@@ -592,7 +789,8 @@ mod tests {
                     dst: Reg(2),
                     value: 2,
                 },
-                &RegOp::I32Add {
+                &RegOp::Binary {
+                    op: BinaryOp::I32Add,
                     dst: Reg(3),
                     lhs: Reg(1),
                     rhs: Reg(2),
@@ -639,7 +837,8 @@ mod tests {
                     dst: Reg(1),
                     value: 2,
                 },
-                &RegOp::I32Add {
+                &RegOp::Binary {
+                    op: BinaryOp::I32Add,
                     dst: Reg(2),
                     lhs: Reg(0),
                     rhs: Reg(1),
@@ -713,7 +912,8 @@ mod tests {
                     dst: Reg(1),
                     value: 8,
                 },
-                &RegOp::I32Sub {
+                &RegOp::Binary {
+                    op: BinaryOp::I32Sub,
                     dst: Reg(2),
                     lhs: Reg(0),
                     rhs: Reg(1),
@@ -722,7 +922,8 @@ mod tests {
                     dst: Reg(3),
                     value: 3,
                 },
-                &RegOp::I32Mul {
+                &RegOp::Binary {
+                    op: BinaryOp::I32Mul,
                     dst: Reg(4),
                     lhs: Reg(2),
                     rhs: Reg(3),
@@ -765,7 +966,8 @@ mod tests {
                     dst: Reg(1),
                     value: 22,
                 },
-                &RegOp::I64Add {
+                &RegOp::Binary {
+                    op: BinaryOp::I64Add,
                     dst: Reg(2),
                     lhs: Reg(0),
                     rhs: Reg(1),
@@ -834,7 +1036,8 @@ mod tests {
                     dst: Reg(0),
                     local: LocalIdx(0),
                 },
-                &RegOp::I32Eqz {
+                &RegOp::Unary {
+                    op: UnaryOp::I32Eqz,
                     dst: Reg(1),
                     value: Reg(0),
                 },

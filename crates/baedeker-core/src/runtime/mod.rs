@@ -6,7 +6,7 @@
 
 use alloc::{string::String, vec::Vec};
 
-use crate::lower::{Reg, RegFunc, RegModule, RegOp};
+use crate::lower::{BinaryOp, Reg, RegFunc, RegModule, RegOp, UnaryOp};
 use crate::types::{NumType, ValType};
 
 /// A runtime WebAssembly value.
@@ -135,28 +135,9 @@ pub fn execute_func(func: &RegFunc, args: &[Value]) -> Result<Vec<Value>, Runtim
             RegOp::F64Const { dst, value } => {
                 set_reg(&mut registers, *dst, Value::F64(*value))?;
             }
-            RegOp::I32Add { dst, lhs, rhs } => {
-                execute_i32_binary(&mut registers, *dst, *lhs, *rhs, |lhs, rhs| {
-                    lhs.wrapping_add(rhs)
-                })?
-            }
-            RegOp::I32Sub { dst, lhs, rhs } => {
-                execute_i32_binary(&mut registers, *dst, *lhs, *rhs, |lhs, rhs| {
-                    lhs.wrapping_sub(rhs)
-                })?
-            }
-            RegOp::I32Mul { dst, lhs, rhs } => {
-                execute_i32_binary(&mut registers, *dst, *lhs, *rhs, |lhs, rhs| {
-                    lhs.wrapping_mul(rhs)
-                })?
-            }
-            RegOp::I64Add { dst, lhs, rhs } => {
-                execute_i64_binary(&mut registers, *dst, *lhs, *rhs, |lhs, rhs| {
-                    lhs.wrapping_add(rhs)
-                })?
-            }
-            RegOp::I32Eqz { dst, value } => {
-                execute_i32_unary(&mut registers, *dst, *value, |value| i32::from(value == 0))?
+            RegOp::Unary { op, dst, value } => execute_unary_op(&mut registers, *op, *dst, *value)?,
+            RegOp::Binary { op, dst, lhs, rhs } => {
+                execute_binary_op(&mut registers, *op, *dst, *lhs, *rhs)?
             }
             RegOp::Return { values } => {
                 let mut results = Vec::with_capacity(values.len());
@@ -193,6 +174,89 @@ fn get_reg(registers: &[Option<Value>], reg: Reg) -> Result<Value, RuntimeError>
         })
 }
 
+fn execute_unary_op(
+    registers: &mut [Option<Value>],
+    op: UnaryOp,
+    dst: Reg,
+    value: Reg,
+) -> Result<(), RuntimeError> {
+    match op {
+        UnaryOp::I32Eqz => execute_i32_unary(registers, dst, value, |value| i32::from(value == 0)),
+        UnaryOp::I64Eqz => execute_i64_test(registers, dst, value, |value| i32::from(value == 0)),
+    }
+}
+
+fn execute_binary_op(
+    registers: &mut [Option<Value>],
+    op: BinaryOp,
+    dst: Reg,
+    lhs: Reg,
+    rhs: Reg,
+) -> Result<(), RuntimeError> {
+    match op {
+        BinaryOp::I32Add => {
+            execute_i32_binary(registers, dst, lhs, rhs, |lhs, rhs| lhs.wrapping_add(rhs))
+        }
+        BinaryOp::I32Sub => {
+            execute_i32_binary(registers, dst, lhs, rhs, |lhs, rhs| lhs.wrapping_sub(rhs))
+        }
+        BinaryOp::I32Mul => {
+            execute_i32_binary(registers, dst, lhs, rhs, |lhs, rhs| lhs.wrapping_mul(rhs))
+        }
+        BinaryOp::I32Eq => {
+            execute_i32_binary(registers, dst, lhs, rhs, |lhs, rhs| i32::from(lhs == rhs))
+        }
+        BinaryOp::I32Ne => {
+            execute_i32_binary(registers, dst, lhs, rhs, |lhs, rhs| i32::from(lhs != rhs))
+        }
+        BinaryOp::I32LtS => {
+            execute_i32_binary(registers, dst, lhs, rhs, |lhs, rhs| i32::from(lhs < rhs))
+        }
+        BinaryOp::I32LtU => execute_i32_binary(registers, dst, lhs, rhs, |lhs, rhs| {
+            i32::from((lhs as u32) < (rhs as u32))
+        }),
+        BinaryOp::I32GtS => {
+            execute_i32_binary(registers, dst, lhs, rhs, |lhs, rhs| i32::from(lhs > rhs))
+        }
+        BinaryOp::I32GtU => execute_i32_binary(registers, dst, lhs, rhs, |lhs, rhs| {
+            i32::from((lhs as u32) > (rhs as u32))
+        }),
+        BinaryOp::I32LeS => {
+            execute_i32_binary(registers, dst, lhs, rhs, |lhs, rhs| i32::from(lhs <= rhs))
+        }
+        BinaryOp::I32LeU => execute_i32_binary(registers, dst, lhs, rhs, |lhs, rhs| {
+            i32::from((lhs as u32) <= (rhs as u32))
+        }),
+        BinaryOp::I32GeS => {
+            execute_i32_binary(registers, dst, lhs, rhs, |lhs, rhs| i32::from(lhs >= rhs))
+        }
+        BinaryOp::I32GeU => execute_i32_binary(registers, dst, lhs, rhs, |lhs, rhs| {
+            i32::from((lhs as u32) >= (rhs as u32))
+        }),
+        BinaryOp::I64Add => {
+            execute_i64_binary(registers, dst, lhs, rhs, |lhs, rhs| lhs.wrapping_add(rhs))
+        }
+        BinaryOp::I64Eq => execute_i64_compare(registers, dst, lhs, rhs, |lhs, rhs| lhs == rhs),
+        BinaryOp::I64Ne => execute_i64_compare(registers, dst, lhs, rhs, |lhs, rhs| lhs != rhs),
+        BinaryOp::I64LtS => execute_i64_compare(registers, dst, lhs, rhs, |lhs, rhs| lhs < rhs),
+        BinaryOp::I64LtU => execute_i64_compare(registers, dst, lhs, rhs, |lhs, rhs| {
+            (lhs as u64) < (rhs as u64)
+        }),
+        BinaryOp::I64GtS => execute_i64_compare(registers, dst, lhs, rhs, |lhs, rhs| lhs > rhs),
+        BinaryOp::I64GtU => execute_i64_compare(registers, dst, lhs, rhs, |lhs, rhs| {
+            (lhs as u64) > (rhs as u64)
+        }),
+        BinaryOp::I64LeS => execute_i64_compare(registers, dst, lhs, rhs, |lhs, rhs| lhs <= rhs),
+        BinaryOp::I64LeU => execute_i64_compare(registers, dst, lhs, rhs, |lhs, rhs| {
+            (lhs as u64) <= (rhs as u64)
+        }),
+        BinaryOp::I64GeS => execute_i64_compare(registers, dst, lhs, rhs, |lhs, rhs| lhs >= rhs),
+        BinaryOp::I64GeU => execute_i64_compare(registers, dst, lhs, rhs, |lhs, rhs| {
+            (lhs as u64) >= (rhs as u64)
+        }),
+    }
+}
+
 fn execute_i32_binary(
     registers: &mut [Option<Value>],
     dst: Reg,
@@ -225,6 +289,28 @@ fn execute_i64_binary(
     let lhs = expect_i64(get_reg(registers, lhs)?)?;
     let rhs = expect_i64(get_reg(registers, rhs)?)?;
     set_reg(registers, dst, Value::I64(op(lhs, rhs)))
+}
+
+fn execute_i64_test(
+    registers: &mut [Option<Value>],
+    dst: Reg,
+    value: Reg,
+    op: impl FnOnce(i64) -> i32,
+) -> Result<(), RuntimeError> {
+    let value = expect_i64(get_reg(registers, value)?)?;
+    set_reg(registers, dst, Value::I32(op(value)))
+}
+
+fn execute_i64_compare(
+    registers: &mut [Option<Value>],
+    dst: Reg,
+    lhs: Reg,
+    rhs: Reg,
+    op: impl FnOnce(i64, i64) -> bool,
+) -> Result<(), RuntimeError> {
+    let lhs = expect_i64(get_reg(registers, lhs)?)?;
+    let rhs = expect_i64(get_reg(registers, rhs)?)?;
+    set_reg(registers, dst, Value::I32(i32::from(op(lhs, rhs))))
 }
 
 fn expect_i32(value: Value) -> Result<i32, RuntimeError> {
