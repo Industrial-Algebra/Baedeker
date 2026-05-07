@@ -1,0 +1,43 @@
+;; Non-trapping integer arithmetic/bitwise execution cohort.
+;; Division/remainder are intentionally excluded because they introduce trap semantics.
+
+(module
+  (func (export "i32_and") (param i32 i32) (result i32) local.get 0 local.get 1 i32.and)
+  (func (export "i32_or") (param i32 i32) (result i32) local.get 0 local.get 1 i32.or)
+  (func (export "i32_xor") (param i32 i32) (result i32) local.get 0 local.get 1 i32.xor)
+  (func (export "i32_shl") (param i32 i32) (result i32) local.get 0 local.get 1 i32.shl)
+  (func (export "i32_shr_s") (param i32 i32) (result i32) local.get 0 local.get 1 i32.shr_s)
+  (func (export "i32_shr_u") (param i32 i32) (result i32) local.get 0 local.get 1 i32.shr_u)
+  (func (export "i32_rotl") (param i32 i32) (result i32) local.get 0 local.get 1 i32.rotl)
+  (func (export "i32_rotr") (param i32 i32) (result i32) local.get 0 local.get 1 i32.rotr)
+
+  (func (export "i64_sub") (param i64 i64) (result i64) local.get 0 local.get 1 i64.sub)
+  (func (export "i64_mul") (param i64 i64) (result i64) local.get 0 local.get 1 i64.mul)
+  (func (export "i64_and") (param i64 i64) (result i64) local.get 0 local.get 1 i64.and)
+  (func (export "i64_or") (param i64 i64) (result i64) local.get 0 local.get 1 i64.or)
+  (func (export "i64_xor") (param i64 i64) (result i64) local.get 0 local.get 1 i64.xor)
+  (func (export "i64_shl") (param i64 i64) (result i64) local.get 0 local.get 1 i64.shl)
+  (func (export "i64_shr_s") (param i64 i64) (result i64) local.get 0 local.get 1 i64.shr_s)
+  (func (export "i64_shr_u") (param i64 i64) (result i64) local.get 0 local.get 1 i64.shr_u)
+  (func (export "i64_rotl") (param i64 i64) (result i64) local.get 0 local.get 1 i64.rotl)
+  (func (export "i64_rotr") (param i64 i64) (result i64) local.get 0 local.get 1 i64.rotr))
+
+(assert_return (invoke "i32_and" (i32.const 12) (i32.const 10)) (i32.const 8))
+(assert_return (invoke "i32_or" (i32.const 12) (i32.const 10)) (i32.const 14))
+(assert_return (invoke "i32_xor" (i32.const 12) (i32.const 10)) (i32.const 6))
+(assert_return (invoke "i32_shl" (i32.const 1) (i32.const 35)) (i32.const 8))
+(assert_return (invoke "i32_shr_s" (i32.const -8) (i32.const 1)) (i32.const -4))
+(assert_return (invoke "i32_shr_u" (i32.const -8) (i32.const 1)) (i32.const 2147483644))
+(assert_return (invoke "i32_rotl" (i32.const 1) (i32.const 33)) (i32.const 2))
+(assert_return (invoke "i32_rotr" (i32.const 2) (i32.const 33)) (i32.const 1))
+
+(assert_return (invoke "i64_sub" (i64.const 50) (i64.const 8)) (i64.const 42))
+(assert_return (invoke "i64_mul" (i64.const 6) (i64.const 7)) (i64.const 42))
+(assert_return (invoke "i64_and" (i64.const 12) (i64.const 10)) (i64.const 8))
+(assert_return (invoke "i64_or" (i64.const 12) (i64.const 10)) (i64.const 14))
+(assert_return (invoke "i64_xor" (i64.const 12) (i64.const 10)) (i64.const 6))
+(assert_return (invoke "i64_shl" (i64.const 1) (i64.const 67)) (i64.const 8))
+(assert_return (invoke "i64_shr_s" (i64.const -8) (i64.const 1)) (i64.const -4))
+(assert_return (invoke "i64_shr_u" (i64.const -8) (i64.const 1)) (i64.const 9223372036854775804))
+(assert_return (invoke "i64_rotl" (i64.const 1) (i64.const 65)) (i64.const 2))
+(assert_return (invoke "i64_rotr" (i64.const 2) (i64.const 65)) (i64.const 1))

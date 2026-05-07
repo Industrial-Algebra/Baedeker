@@ -125,6 +125,14 @@ pub enum BinaryOp {
     I32Add,
     I32Sub,
     I32Mul,
+    I32And,
+    I32Or,
+    I32Xor,
+    I32Shl,
+    I32ShrS,
+    I32ShrU,
+    I32Rotl,
+    I32Rotr,
     I32Eq,
     I32Ne,
     I32LtS,
@@ -136,6 +144,16 @@ pub enum BinaryOp {
     I32GeS,
     I32GeU,
     I64Add,
+    I64Sub,
+    I64Mul,
+    I64And,
+    I64Or,
+    I64Xor,
+    I64Shl,
+    I64ShrS,
+    I64ShrU,
+    I64Rotl,
+    I64Rotr,
     I64Eq,
     I64Ne,
     I64LtS,
@@ -174,6 +192,14 @@ impl BinaryOp {
             BinaryOp::I32Add => "i32.add",
             BinaryOp::I32Sub => "i32.sub",
             BinaryOp::I32Mul => "i32.mul",
+            BinaryOp::I32And => "i32.and",
+            BinaryOp::I32Or => "i32.or",
+            BinaryOp::I32Xor => "i32.xor",
+            BinaryOp::I32Shl => "i32.shl",
+            BinaryOp::I32ShrS => "i32.shr_s",
+            BinaryOp::I32ShrU => "i32.shr_u",
+            BinaryOp::I32Rotl => "i32.rotl",
+            BinaryOp::I32Rotr => "i32.rotr",
             BinaryOp::I32Eq => "i32.eq",
             BinaryOp::I32Ne => "i32.ne",
             BinaryOp::I32LtS => "i32.lt_s",
@@ -185,6 +211,16 @@ impl BinaryOp {
             BinaryOp::I32GeS => "i32.ge_s",
             BinaryOp::I32GeU => "i32.ge_u",
             BinaryOp::I64Add => "i64.add",
+            BinaryOp::I64Sub => "i64.sub",
+            BinaryOp::I64Mul => "i64.mul",
+            BinaryOp::I64And => "i64.and",
+            BinaryOp::I64Or => "i64.or",
+            BinaryOp::I64Xor => "i64.xor",
+            BinaryOp::I64Shl => "i64.shl",
+            BinaryOp::I64ShrS => "i64.shr_s",
+            BinaryOp::I64ShrU => "i64.shr_u",
+            BinaryOp::I64Rotl => "i64.rotl",
+            BinaryOp::I64Rotr => "i64.rotr",
             BinaryOp::I64Eq => "i64.eq",
             BinaryOp::I64Ne => "i64.ne",
             BinaryOp::I64LtS => "i64.lt_s",
@@ -203,6 +239,14 @@ impl BinaryOp {
             BinaryOp::I32Add
             | BinaryOp::I32Sub
             | BinaryOp::I32Mul
+            | BinaryOp::I32And
+            | BinaryOp::I32Or
+            | BinaryOp::I32Xor
+            | BinaryOp::I32Shl
+            | BinaryOp::I32ShrS
+            | BinaryOp::I32ShrU
+            | BinaryOp::I32Rotl
+            | BinaryOp::I32Rotr
             | BinaryOp::I32Eq
             | BinaryOp::I32Ne
             | BinaryOp::I32LtS
@@ -214,6 +258,16 @@ impl BinaryOp {
             | BinaryOp::I32GeS
             | BinaryOp::I32GeU => ValType::Num(NumType::I32),
             BinaryOp::I64Add
+            | BinaryOp::I64Sub
+            | BinaryOp::I64Mul
+            | BinaryOp::I64And
+            | BinaryOp::I64Or
+            | BinaryOp::I64Xor
+            | BinaryOp::I64Shl
+            | BinaryOp::I64ShrS
+            | BinaryOp::I64ShrU
+            | BinaryOp::I64Rotl
+            | BinaryOp::I64Rotr
             | BinaryOp::I64Eq
             | BinaryOp::I64Ne
             | BinaryOp::I64LtS
@@ -229,8 +283,28 @@ impl BinaryOp {
 
     fn result_type(self) -> ValType {
         match self {
-            BinaryOp::I32Add | BinaryOp::I32Sub | BinaryOp::I32Mul => ValType::Num(NumType::I32),
-            BinaryOp::I64Add => ValType::Num(NumType::I64),
+            BinaryOp::I32Add
+            | BinaryOp::I32Sub
+            | BinaryOp::I32Mul
+            | BinaryOp::I32And
+            | BinaryOp::I32Or
+            | BinaryOp::I32Xor
+            | BinaryOp::I32Shl
+            | BinaryOp::I32ShrS
+            | BinaryOp::I32ShrU
+            | BinaryOp::I32Rotl
+            | BinaryOp::I32Rotr => ValType::Num(NumType::I32),
+            BinaryOp::I64Add
+            | BinaryOp::I64Sub
+            | BinaryOp::I64Mul
+            | BinaryOp::I64And
+            | BinaryOp::I64Or
+            | BinaryOp::I64Xor
+            | BinaryOp::I64Shl
+            | BinaryOp::I64ShrS
+            | BinaryOp::I64ShrU
+            | BinaryOp::I64Rotl
+            | BinaryOp::I64Rotr => ValType::Num(NumType::I64),
             BinaryOp::I32Eq
             | BinaryOp::I32Ne
             | BinaryOp::I32LtS
@@ -626,6 +700,14 @@ fn binary_op(instr: &Instr) -> Option<BinaryOp> {
         Instr::I32Add => Some(BinaryOp::I32Add),
         Instr::I32Sub => Some(BinaryOp::I32Sub),
         Instr::I32Mul => Some(BinaryOp::I32Mul),
+        Instr::I32And => Some(BinaryOp::I32And),
+        Instr::I32Or => Some(BinaryOp::I32Or),
+        Instr::I32Xor => Some(BinaryOp::I32Xor),
+        Instr::I32Shl => Some(BinaryOp::I32Shl),
+        Instr::I32ShrS => Some(BinaryOp::I32ShrS),
+        Instr::I32ShrU => Some(BinaryOp::I32ShrU),
+        Instr::I32Rotl => Some(BinaryOp::I32Rotl),
+        Instr::I32Rotr => Some(BinaryOp::I32Rotr),
         Instr::I32Eq => Some(BinaryOp::I32Eq),
         Instr::I32Ne => Some(BinaryOp::I32Ne),
         Instr::I32LtS => Some(BinaryOp::I32LtS),
@@ -637,6 +719,16 @@ fn binary_op(instr: &Instr) -> Option<BinaryOp> {
         Instr::I32GeS => Some(BinaryOp::I32GeS),
         Instr::I32GeU => Some(BinaryOp::I32GeU),
         Instr::I64Add => Some(BinaryOp::I64Add),
+        Instr::I64Sub => Some(BinaryOp::I64Sub),
+        Instr::I64Mul => Some(BinaryOp::I64Mul),
+        Instr::I64And => Some(BinaryOp::I64And),
+        Instr::I64Or => Some(BinaryOp::I64Or),
+        Instr::I64Xor => Some(BinaryOp::I64Xor),
+        Instr::I64Shl => Some(BinaryOp::I64Shl),
+        Instr::I64ShrS => Some(BinaryOp::I64ShrS),
+        Instr::I64ShrU => Some(BinaryOp::I64ShrU),
+        Instr::I64Rotl => Some(BinaryOp::I64Rotl),
+        Instr::I64Rotr => Some(BinaryOp::I64Rotr),
         Instr::I64Eq => Some(BinaryOp::I64Eq),
         Instr::I64Ne => Some(BinaryOp::I64Ne),
         Instr::I64LtS => Some(BinaryOp::I64LtS),
