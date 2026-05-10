@@ -3,7 +3,7 @@ use std::path::Path;
 
 use baedeker_core::binary::module::Module;
 use baedeker_core::lower::RegModule;
-use baedeker_core::runtime::{Value, execute_export};
+use baedeker_core::runtime::{RuntimeError, RuntimeErrorKind, Value, execute_export};
 use wast::core::{WastArgCore, WastRetCore};
 use wast::parser::{ParseBuffer, parse};
 use wast::{QuoteWat, Wast, WastArg, WastDirective, WastExecute, WastRet};
@@ -113,6 +113,10 @@ fn run_runtime_wast_case(path: &Path) -> RuntimeWastStats {
                 stats.assertions += 1;
                 assert_return(path, current_module.as_ref(), exec, results);
             }
+            WastDirective::AssertTrap { exec, message, .. } => {
+                stats.assertions += 1;
+                assert_trap(path, current_module.as_ref(), exec, message);
+            }
             WastDirective::Invoke(invoke) => {
                 stats.assertions += 1;
                 execute_invoke(path, current_module.as_ref(), invoke);
@@ -167,11 +171,56 @@ fn assert_return(
     );
 }
 
+fn assert_trap(path: &Path, module: Option<&RegModule>, exec: WastExecute<'_>, message: &str) {
+    let WastExecute::Invoke(invoke) = exec else {
+        panic!(
+            "{}: runtime assert_trap currently supports only invoke execution",
+            path.display()
+        );
+    };
+
+    let error = execute_invoke_result(path, module, invoke).expect_err(&format!(
+        "{}: assert_trap expected {:?} trap but invocation returned successfully",
+        path.display(),
+        message
+    ));
+
+    let RuntimeErrorKind::Trap(trap) = error.kind else {
+        panic!(
+            "{}: assert_trap expected {:?} trap but got runtime error: {error:?}",
+            path.display(),
+            message
+        );
+    };
+
+    assert_eq!(
+        trap.wast_message(),
+        message,
+        "{}: assert_trap message mismatch",
+        path.display()
+    );
+}
+
 fn execute_invoke(
     path: &Path,
     module: Option<&RegModule>,
     invoke: wast::WastInvoke<'_>,
 ) -> Vec<Value> {
+    let name = invoke.name;
+    execute_invoke_result(path, module, invoke).unwrap_or_else(|error| {
+        panic!(
+            "{}: invoke {:?} failed at runtime: {error:?}",
+            path.display(),
+            name
+        )
+    })
+}
+
+fn execute_invoke_result(
+    path: &Path,
+    module: Option<&RegModule>,
+    invoke: wast::WastInvoke<'_>,
+) -> Result<Vec<Value>, RuntimeError> {
     if invoke.module.is_some() {
         panic!(
             "{}: named-module invoke is not supported by the initial runtime WAST harness",
@@ -191,13 +240,7 @@ fn execute_invoke(
         .map(|arg| arg_value(path, arg))
         .collect::<Vec<_>>();
 
-    execute_export(module, invoke.name, &args).unwrap_or_else(|error| {
-        panic!(
-            "{}: invoke {:?} failed at runtime: {error:?}",
-            path.display(),
-            invoke.name
-        )
-    })
+    execute_export(module, invoke.name, &args)
 }
 
 fn arg_value(path: &Path, arg: WastArg<'_>) -> Value {

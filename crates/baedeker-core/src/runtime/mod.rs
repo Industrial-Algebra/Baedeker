@@ -40,12 +40,30 @@ pub struct RuntimeError {
 pub enum RuntimeErrorKind {
     ArityMismatch { expected: usize, found: usize },
     TypeMismatch { expected: ValType, found: ValType },
+    Trap(RuntimeTrap),
     UninitializedLocal { local: u32 },
     UninitializedRegister { reg: Reg },
     UnknownRegister { reg: Reg },
     UnknownExport { name: String },
     ExportedFunctionNotLowered { func: u32 },
     MissingReturn,
+}
+
+/// WebAssembly runtime traps surfaced by the interpreter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeTrap {
+    IntegerDivideByZero,
+    IntegerOverflow,
+}
+
+impl RuntimeTrap {
+    /// The canonical WAST assertion message for this trap.
+    pub fn wast_message(self) -> &'static str {
+        match self {
+            RuntimeTrap::IntegerDivideByZero => "integer divide by zero",
+            RuntimeTrap::IntegerOverflow => "integer overflow",
+        }
+    }
 }
 
 /// Execute an exported lowered function by name.
@@ -203,6 +221,10 @@ fn execute_binary_op(
         BinaryOp::I32Mul => {
             execute_i32_binary(registers, dst, lhs, rhs, |lhs, rhs| lhs.wrapping_mul(rhs))
         }
+        BinaryOp::I32DivS => execute_i32_binary_checked(registers, dst, lhs, rhs, i32_div_s),
+        BinaryOp::I32DivU => execute_i32_binary_checked(registers, dst, lhs, rhs, i32_div_u),
+        BinaryOp::I32RemS => execute_i32_binary_checked(registers, dst, lhs, rhs, i32_rem_s),
+        BinaryOp::I32RemU => execute_i32_binary_checked(registers, dst, lhs, rhs, i32_rem_u),
         BinaryOp::I32And => execute_i32_binary(registers, dst, lhs, rhs, |lhs, rhs| lhs & rhs),
         BinaryOp::I32Or => execute_i32_binary(registers, dst, lhs, rhs, |lhs, rhs| lhs | rhs),
         BinaryOp::I32Xor => execute_i32_binary(registers, dst, lhs, rhs, |lhs, rhs| lhs ^ rhs),
@@ -260,6 +282,10 @@ fn execute_binary_op(
         BinaryOp::I64Mul => {
             execute_i64_binary(registers, dst, lhs, rhs, |lhs, rhs| lhs.wrapping_mul(rhs))
         }
+        BinaryOp::I64DivS => execute_i64_binary_checked(registers, dst, lhs, rhs, i64_div_s),
+        BinaryOp::I64DivU => execute_i64_binary_checked(registers, dst, lhs, rhs, i64_div_u),
+        BinaryOp::I64RemS => execute_i64_binary_checked(registers, dst, lhs, rhs, i64_rem_s),
+        BinaryOp::I64RemU => execute_i64_binary_checked(registers, dst, lhs, rhs, i64_rem_u),
         BinaryOp::I64And => execute_i64_binary(registers, dst, lhs, rhs, |lhs, rhs| lhs & rhs),
         BinaryOp::I64Or => execute_i64_binary(registers, dst, lhs, rhs, |lhs, rhs| lhs | rhs),
         BinaryOp::I64Xor => execute_i64_binary(registers, dst, lhs, rhs, |lhs, rhs| lhs ^ rhs),
@@ -311,6 +337,18 @@ fn execute_i32_binary(
     set_reg(registers, dst, Value::I32(op(lhs, rhs)))
 }
 
+fn execute_i32_binary_checked(
+    registers: &mut [Option<Value>],
+    dst: Reg,
+    lhs: Reg,
+    rhs: Reg,
+    op: impl FnOnce(i32, i32) -> Result<i32, RuntimeError>,
+) -> Result<(), RuntimeError> {
+    let lhs = expect_i32(get_reg(registers, lhs)?)?;
+    let rhs = expect_i32(get_reg(registers, rhs)?)?;
+    set_reg(registers, dst, Value::I32(op(lhs, rhs)?))
+}
+
 fn execute_i32_unary(
     registers: &mut [Option<Value>],
     dst: Reg,
@@ -333,6 +371,18 @@ fn execute_i64_binary(
     set_reg(registers, dst, Value::I64(op(lhs, rhs)))
 }
 
+fn execute_i64_binary_checked(
+    registers: &mut [Option<Value>],
+    dst: Reg,
+    lhs: Reg,
+    rhs: Reg,
+    op: impl FnOnce(i64, i64) -> Result<i64, RuntimeError>,
+) -> Result<(), RuntimeError> {
+    let lhs = expect_i64(get_reg(registers, lhs)?)?;
+    let rhs = expect_i64(get_reg(registers, rhs)?)?;
+    set_reg(registers, dst, Value::I64(op(lhs, rhs)?))
+}
+
 fn execute_i64_test(
     registers: &mut [Option<Value>],
     dst: Reg,
@@ -353,6 +403,80 @@ fn execute_i64_compare(
     let lhs = expect_i64(get_reg(registers, lhs)?)?;
     let rhs = expect_i64(get_reg(registers, rhs)?)?;
     set_reg(registers, dst, Value::I32(i32::from(op(lhs, rhs))))
+}
+
+fn i32_div_s(lhs: i32, rhs: i32) -> Result<i32, RuntimeError> {
+    if rhs == 0 {
+        return Err(trap(RuntimeTrap::IntegerDivideByZero));
+    }
+    if lhs == i32::MIN && rhs == -1 {
+        return Err(trap(RuntimeTrap::IntegerOverflow));
+    }
+    Ok(lhs / rhs)
+}
+
+fn i32_div_u(lhs: i32, rhs: i32) -> Result<i32, RuntimeError> {
+    if rhs == 0 {
+        return Err(trap(RuntimeTrap::IntegerDivideByZero));
+    }
+    Ok(((lhs as u32) / (rhs as u32)) as i32)
+}
+
+fn i32_rem_s(lhs: i32, rhs: i32) -> Result<i32, RuntimeError> {
+    if rhs == 0 {
+        return Err(trap(RuntimeTrap::IntegerDivideByZero));
+    }
+    if lhs == i32::MIN && rhs == -1 {
+        return Ok(0);
+    }
+    Ok(lhs % rhs)
+}
+
+fn i32_rem_u(lhs: i32, rhs: i32) -> Result<i32, RuntimeError> {
+    if rhs == 0 {
+        return Err(trap(RuntimeTrap::IntegerDivideByZero));
+    }
+    Ok(((lhs as u32) % (rhs as u32)) as i32)
+}
+
+fn i64_div_s(lhs: i64, rhs: i64) -> Result<i64, RuntimeError> {
+    if rhs == 0 {
+        return Err(trap(RuntimeTrap::IntegerDivideByZero));
+    }
+    if lhs == i64::MIN && rhs == -1 {
+        return Err(trap(RuntimeTrap::IntegerOverflow));
+    }
+    Ok(lhs / rhs)
+}
+
+fn i64_div_u(lhs: i64, rhs: i64) -> Result<i64, RuntimeError> {
+    if rhs == 0 {
+        return Err(trap(RuntimeTrap::IntegerDivideByZero));
+    }
+    Ok(((lhs as u64) / (rhs as u64)) as i64)
+}
+
+fn i64_rem_s(lhs: i64, rhs: i64) -> Result<i64, RuntimeError> {
+    if rhs == 0 {
+        return Err(trap(RuntimeTrap::IntegerDivideByZero));
+    }
+    if lhs == i64::MIN && rhs == -1 {
+        return Ok(0);
+    }
+    Ok(lhs % rhs)
+}
+
+fn i64_rem_u(lhs: i64, rhs: i64) -> Result<i64, RuntimeError> {
+    if rhs == 0 {
+        return Err(trap(RuntimeTrap::IntegerDivideByZero));
+    }
+    Ok(((lhs as u64) % (rhs as u64)) as i64)
+}
+
+fn trap(trap: RuntimeTrap) -> RuntimeError {
+    RuntimeError {
+        kind: RuntimeErrorKind::Trap(trap),
+    }
 }
 
 fn expect_i32(value: Value) -> Result<i32, RuntimeError> {

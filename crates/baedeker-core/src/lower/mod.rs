@@ -125,6 +125,10 @@ pub enum BinaryOp {
     I32Add,
     I32Sub,
     I32Mul,
+    I32DivS,
+    I32DivU,
+    I32RemS,
+    I32RemU,
     I32And,
     I32Or,
     I32Xor,
@@ -146,6 +150,10 @@ pub enum BinaryOp {
     I64Add,
     I64Sub,
     I64Mul,
+    I64DivS,
+    I64DivU,
+    I64RemS,
+    I64RemU,
     I64And,
     I64Or,
     I64Xor,
@@ -192,6 +200,10 @@ impl BinaryOp {
             BinaryOp::I32Add => "i32.add",
             BinaryOp::I32Sub => "i32.sub",
             BinaryOp::I32Mul => "i32.mul",
+            BinaryOp::I32DivS => "i32.div_s",
+            BinaryOp::I32DivU => "i32.div_u",
+            BinaryOp::I32RemS => "i32.rem_s",
+            BinaryOp::I32RemU => "i32.rem_u",
             BinaryOp::I32And => "i32.and",
             BinaryOp::I32Or => "i32.or",
             BinaryOp::I32Xor => "i32.xor",
@@ -213,6 +225,10 @@ impl BinaryOp {
             BinaryOp::I64Add => "i64.add",
             BinaryOp::I64Sub => "i64.sub",
             BinaryOp::I64Mul => "i64.mul",
+            BinaryOp::I64DivS => "i64.div_s",
+            BinaryOp::I64DivU => "i64.div_u",
+            BinaryOp::I64RemS => "i64.rem_s",
+            BinaryOp::I64RemU => "i64.rem_u",
             BinaryOp::I64And => "i64.and",
             BinaryOp::I64Or => "i64.or",
             BinaryOp::I64Xor => "i64.xor",
@@ -239,6 +255,10 @@ impl BinaryOp {
             BinaryOp::I32Add
             | BinaryOp::I32Sub
             | BinaryOp::I32Mul
+            | BinaryOp::I32DivS
+            | BinaryOp::I32DivU
+            | BinaryOp::I32RemS
+            | BinaryOp::I32RemU
             | BinaryOp::I32And
             | BinaryOp::I32Or
             | BinaryOp::I32Xor
@@ -260,6 +280,10 @@ impl BinaryOp {
             BinaryOp::I64Add
             | BinaryOp::I64Sub
             | BinaryOp::I64Mul
+            | BinaryOp::I64DivS
+            | BinaryOp::I64DivU
+            | BinaryOp::I64RemS
+            | BinaryOp::I64RemU
             | BinaryOp::I64And
             | BinaryOp::I64Or
             | BinaryOp::I64Xor
@@ -286,6 +310,10 @@ impl BinaryOp {
             BinaryOp::I32Add
             | BinaryOp::I32Sub
             | BinaryOp::I32Mul
+            | BinaryOp::I32DivS
+            | BinaryOp::I32DivU
+            | BinaryOp::I32RemS
+            | BinaryOp::I32RemU
             | BinaryOp::I32And
             | BinaryOp::I32Or
             | BinaryOp::I32Xor
@@ -297,6 +325,10 @@ impl BinaryOp {
             BinaryOp::I64Add
             | BinaryOp::I64Sub
             | BinaryOp::I64Mul
+            | BinaryOp::I64DivS
+            | BinaryOp::I64DivU
+            | BinaryOp::I64RemS
+            | BinaryOp::I64RemU
             | BinaryOp::I64And
             | BinaryOp::I64Or
             | BinaryOp::I64Xor
@@ -700,6 +732,10 @@ fn binary_op(instr: &Instr) -> Option<BinaryOp> {
         Instr::I32Add => Some(BinaryOp::I32Add),
         Instr::I32Sub => Some(BinaryOp::I32Sub),
         Instr::I32Mul => Some(BinaryOp::I32Mul),
+        Instr::I32DivS => Some(BinaryOp::I32DivS),
+        Instr::I32DivU => Some(BinaryOp::I32DivU),
+        Instr::I32RemS => Some(BinaryOp::I32RemS),
+        Instr::I32RemU => Some(BinaryOp::I32RemU),
         Instr::I32And => Some(BinaryOp::I32And),
         Instr::I32Or => Some(BinaryOp::I32Or),
         Instr::I32Xor => Some(BinaryOp::I32Xor),
@@ -721,6 +757,10 @@ fn binary_op(instr: &Instr) -> Option<BinaryOp> {
         Instr::I64Add => Some(BinaryOp::I64Add),
         Instr::I64Sub => Some(BinaryOp::I64Sub),
         Instr::I64Mul => Some(BinaryOp::I64Mul),
+        Instr::I64DivS => Some(BinaryOp::I64DivS),
+        Instr::I64DivU => Some(BinaryOp::I64DivU),
+        Instr::I64RemS => Some(BinaryOp::I64RemS),
+        Instr::I64RemU => Some(BinaryOp::I64RemU),
         Instr::I64And => Some(BinaryOp::I64And),
         Instr::I64Or => Some(BinaryOp::I64Or),
         Instr::I64Xor => Some(BinaryOp::I64Xor),
