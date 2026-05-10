@@ -199,7 +199,25 @@ fn execute_unary_op(
     value: Reg,
 ) -> Result<(), RuntimeError> {
     match op {
+        UnaryOp::I32Clz => {
+            execute_i32_unary(registers, dst, value, |value| value.leading_zeros() as i32)
+        }
+        UnaryOp::I32Ctz => {
+            execute_i32_unary(registers, dst, value, |value| value.trailing_zeros() as i32)
+        }
+        UnaryOp::I32Popcnt => {
+            execute_i32_unary(registers, dst, value, |value| value.count_ones() as i32)
+        }
         UnaryOp::I32Eqz => execute_i32_unary(registers, dst, value, |value| i32::from(value == 0)),
+        UnaryOp::I64Clz => {
+            execute_i64_unary(registers, dst, value, |value| value.leading_zeros() as i64)
+        }
+        UnaryOp::I64Ctz => {
+            execute_i64_unary(registers, dst, value, |value| value.trailing_zeros() as i64)
+        }
+        UnaryOp::I64Popcnt => {
+            execute_i64_unary(registers, dst, value, |value| value.count_ones() as i64)
+        }
         UnaryOp::I64Eqz => execute_i64_test(registers, dst, value, |value| i32::from(value == 0)),
     }
 }
@@ -357,6 +375,16 @@ fn execute_i32_unary(
 ) -> Result<(), RuntimeError> {
     let value = expect_i32(get_reg(registers, value)?)?;
     set_reg(registers, dst, Value::I32(op(value)))
+}
+
+fn execute_i64_unary(
+    registers: &mut [Option<Value>],
+    dst: Reg,
+    value: Reg,
+    op: impl FnOnce(i64) -> i64,
+) -> Result<(), RuntimeError> {
+    let value = expect_i64(get_reg(registers, value)?)?;
+    set_reg(registers, dst, Value::I64(op(value)))
 }
 
 fn execute_i64_binary(

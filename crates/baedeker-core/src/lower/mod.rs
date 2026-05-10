@@ -115,7 +115,13 @@ pub enum RegOp {
 /// Unary numeric operation lowered into register IR.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOp {
+    I32Clz,
+    I32Ctz,
+    I32Popcnt,
     I32Eqz,
+    I64Clz,
+    I64Ctz,
+    I64Popcnt,
     I64Eqz,
 }
 
@@ -177,20 +183,36 @@ pub enum BinaryOp {
 impl UnaryOp {
     fn name(self) -> &'static str {
         match self {
+            UnaryOp::I32Clz => "i32.clz",
+            UnaryOp::I32Ctz => "i32.ctz",
+            UnaryOp::I32Popcnt => "i32.popcnt",
             UnaryOp::I32Eqz => "i32.eqz",
+            UnaryOp::I64Clz => "i64.clz",
+            UnaryOp::I64Ctz => "i64.ctz",
+            UnaryOp::I64Popcnt => "i64.popcnt",
             UnaryOp::I64Eqz => "i64.eqz",
         }
     }
 
     fn input_type(self) -> ValType {
         match self {
-            UnaryOp::I32Eqz => ValType::Num(NumType::I32),
-            UnaryOp::I64Eqz => ValType::Num(NumType::I64),
+            UnaryOp::I32Clz | UnaryOp::I32Ctz | UnaryOp::I32Popcnt | UnaryOp::I32Eqz => {
+                ValType::Num(NumType::I32)
+            }
+            UnaryOp::I64Clz | UnaryOp::I64Ctz | UnaryOp::I64Popcnt | UnaryOp::I64Eqz => {
+                ValType::Num(NumType::I64)
+            }
         }
     }
 
     fn result_type(self) -> ValType {
-        ValType::Num(NumType::I32)
+        match self {
+            UnaryOp::I32Clz | UnaryOp::I32Ctz | UnaryOp::I32Popcnt | UnaryOp::I32Eqz => {
+                ValType::Num(NumType::I32)
+            }
+            UnaryOp::I64Clz | UnaryOp::I64Ctz | UnaryOp::I64Popcnt => ValType::Num(NumType::I64),
+            UnaryOp::I64Eqz => ValType::Num(NumType::I32),
+        }
     }
 }
 
@@ -721,7 +743,13 @@ impl FuncBuilder {
 
 fn unary_op(instr: &Instr) -> Option<UnaryOp> {
     match instr {
+        Instr::I32Clz => Some(UnaryOp::I32Clz),
+        Instr::I32Ctz => Some(UnaryOp::I32Ctz),
+        Instr::I32Popcnt => Some(UnaryOp::I32Popcnt),
         Instr::I32Eqz => Some(UnaryOp::I32Eqz),
+        Instr::I64Clz => Some(UnaryOp::I64Clz),
+        Instr::I64Ctz => Some(UnaryOp::I64Ctz),
+        Instr::I64Popcnt => Some(UnaryOp::I64Popcnt),
         Instr::I64Eqz => Some(UnaryOp::I64Eqz),
         _ => None,
     }
