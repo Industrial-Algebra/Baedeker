@@ -209,6 +209,12 @@ fn execute_unary_op(
             execute_i32_unary(registers, dst, value, |value| value.count_ones() as i32)
         }
         UnaryOp::I32Eqz => execute_i32_unary(registers, dst, value, |value| i32::from(value == 0)),
+        UnaryOp::I32Extend8S => {
+            execute_i32_unary(registers, dst, value, |value| i32::from(value as i8))
+        }
+        UnaryOp::I32Extend16S => {
+            execute_i32_unary(registers, dst, value, |value| i32::from(value as i16))
+        }
         UnaryOp::I64Clz => {
             execute_i64_unary(registers, dst, value, |value| value.leading_zeros() as i64)
         }
@@ -219,6 +225,15 @@ fn execute_unary_op(
             execute_i64_unary(registers, dst, value, |value| value.count_ones() as i64)
         }
         UnaryOp::I64Eqz => execute_i64_test(registers, dst, value, |value| i32::from(value == 0)),
+        UnaryOp::I64Extend8S => {
+            execute_i64_unary(registers, dst, value, |value| i64::from(value as i8))
+        }
+        UnaryOp::I64Extend16S => {
+            execute_i64_unary(registers, dst, value, |value| i64::from(value as i16))
+        }
+        UnaryOp::I64Extend32S => {
+            execute_i64_unary(registers, dst, value, |value| i64::from(value as i32))
+        }
     }
 }
 

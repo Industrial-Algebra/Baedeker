@@ -119,10 +119,15 @@ pub enum UnaryOp {
     I32Ctz,
     I32Popcnt,
     I32Eqz,
+    I32Extend8S,
+    I32Extend16S,
     I64Clz,
     I64Ctz,
     I64Popcnt,
     I64Eqz,
+    I64Extend8S,
+    I64Extend16S,
+    I64Extend32S,
 }
 
 /// Binary numeric operation lowered into register IR.
@@ -187,30 +192,50 @@ impl UnaryOp {
             UnaryOp::I32Ctz => "i32.ctz",
             UnaryOp::I32Popcnt => "i32.popcnt",
             UnaryOp::I32Eqz => "i32.eqz",
+            UnaryOp::I32Extend8S => "i32.extend8_s",
+            UnaryOp::I32Extend16S => "i32.extend16_s",
             UnaryOp::I64Clz => "i64.clz",
             UnaryOp::I64Ctz => "i64.ctz",
             UnaryOp::I64Popcnt => "i64.popcnt",
             UnaryOp::I64Eqz => "i64.eqz",
+            UnaryOp::I64Extend8S => "i64.extend8_s",
+            UnaryOp::I64Extend16S => "i64.extend16_s",
+            UnaryOp::I64Extend32S => "i64.extend32_s",
         }
     }
 
     fn input_type(self) -> ValType {
         match self {
-            UnaryOp::I32Clz | UnaryOp::I32Ctz | UnaryOp::I32Popcnt | UnaryOp::I32Eqz => {
-                ValType::Num(NumType::I32)
-            }
-            UnaryOp::I64Clz | UnaryOp::I64Ctz | UnaryOp::I64Popcnt | UnaryOp::I64Eqz => {
-                ValType::Num(NumType::I64)
-            }
+            UnaryOp::I32Clz
+            | UnaryOp::I32Ctz
+            | UnaryOp::I32Popcnt
+            | UnaryOp::I32Eqz
+            | UnaryOp::I32Extend8S
+            | UnaryOp::I32Extend16S => ValType::Num(NumType::I32),
+            UnaryOp::I64Clz
+            | UnaryOp::I64Ctz
+            | UnaryOp::I64Popcnt
+            | UnaryOp::I64Eqz
+            | UnaryOp::I64Extend8S
+            | UnaryOp::I64Extend16S
+            | UnaryOp::I64Extend32S => ValType::Num(NumType::I64),
         }
     }
 
     fn result_type(self) -> ValType {
         match self {
-            UnaryOp::I32Clz | UnaryOp::I32Ctz | UnaryOp::I32Popcnt | UnaryOp::I32Eqz => {
-                ValType::Num(NumType::I32)
-            }
-            UnaryOp::I64Clz | UnaryOp::I64Ctz | UnaryOp::I64Popcnt => ValType::Num(NumType::I64),
+            UnaryOp::I32Clz
+            | UnaryOp::I32Ctz
+            | UnaryOp::I32Popcnt
+            | UnaryOp::I32Eqz
+            | UnaryOp::I32Extend8S
+            | UnaryOp::I32Extend16S => ValType::Num(NumType::I32),
+            UnaryOp::I64Clz
+            | UnaryOp::I64Ctz
+            | UnaryOp::I64Popcnt
+            | UnaryOp::I64Extend8S
+            | UnaryOp::I64Extend16S
+            | UnaryOp::I64Extend32S => ValType::Num(NumType::I64),
             UnaryOp::I64Eqz => ValType::Num(NumType::I32),
         }
     }
@@ -747,10 +772,15 @@ fn unary_op(instr: &Instr) -> Option<UnaryOp> {
         Instr::I32Ctz => Some(UnaryOp::I32Ctz),
         Instr::I32Popcnt => Some(UnaryOp::I32Popcnt),
         Instr::I32Eqz => Some(UnaryOp::I32Eqz),
+        Instr::I32Extend8S => Some(UnaryOp::I32Extend8S),
+        Instr::I32Extend16S => Some(UnaryOp::I32Extend16S),
         Instr::I64Clz => Some(UnaryOp::I64Clz),
         Instr::I64Ctz => Some(UnaryOp::I64Ctz),
         Instr::I64Popcnt => Some(UnaryOp::I64Popcnt),
         Instr::I64Eqz => Some(UnaryOp::I64Eqz),
+        Instr::I64Extend8S => Some(UnaryOp::I64Extend8S),
+        Instr::I64Extend16S => Some(UnaryOp::I64Extend16S),
+        Instr::I64Extend32S => Some(UnaryOp::I64Extend32S),
         _ => None,
     }
 }
