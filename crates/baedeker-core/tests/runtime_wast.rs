@@ -247,6 +247,8 @@ fn arg_value(path: &Path, arg: WastArg<'_>) -> Value {
     match arg {
         WastArg::Core(WastArgCore::I32(value)) => Value::I32(value),
         WastArg::Core(WastArgCore::I64(value)) => Value::I64(value),
+        WastArg::Core(WastArgCore::F32(value)) => Value::F32(f32::from_bits(value.bits)),
+        WastArg::Core(WastArgCore::F64(value)) => Value::F64(f64::from_bits(value.bits)),
         other => panic!(
             "{}: unsupported runtime WAST argument: {other:?}",
             path.display()
@@ -258,6 +260,20 @@ fn expected_value(path: &Path, result: WastRet<'_>) -> Value {
     match result {
         WastRet::Core(WastRetCore::I32(value)) => Value::I32(value),
         WastRet::Core(WastRetCore::I64(value)) => Value::I64(value),
+        WastRet::Core(WastRetCore::F32(pattern)) => match pattern {
+            wast::core::NanPattern::Value(val) => Value::F32(f32::from_bits(val.bits)),
+            _ => panic!(
+                "{}: unsupported float NaN pattern in assert_return",
+                path.display()
+            ),
+        },
+        WastRet::Core(WastRetCore::F64(pattern)) => match pattern {
+            wast::core::NanPattern::Value(val) => Value::F64(f64::from_bits(val.bits)),
+            _ => panic!(
+                "{}: unsupported float NaN pattern in assert_return",
+                path.display()
+            ),
+        },
         other => panic!(
             "{}: unsupported runtime WAST expected result: {other:?}",
             path.display()

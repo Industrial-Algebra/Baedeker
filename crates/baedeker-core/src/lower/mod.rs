@@ -122,6 +122,13 @@ pub enum UnaryOp {
     I32WrapI64,
     I32Extend8S,
     I32Extend16S,
+    F32Neg,
+    F32Abs,
+    F32Sqrt,
+    F32Ceil,
+    F32Floor,
+    F32Trunc,
+    F32Nearest,
     I64Clz,
     I64Ctz,
     I64Popcnt,
@@ -131,6 +138,13 @@ pub enum UnaryOp {
     I64Extend8S,
     I64Extend16S,
     I64Extend32S,
+    F64Neg,
+    F64Abs,
+    F64Sqrt,
+    F64Ceil,
+    F64Floor,
+    F64Trunc,
+    F64Nearest,
 }
 
 /// Binary numeric operation lowered into register IR.
@@ -186,6 +200,30 @@ pub enum BinaryOp {
     I64LeU,
     I64GeS,
     I64GeU,
+    F32Add,
+    F32Sub,
+    F32Mul,
+    F32Div,
+    F32Min,
+    F32Max,
+    F64Add,
+    F64Sub,
+    F64Mul,
+    F64Div,
+    F64Min,
+    F64Max,
+    F32Eq,
+    F32Ne,
+    F32Lt,
+    F32Gt,
+    F32Le,
+    F32Ge,
+    F64Eq,
+    F64Ne,
+    F64Lt,
+    F64Gt,
+    F64Le,
+    F64Ge,
 }
 
 impl UnaryOp {
@@ -198,6 +236,13 @@ impl UnaryOp {
             UnaryOp::I32WrapI64 => "i32.wrap_i64",
             UnaryOp::I32Extend8S => "i32.extend8_s",
             UnaryOp::I32Extend16S => "i32.extend16_s",
+            UnaryOp::F32Neg => "f32.neg",
+            UnaryOp::F32Abs => "f32.abs",
+            UnaryOp::F32Sqrt => "f32.sqrt",
+            UnaryOp::F32Ceil => "f32.ceil",
+            UnaryOp::F32Floor => "f32.floor",
+            UnaryOp::F32Trunc => "f32.trunc",
+            UnaryOp::F32Nearest => "f32.nearest",
             UnaryOp::I64Clz => "i64.clz",
             UnaryOp::I64Ctz => "i64.ctz",
             UnaryOp::I64Popcnt => "i64.popcnt",
@@ -207,6 +252,13 @@ impl UnaryOp {
             UnaryOp::I64Extend8S => "i64.extend8_s",
             UnaryOp::I64Extend16S => "i64.extend16_s",
             UnaryOp::I64Extend32S => "i64.extend32_s",
+            UnaryOp::F64Neg => "f64.neg",
+            UnaryOp::F64Abs => "f64.abs",
+            UnaryOp::F64Sqrt => "f64.sqrt",
+            UnaryOp::F64Ceil => "f64.ceil",
+            UnaryOp::F64Floor => "f64.floor",
+            UnaryOp::F64Trunc => "f64.trunc",
+            UnaryOp::F64Nearest => "f64.nearest",
         }
     }
 
@@ -228,6 +280,20 @@ impl UnaryOp {
             | UnaryOp::I64Extend8S
             | UnaryOp::I64Extend16S
             | UnaryOp::I64Extend32S => ValType::Num(NumType::I64),
+            UnaryOp::F32Neg
+            | UnaryOp::F32Abs
+            | UnaryOp::F32Sqrt
+            | UnaryOp::F32Ceil
+            | UnaryOp::F32Floor
+            | UnaryOp::F32Trunc
+            | UnaryOp::F32Nearest => ValType::Num(NumType::F32),
+            UnaryOp::F64Neg
+            | UnaryOp::F64Abs
+            | UnaryOp::F64Sqrt
+            | UnaryOp::F64Ceil
+            | UnaryOp::F64Floor
+            | UnaryOp::F64Trunc
+            | UnaryOp::F64Nearest => ValType::Num(NumType::F64),
         }
     }
 
@@ -248,6 +314,20 @@ impl UnaryOp {
             | UnaryOp::I64Extend8S
             | UnaryOp::I64Extend16S
             | UnaryOp::I64Extend32S => ValType::Num(NumType::I64),
+            UnaryOp::F32Neg
+            | UnaryOp::F32Abs
+            | UnaryOp::F32Sqrt
+            | UnaryOp::F32Ceil
+            | UnaryOp::F32Floor
+            | UnaryOp::F32Trunc
+            | UnaryOp::F32Nearest => ValType::Num(NumType::F32),
+            UnaryOp::F64Neg
+            | UnaryOp::F64Abs
+            | UnaryOp::F64Sqrt
+            | UnaryOp::F64Ceil
+            | UnaryOp::F64Floor
+            | UnaryOp::F64Trunc
+            | UnaryOp::F64Nearest => ValType::Num(NumType::F64),
             UnaryOp::I64Eqz => ValType::Num(NumType::I32),
         }
     }
@@ -306,6 +386,30 @@ impl BinaryOp {
             BinaryOp::I64LeU => "i64.le_u",
             BinaryOp::I64GeS => "i64.ge_s",
             BinaryOp::I64GeU => "i64.ge_u",
+            BinaryOp::F32Add => "f32.add",
+            BinaryOp::F32Sub => "f32.sub",
+            BinaryOp::F32Mul => "f32.mul",
+            BinaryOp::F32Div => "f32.div",
+            BinaryOp::F32Min => "f32.min",
+            BinaryOp::F32Max => "f32.max",
+            BinaryOp::F64Add => "f64.add",
+            BinaryOp::F64Sub => "f64.sub",
+            BinaryOp::F64Mul => "f64.mul",
+            BinaryOp::F64Div => "f64.div",
+            BinaryOp::F64Min => "f64.min",
+            BinaryOp::F64Max => "f64.max",
+            BinaryOp::F32Eq => "f32.eq",
+            BinaryOp::F32Ne => "f32.ne",
+            BinaryOp::F32Lt => "f32.lt",
+            BinaryOp::F32Gt => "f32.gt",
+            BinaryOp::F32Le => "f32.le",
+            BinaryOp::F32Ge => "f32.ge",
+            BinaryOp::F64Eq => "f64.eq",
+            BinaryOp::F64Ne => "f64.ne",
+            BinaryOp::F64Lt => "f64.lt",
+            BinaryOp::F64Gt => "f64.gt",
+            BinaryOp::F64Le => "f64.le",
+            BinaryOp::F64Ge => "f64.ge",
         }
     }
 
@@ -361,6 +465,30 @@ impl BinaryOp {
             | BinaryOp::I64LeU
             | BinaryOp::I64GeS
             | BinaryOp::I64GeU => ValType::Num(NumType::I64),
+            BinaryOp::F32Add
+            | BinaryOp::F32Sub
+            | BinaryOp::F32Mul
+            | BinaryOp::F32Div
+            | BinaryOp::F32Min
+            | BinaryOp::F32Max
+            | BinaryOp::F32Eq
+            | BinaryOp::F32Ne
+            | BinaryOp::F32Lt
+            | BinaryOp::F32Gt
+            | BinaryOp::F32Le
+            | BinaryOp::F32Ge => ValType::Num(NumType::F32),
+            BinaryOp::F64Add
+            | BinaryOp::F64Sub
+            | BinaryOp::F64Mul
+            | BinaryOp::F64Div
+            | BinaryOp::F64Min
+            | BinaryOp::F64Max
+            | BinaryOp::F64Eq
+            | BinaryOp::F64Ne
+            | BinaryOp::F64Lt
+            | BinaryOp::F64Gt
+            | BinaryOp::F64Le
+            | BinaryOp::F64Ge => ValType::Num(NumType::F64),
         }
     }
 
@@ -416,6 +544,30 @@ impl BinaryOp {
             | BinaryOp::I64LeU
             | BinaryOp::I64GeS
             | BinaryOp::I64GeU => ValType::Num(NumType::I32),
+            BinaryOp::F32Add
+            | BinaryOp::F32Sub
+            | BinaryOp::F32Mul
+            | BinaryOp::F32Div
+            | BinaryOp::F32Min
+            | BinaryOp::F32Max => ValType::Num(NumType::F32),
+            BinaryOp::F64Add
+            | BinaryOp::F64Sub
+            | BinaryOp::F64Mul
+            | BinaryOp::F64Div
+            | BinaryOp::F64Min
+            | BinaryOp::F64Max => ValType::Num(NumType::F64),
+            BinaryOp::F32Eq
+            | BinaryOp::F32Ne
+            | BinaryOp::F32Lt
+            | BinaryOp::F32Gt
+            | BinaryOp::F32Le
+            | BinaryOp::F32Ge
+            | BinaryOp::F64Eq
+            | BinaryOp::F64Ne
+            | BinaryOp::F64Lt
+            | BinaryOp::F64Gt
+            | BinaryOp::F64Le
+            | BinaryOp::F64Ge => ValType::Num(NumType::I32),
         }
     }
 }
@@ -787,6 +939,13 @@ fn unary_op(instr: &Instr) -> Option<UnaryOp> {
         Instr::I32WrapI64 => Some(UnaryOp::I32WrapI64),
         Instr::I32Extend8S => Some(UnaryOp::I32Extend8S),
         Instr::I32Extend16S => Some(UnaryOp::I32Extend16S),
+        Instr::F32Neg => Some(UnaryOp::F32Neg),
+        Instr::F32Abs => Some(UnaryOp::F32Abs),
+        Instr::F32Sqrt => Some(UnaryOp::F32Sqrt),
+        Instr::F32Ceil => Some(UnaryOp::F32Ceil),
+        Instr::F32Floor => Some(UnaryOp::F32Floor),
+        Instr::F32Trunc => Some(UnaryOp::F32Trunc),
+        Instr::F32Nearest => Some(UnaryOp::F32Nearest),
         Instr::I64Clz => Some(UnaryOp::I64Clz),
         Instr::I64Ctz => Some(UnaryOp::I64Ctz),
         Instr::I64Popcnt => Some(UnaryOp::I64Popcnt),
@@ -796,6 +955,13 @@ fn unary_op(instr: &Instr) -> Option<UnaryOp> {
         Instr::I64Extend8S => Some(UnaryOp::I64Extend8S),
         Instr::I64Extend16S => Some(UnaryOp::I64Extend16S),
         Instr::I64Extend32S => Some(UnaryOp::I64Extend32S),
+        Instr::F64Neg => Some(UnaryOp::F64Neg),
+        Instr::F64Abs => Some(UnaryOp::F64Abs),
+        Instr::F64Sqrt => Some(UnaryOp::F64Sqrt),
+        Instr::F64Ceil => Some(UnaryOp::F64Ceil),
+        Instr::F64Floor => Some(UnaryOp::F64Floor),
+        Instr::F64Trunc => Some(UnaryOp::F64Trunc),
+        Instr::F64Nearest => Some(UnaryOp::F64Nearest),
         _ => None,
     }
 }
@@ -852,6 +1018,30 @@ fn binary_op(instr: &Instr) -> Option<BinaryOp> {
         Instr::I64LeU => Some(BinaryOp::I64LeU),
         Instr::I64GeS => Some(BinaryOp::I64GeS),
         Instr::I64GeU => Some(BinaryOp::I64GeU),
+        Instr::F32Add => Some(BinaryOp::F32Add),
+        Instr::F32Sub => Some(BinaryOp::F32Sub),
+        Instr::F32Mul => Some(BinaryOp::F32Mul),
+        Instr::F32Div => Some(BinaryOp::F32Div),
+        Instr::F32Min => Some(BinaryOp::F32Min),
+        Instr::F32Max => Some(BinaryOp::F32Max),
+        Instr::F64Add => Some(BinaryOp::F64Add),
+        Instr::F64Sub => Some(BinaryOp::F64Sub),
+        Instr::F64Mul => Some(BinaryOp::F64Mul),
+        Instr::F64Div => Some(BinaryOp::F64Div),
+        Instr::F64Min => Some(BinaryOp::F64Min),
+        Instr::F64Max => Some(BinaryOp::F64Max),
+        Instr::F32Eq => Some(BinaryOp::F32Eq),
+        Instr::F32Ne => Some(BinaryOp::F32Ne),
+        Instr::F32Lt => Some(BinaryOp::F32Lt),
+        Instr::F32Gt => Some(BinaryOp::F32Gt),
+        Instr::F32Le => Some(BinaryOp::F32Le),
+        Instr::F32Ge => Some(BinaryOp::F32Ge),
+        Instr::F64Eq => Some(BinaryOp::F64Eq),
+        Instr::F64Ne => Some(BinaryOp::F64Ne),
+        Instr::F64Lt => Some(BinaryOp::F64Lt),
+        Instr::F64Gt => Some(BinaryOp::F64Gt),
+        Instr::F64Le => Some(BinaryOp::F64Le),
+        Instr::F64Ge => Some(BinaryOp::F64Ge),
         _ => None,
     }
 }

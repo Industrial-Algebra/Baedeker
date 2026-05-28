@@ -239,6 +239,20 @@ fn execute_unary_op(
         UnaryOp::I64Extend32S => {
             execute_i64_unary(registers, dst, value, |value| i64::from(value as i32))
         }
+        UnaryOp::F32Neg => execute_f32_unary(registers, dst, value, |value| -value),
+        UnaryOp::F32Abs => execute_f32_unary(registers, dst, value, libm::fabsf),
+        UnaryOp::F32Sqrt => execute_f32_unary(registers, dst, value, libm::sqrtf),
+        UnaryOp::F32Ceil => execute_f32_unary(registers, dst, value, libm::ceilf),
+        UnaryOp::F32Floor => execute_f32_unary(registers, dst, value, libm::floorf),
+        UnaryOp::F32Trunc => execute_f32_unary(registers, dst, value, libm::truncf),
+        UnaryOp::F32Nearest => execute_f32_unary(registers, dst, value, libm::roundf),
+        UnaryOp::F64Neg => execute_f64_unary(registers, dst, value, |value| -value),
+        UnaryOp::F64Abs => execute_f64_unary(registers, dst, value, libm::fabs),
+        UnaryOp::F64Sqrt => execute_f64_unary(registers, dst, value, libm::sqrt),
+        UnaryOp::F64Ceil => execute_f64_unary(registers, dst, value, libm::ceil),
+        UnaryOp::F64Floor => execute_f64_unary(registers, dst, value, libm::floor),
+        UnaryOp::F64Trunc => execute_f64_unary(registers, dst, value, libm::trunc),
+        UnaryOp::F64Nearest => execute_f64_unary(registers, dst, value, libm::round),
     }
 }
 
@@ -360,6 +374,30 @@ fn execute_binary_op(
         BinaryOp::I64GeU => execute_i64_compare(registers, dst, lhs, rhs, |lhs, rhs| {
             (lhs as u64) >= (rhs as u64)
         }),
+        BinaryOp::F32Add => execute_f32_binary(registers, dst, lhs, rhs, |lhs, rhs| lhs + rhs),
+        BinaryOp::F32Sub => execute_f32_binary(registers, dst, lhs, rhs, |lhs, rhs| lhs - rhs),
+        BinaryOp::F32Mul => execute_f32_binary(registers, dst, lhs, rhs, |lhs, rhs| lhs * rhs),
+        BinaryOp::F32Div => execute_f32_binary(registers, dst, lhs, rhs, |lhs, rhs| lhs / rhs),
+        BinaryOp::F32Min => execute_f32_binary(registers, dst, lhs, rhs, libm::fminf),
+        BinaryOp::F32Max => execute_f32_binary(registers, dst, lhs, rhs, libm::fmaxf),
+        BinaryOp::F64Add => execute_f64_binary(registers, dst, lhs, rhs, |lhs, rhs| lhs + rhs),
+        BinaryOp::F64Sub => execute_f64_binary(registers, dst, lhs, rhs, |lhs, rhs| lhs - rhs),
+        BinaryOp::F64Mul => execute_f64_binary(registers, dst, lhs, rhs, |lhs, rhs| lhs * rhs),
+        BinaryOp::F64Div => execute_f64_binary(registers, dst, lhs, rhs, |lhs, rhs| lhs / rhs),
+        BinaryOp::F64Min => execute_f64_binary(registers, dst, lhs, rhs, libm::fmin),
+        BinaryOp::F64Max => execute_f64_binary(registers, dst, lhs, rhs, libm::fmax),
+        BinaryOp::F32Eq => execute_f32_compare(registers, dst, lhs, rhs, |lhs, rhs| lhs == rhs),
+        BinaryOp::F32Ne => execute_f32_compare(registers, dst, lhs, rhs, |lhs, rhs| lhs != rhs),
+        BinaryOp::F32Lt => execute_f32_compare(registers, dst, lhs, rhs, |lhs, rhs| lhs < rhs),
+        BinaryOp::F32Gt => execute_f32_compare(registers, dst, lhs, rhs, |lhs, rhs| lhs > rhs),
+        BinaryOp::F32Le => execute_f32_compare(registers, dst, lhs, rhs, |lhs, rhs| lhs <= rhs),
+        BinaryOp::F32Ge => execute_f32_compare(registers, dst, lhs, rhs, |lhs, rhs| lhs >= rhs),
+        BinaryOp::F64Eq => execute_f64_compare(registers, dst, lhs, rhs, |lhs, rhs| lhs == rhs),
+        BinaryOp::F64Ne => execute_f64_compare(registers, dst, lhs, rhs, |lhs, rhs| lhs != rhs),
+        BinaryOp::F64Lt => execute_f64_compare(registers, dst, lhs, rhs, |lhs, rhs| lhs < rhs),
+        BinaryOp::F64Gt => execute_f64_compare(registers, dst, lhs, rhs, |lhs, rhs| lhs > rhs),
+        BinaryOp::F64Le => execute_f64_compare(registers, dst, lhs, rhs, |lhs, rhs| lhs <= rhs),
+        BinaryOp::F64Ge => execute_f64_compare(registers, dst, lhs, rhs, |lhs, rhs| lhs >= rhs),
     }
 }
 
@@ -547,6 +585,74 @@ fn trap(trap: RuntimeTrap) -> RuntimeError {
     }
 }
 
+fn execute_f32_unary(
+    registers: &mut [Option<Value>],
+    dst: Reg,
+    value: Reg,
+    op: impl FnOnce(f32) -> f32,
+) -> Result<(), RuntimeError> {
+    let value = expect_f32(get_reg(registers, value)?)?;
+    set_reg(registers, dst, Value::F32(op(value)))
+}
+
+fn execute_f32_binary(
+    registers: &mut [Option<Value>],
+    dst: Reg,
+    lhs: Reg,
+    rhs: Reg,
+    op: impl FnOnce(f32, f32) -> f32,
+) -> Result<(), RuntimeError> {
+    let lhs = expect_f32(get_reg(registers, lhs)?)?;
+    let rhs = expect_f32(get_reg(registers, rhs)?)?;
+    set_reg(registers, dst, Value::F32(op(lhs, rhs)))
+}
+
+fn execute_f32_compare(
+    registers: &mut [Option<Value>],
+    dst: Reg,
+    lhs: Reg,
+    rhs: Reg,
+    op: impl FnOnce(f32, f32) -> bool,
+) -> Result<(), RuntimeError> {
+    let lhs = expect_f32(get_reg(registers, lhs)?)?;
+    let rhs = expect_f32(get_reg(registers, rhs)?)?;
+    set_reg(registers, dst, Value::I32(i32::from(op(lhs, rhs))))
+}
+
+fn execute_f64_unary(
+    registers: &mut [Option<Value>],
+    dst: Reg,
+    value: Reg,
+    op: impl FnOnce(f64) -> f64,
+) -> Result<(), RuntimeError> {
+    let value = expect_f64(get_reg(registers, value)?)?;
+    set_reg(registers, dst, Value::F64(op(value)))
+}
+
+fn execute_f64_binary(
+    registers: &mut [Option<Value>],
+    dst: Reg,
+    lhs: Reg,
+    rhs: Reg,
+    op: impl FnOnce(f64, f64) -> f64,
+) -> Result<(), RuntimeError> {
+    let lhs = expect_f64(get_reg(registers, lhs)?)?;
+    let rhs = expect_f64(get_reg(registers, rhs)?)?;
+    set_reg(registers, dst, Value::F64(op(lhs, rhs)))
+}
+
+fn execute_f64_compare(
+    registers: &mut [Option<Value>],
+    dst: Reg,
+    lhs: Reg,
+    rhs: Reg,
+    op: impl FnOnce(f64, f64) -> bool,
+) -> Result<(), RuntimeError> {
+    let lhs = expect_f64(get_reg(registers, lhs)?)?;
+    let rhs = expect_f64(get_reg(registers, rhs)?)?;
+    set_reg(registers, dst, Value::I32(i32::from(op(lhs, rhs))))
+}
+
 fn expect_i32(value: Value) -> Result<i32, RuntimeError> {
     match value {
         Value::I32(value) => Ok(value),
@@ -565,6 +671,30 @@ fn expect_i64(value: Value) -> Result<i64, RuntimeError> {
         value => Err(RuntimeError {
             kind: RuntimeErrorKind::TypeMismatch {
                 expected: ValType::Num(NumType::I64),
+                found: value.val_type(),
+            },
+        }),
+    }
+}
+
+fn expect_f32(value: Value) -> Result<f32, RuntimeError> {
+    match value {
+        Value::F32(value) => Ok(value),
+        value => Err(RuntimeError {
+            kind: RuntimeErrorKind::TypeMismatch {
+                expected: ValType::Num(NumType::F32),
+                found: value.val_type(),
+            },
+        }),
+    }
+}
+
+fn expect_f64(value: Value) -> Result<f64, RuntimeError> {
+    match value {
+        Value::F64(value) => Ok(value),
+        value => Err(RuntimeError {
+            kind: RuntimeErrorKind::TypeMismatch {
+                expected: ValType::Num(NumType::F64),
                 found: value.val_type(),
             },
         }),
