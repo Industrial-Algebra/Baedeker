@@ -3,6 +3,30 @@
 > A WASM runtime built in Rust, named for the most cautious and methodical of Pierson's Puppeteers.
 > Like its namesake, Baedeker proceeds carefully through unknown territory — but gets there.
 
+## Tracking
+
+**Roadmap phases and checkpoints are tracked as GitHub Issues.**
+
+- **Epics:** [Phase 0](https://github.com/Industrial-Algebra/Baedeker/issues/8) ·
+  [Phase 1](https://github.com/Industrial-Algebra/Baedeker/issues/9) ·
+  [Phase 2](https://github.com/Industrial-Algebra/Baedeker/issues/10) ·
+  [Phase 3](https://github.com/Industrial-Algebra/Baedeker/issues/11) ·
+  [Phase 4](https://github.com/Industrial-Algebra/Baedeker/issues/12) ·
+  [Phase 5](https://github.com/Industrial-Algebra/Baedeker/issues/13) ·
+  [Phase 6](https://github.com/Industrial-Algebra/Baedeker/issues/14) ·
+  [Deferred](https://github.com/Industrial-Algebra/Baedeker/issues/15)
+- **Phase 2 Checkpoints:**
+  [C1](https://github.com/Industrial-Algebra/Baedeker/issues/16) ·
+  [C2](https://github.com/Industrial-Algebra/Baedeker/issues/17) ·
+  [C3](https://github.com/Industrial-Algebra/Baedeker/issues/18) ·
+  [C4](https://github.com/Industrial-Algebra/Baedeker/issues/19)
+- **Cross-cutting:** [Spec Compliance](https://github.com/Industrial-Algebra/Baedeker/issues/20) ·
+  [Fuzzing](https://github.com/Industrial-Algebra/Baedeker/issues/21) ·
+  [Creusot Contracts](https://github.com/Industrial-Algebra/Baedeker/issues/22)
+
+The document below remains as the authoritative prose description of each phase's goals
+and design rationale. For current status, check the linked issues.
+
 ## Philosophy
 
 Baedeker is a language-runtime and systems project: its binary decoding, validation, malformed-input
@@ -871,22 +895,15 @@ leaving it as silent Phase 1 debt.
   - Explicit recursive-group and non-function-type portions of `type-rec.wast`
   - Broader recursive/GC type-system work needed for those files
 
-### Final verification snapshot
-- Current `baedeker-core` unit test count: **530 passing**
-- Current spec-harness integration tests: **8 passing** (`spec`: 3, `spec_wast`: 2, `spec_node`: 3)
-- Current corpus snapshot:
-  - `wast-upstream`: **87** active files / **622** directives
-  - raw `valid`: **236** fixtures
-  - raw `invalid-validate`: **173** fixtures
-  - raw `invalid-decode`: **38** fixtures
-  - custom `spec/wast`: **17** files
-- `spec_node` continues to cross-check the active supported raw and upstream-derived surface, while
-  Baedeker-specific boundary assertions remain outside strict Node/V8 enforcement where documented.
+### Final verification snapshot (Phase 1 closure, June 2026)
+- `baedeker-core` unit test count: **530 passing** at closure (now 550 with Phase 2 runtime)
+- Spec-harness integration tests: **8 passing** (`spec`: 3, `spec_wast`: 2, `spec_node`: 3)
+- Corpus: 87 upstream subset files, 236 valid fixtures, 173 invalid-validate fixtures, 38 invalid-decode fixtures
+- `spec_node` continues to cross-check the active supported surface.
 
-### Current branch snapshot
-Phase 1 wrap-up was completed on `feat/phase-1-part-4-final-checklist` and merged into `develop`.
-The validator and fixture/docs support matrix are now treated as the completed semantic baseline,
-with explicit follow-ons pushed out of the critical path.
+**Tracking moved to GitHub Issues as of June 2026.** See the [Tracking](#tracking) section at
+the top of this document for current issue links. Status below reflects the design intent of
+each phase; linked issues carry live progress.
 
 ### Phase 1 note
 The validator stack remains the spec-facing abstract operand/control stack used for proof of
