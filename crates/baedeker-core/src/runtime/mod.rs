@@ -54,6 +54,7 @@ pub enum RuntimeErrorKind {
 pub enum RuntimeTrap {
     IntegerDivideByZero,
     IntegerOverflow,
+    InvalidConversionToInteger,
 }
 
 impl RuntimeTrap {
@@ -62,6 +63,7 @@ impl RuntimeTrap {
         match self {
             RuntimeTrap::IntegerDivideByZero => "integer divide by zero",
             RuntimeTrap::IntegerOverflow => "integer overflow",
+            RuntimeTrap::InvalidConversionToInteger => "invalid conversion to integer",
         }
     }
 }
@@ -253,6 +255,148 @@ fn execute_unary_op(
         UnaryOp::F64Floor => execute_f64_unary(registers, dst, value, libm::floor),
         UnaryOp::F64Trunc => execute_f64_unary(registers, dst, value, libm::trunc),
         UnaryOp::F64Nearest => execute_f64_unary(registers, dst, value, libm::round),
+        UnaryOp::I32TruncF32S => {
+            execute_f32_to_i32_checked(registers, dst, value, |v| v as i32, false)
+        }
+        UnaryOp::I32TruncF32U => {
+            execute_f32_to_i32_checked(registers, dst, value, |v| v as u32 as i32, true)
+        }
+        UnaryOp::I32TruncF64S => {
+            execute_f64_to_i32_checked(registers, dst, value, |v| v as i32, false)
+        }
+        UnaryOp::I32TruncF64U => {
+            execute_f64_to_i32_checked(registers, dst, value, |v| v as u32 as i32, true)
+        }
+        UnaryOp::I64TruncF32S => {
+            execute_f32_to_i64_checked(registers, dst, value, |v| v as i64, false)
+        }
+        UnaryOp::I64TruncF32U => {
+            execute_f32_to_i64_checked(registers, dst, value, |v| v as u64 as i64, true)
+        }
+        UnaryOp::I64TruncF64S => {
+            execute_f64_to_i64_checked(registers, dst, value, |v| v as i64, false)
+        }
+        UnaryOp::I64TruncF64U => {
+            execute_f64_to_i64_checked(registers, dst, value, |v| v as u64 as i64, true)
+        }
+        UnaryOp::F32ConvertI32S => execute_i32_to_f32(registers, dst, value, |v| v as f32),
+        UnaryOp::F32ConvertI32U => execute_i32_to_f32(registers, dst, value, |v| (v as u32) as f32),
+        UnaryOp::F32ConvertI64S => execute_i64_to_f32(registers, dst, value, |v| v as f32),
+        UnaryOp::F32ConvertI64U => execute_i64_to_f32(registers, dst, value, |v| (v as u64) as f32),
+        UnaryOp::F64ConvertI32S => execute_i32_to_f64(registers, dst, value, |v| v as f64),
+        UnaryOp::F64ConvertI32U => execute_i32_to_f64(registers, dst, value, |v| (v as u32) as f64),
+        UnaryOp::F64ConvertI64S => execute_i64_to_f64(registers, dst, value, |v| v as f64),
+        UnaryOp::F64ConvertI64U => execute_i64_to_f64(registers, dst, value, |v| (v as u64) as f64),
+        UnaryOp::F32DemoteF64 => execute_f64_to_f32(registers, dst, value, |v| v as f32),
+        UnaryOp::F64PromoteF32 => execute_f32_to_f64(registers, dst, value, |v| v as f64),
+        UnaryOp::I32ReinterpretF32 => {
+            execute_f32_to_i32(registers, dst, value, |v| v.to_bits() as i32)
+        }
+        UnaryOp::F32ReinterpretI32 => {
+            execute_i32_to_f32(registers, dst, value, |v| f32::from_bits(v as u32))
+        }
+        UnaryOp::I64ReinterpretF64 => execute_f64_to_i64(registers, dst, value, |v| {
+            i64::from_ne_bytes(v.to_ne_bytes())
+        }),
+        UnaryOp::F64ReinterpretI64 => execute_i64_to_f64(registers, dst, value, |v| {
+            f64::from_ne_bytes(v.to_ne_bytes())
+        }),
+        UnaryOp::I32TruncSatF32S => {
+            execute_f32_to_i32_saturating(registers, dst, value, |v: f32| -> i32 {
+                if v.is_nan() {
+                    0
+                } else if v >= (i32::MAX as f32) {
+                    i32::MAX
+                } else if v <= (i32::MIN as f32) {
+                    i32::MIN
+                } else {
+                    v as i32
+                }
+            })
+        }
+        UnaryOp::I32TruncSatF32U => {
+            execute_f32_to_i32_saturating(registers, dst, value, |v: f32| -> i32 {
+                if v.is_nan() || v <= -1.0 {
+                    0
+                } else if v >= (u32::MAX as f32) {
+                    u32::MAX as i32
+                } else {
+                    v as u32 as i32
+                }
+            })
+        }
+        UnaryOp::I32TruncSatF64S => {
+            execute_f64_to_i32_saturating(registers, dst, value, |v: f64| -> i32 {
+                if v.is_nan() {
+                    0
+                } else if v >= (i32::MAX as f64) {
+                    i32::MAX
+                } else if v <= (i32::MIN as f64) {
+                    i32::MIN
+                } else {
+                    v as i32
+                }
+            })
+        }
+        UnaryOp::I32TruncSatF64U => {
+            execute_f64_to_i32_saturating(registers, dst, value, |v: f64| -> i32 {
+                if v.is_nan() || v <= -1.0 {
+                    0
+                } else if v >= (u32::MAX as f64) {
+                    u32::MAX as i32
+                } else {
+                    v as u32 as i32
+                }
+            })
+        }
+        UnaryOp::I64TruncSatF32S => {
+            execute_f32_to_i64_saturating(registers, dst, value, |v: f32| -> i64 {
+                if v.is_nan() {
+                    0
+                } else if v >= (i64::MAX as f32) {
+                    i64::MAX
+                } else if v <= (i64::MIN as f32) {
+                    i64::MIN
+                } else {
+                    v as i64
+                }
+            })
+        }
+        UnaryOp::I64TruncSatF32U => {
+            execute_f32_to_i64_saturating(registers, dst, value, |v: f32| -> i64 {
+                if v.is_nan() || v <= -1.0 {
+                    0
+                } else if v >= (u64::MAX as f32) {
+                    u64::MAX as i64
+                } else {
+                    v as u64 as i64
+                }
+            })
+        }
+        UnaryOp::I64TruncSatF64S => {
+            execute_f64_to_i64_saturating(registers, dst, value, |v: f64| -> i64 {
+                if v.is_nan() {
+                    0
+                } else if v >= (i64::MAX as f64) {
+                    i64::MAX
+                } else if v <= (i64::MIN as f64) {
+                    i64::MIN
+                } else {
+                    v as i64
+                }
+            })
+        }
+        UnaryOp::I64TruncSatF64U => {
+            execute_f64_to_i64_saturating(registers, dst, value, |v: f64| -> i64 {
+                if v.is_nan() || v <= -1.0 {
+                    0
+                } else if v >= (u64::MAX as f64) {
+                    u64::MAX as i64
+                } else {
+                    v as u64 as i64
+                }
+            })
+        }
     }
 }
 
@@ -651,6 +795,210 @@ fn execute_f64_compare(
     let lhs = expect_f64(get_reg(registers, lhs)?)?;
     let rhs = expect_f64(get_reg(registers, rhs)?)?;
     set_reg(registers, dst, Value::I32(i32::from(op(lhs, rhs))))
+}
+
+fn execute_i32_to_f32(
+    registers: &mut [Option<Value>],
+    dst: Reg,
+    value: Reg,
+    op: impl FnOnce(i32) -> f32,
+) -> Result<(), RuntimeError> {
+    let value = expect_i32(get_reg(registers, value)?)?;
+    set_reg(registers, dst, Value::F32(op(value)))
+}
+
+fn execute_i64_to_f32(
+    registers: &mut [Option<Value>],
+    dst: Reg,
+    value: Reg,
+    op: impl FnOnce(i64) -> f32,
+) -> Result<(), RuntimeError> {
+    let value = expect_i64(get_reg(registers, value)?)?;
+    set_reg(registers, dst, Value::F32(op(value)))
+}
+
+fn execute_i32_to_f64(
+    registers: &mut [Option<Value>],
+    dst: Reg,
+    value: Reg,
+    op: impl FnOnce(i32) -> f64,
+) -> Result<(), RuntimeError> {
+    let value = expect_i32(get_reg(registers, value)?)?;
+    set_reg(registers, dst, Value::F64(op(value)))
+}
+
+fn execute_i64_to_f64(
+    registers: &mut [Option<Value>],
+    dst: Reg,
+    value: Reg,
+    op: impl FnOnce(i64) -> f64,
+) -> Result<(), RuntimeError> {
+    let value = expect_i64(get_reg(registers, value)?)?;
+    set_reg(registers, dst, Value::F64(op(value)))
+}
+
+fn execute_f32_to_i32(
+    registers: &mut [Option<Value>],
+    dst: Reg,
+    value: Reg,
+    op: impl FnOnce(f32) -> i32,
+) -> Result<(), RuntimeError> {
+    let value = expect_f32(get_reg(registers, value)?)?;
+    set_reg(registers, dst, Value::I32(op(value)))
+}
+
+fn execute_f64_to_i64(
+    registers: &mut [Option<Value>],
+    dst: Reg,
+    value: Reg,
+    op: impl FnOnce(f64) -> i64,
+) -> Result<(), RuntimeError> {
+    let value = expect_f64(get_reg(registers, value)?)?;
+    set_reg(registers, dst, Value::I64(op(value)))
+}
+
+fn execute_f32_to_f64(
+    registers: &mut [Option<Value>],
+    dst: Reg,
+    value: Reg,
+    op: impl FnOnce(f32) -> f64,
+) -> Result<(), RuntimeError> {
+    let value = expect_f32(get_reg(registers, value)?)?;
+    set_reg(registers, dst, Value::F64(op(value)))
+}
+
+fn execute_f64_to_f32(
+    registers: &mut [Option<Value>],
+    dst: Reg,
+    value: Reg,
+    op: impl FnOnce(f64) -> f32,
+) -> Result<(), RuntimeError> {
+    let value = expect_f64(get_reg(registers, value)?)?;
+    set_reg(registers, dst, Value::F32(op(value)))
+}
+
+fn execute_f32_to_i32_checked(
+    registers: &mut [Option<Value>],
+    dst: Reg,
+    value: Reg,
+    op: impl FnOnce(f32) -> i32,
+    unsigned: bool,
+) -> Result<(), RuntimeError> {
+    let value = expect_f32(get_reg(registers, value)?)?;
+    if value.is_nan() {
+        return Err(trap(RuntimeTrap::InvalidConversionToInteger));
+    }
+    if unsigned {
+        if value <= -1.0 || value >= (u32::MAX as f32) + 0.5 {
+            return Err(trap(RuntimeTrap::IntegerOverflow));
+        }
+    } else if value >= (i32::MAX as f32) + 0.5 || value < (i32::MIN as f32) - 0.5 {
+        return Err(trap(RuntimeTrap::IntegerOverflow));
+    }
+    set_reg(registers, dst, Value::I32(op(value)))
+}
+
+fn execute_f64_to_i32_checked(
+    registers: &mut [Option<Value>],
+    dst: Reg,
+    value: Reg,
+    op: impl FnOnce(f64) -> i32,
+    unsigned: bool,
+) -> Result<(), RuntimeError> {
+    let value = expect_f64(get_reg(registers, value)?)?;
+    if value.is_nan() {
+        return Err(trap(RuntimeTrap::InvalidConversionToInteger));
+    }
+    if unsigned {
+        if value <= -1.0 || value >= (u32::MAX as f64) + 0.5 {
+            return Err(trap(RuntimeTrap::IntegerOverflow));
+        }
+    } else if value >= (i32::MAX as f64) + 0.5 || value < (i32::MIN as f64) - 0.5 {
+        return Err(trap(RuntimeTrap::IntegerOverflow));
+    }
+    set_reg(registers, dst, Value::I32(op(value)))
+}
+
+fn execute_f32_to_i64_checked(
+    registers: &mut [Option<Value>],
+    dst: Reg,
+    value: Reg,
+    op: impl FnOnce(f32) -> i64,
+    unsigned: bool,
+) -> Result<(), RuntimeError> {
+    let value = expect_f32(get_reg(registers, value)?)?;
+    if value.is_nan() {
+        return Err(trap(RuntimeTrap::InvalidConversionToInteger));
+    }
+    if unsigned {
+        if value <= -1.0 || value >= (u64::MAX as f32) + 0.5 {
+            return Err(trap(RuntimeTrap::IntegerOverflow));
+        }
+    } else if value >= (i64::MAX as f32) + 0.5 || value < (i64::MIN as f32) - 0.5 {
+        return Err(trap(RuntimeTrap::IntegerOverflow));
+    }
+    set_reg(registers, dst, Value::I64(op(value)))
+}
+
+fn execute_f64_to_i64_checked(
+    registers: &mut [Option<Value>],
+    dst: Reg,
+    value: Reg,
+    op: impl FnOnce(f64) -> i64,
+    unsigned: bool,
+) -> Result<(), RuntimeError> {
+    let value = expect_f64(get_reg(registers, value)?)?;
+    if value.is_nan() {
+        return Err(trap(RuntimeTrap::InvalidConversionToInteger));
+    }
+    if unsigned {
+        if value <= -1.0 || value >= (u64::MAX as f64) + 0.5 {
+            return Err(trap(RuntimeTrap::IntegerOverflow));
+        }
+    } else if value >= (i64::MAX as f64) + 0.5 || value < (i64::MIN as f64) - 0.5 {
+        return Err(trap(RuntimeTrap::IntegerOverflow));
+    }
+    set_reg(registers, dst, Value::I64(op(value)))
+}
+
+fn execute_f32_to_i32_saturating(
+    registers: &mut [Option<Value>],
+    dst: Reg,
+    value: Reg,
+    op: impl FnOnce(f32) -> i32,
+) -> Result<(), RuntimeError> {
+    let value = expect_f32(get_reg(registers, value)?)?;
+    set_reg(registers, dst, Value::I32(op(value)))
+}
+
+fn execute_f64_to_i32_saturating(
+    registers: &mut [Option<Value>],
+    dst: Reg,
+    value: Reg,
+    op: impl FnOnce(f64) -> i32,
+) -> Result<(), RuntimeError> {
+    let value = expect_f64(get_reg(registers, value)?)?;
+    set_reg(registers, dst, Value::I32(op(value)))
+}
+
+fn execute_f32_to_i64_saturating(
+    registers: &mut [Option<Value>],
+    dst: Reg,
+    value: Reg,
+    op: impl FnOnce(f32) -> i64,
+) -> Result<(), RuntimeError> {
+    let value = expect_f32(get_reg(registers, value)?)?;
+    set_reg(registers, dst, Value::I64(op(value)))
+}
+
+fn execute_f64_to_i64_saturating(
+    registers: &mut [Option<Value>],
+    dst: Reg,
+    value: Reg,
+    op: impl FnOnce(f64) -> i64,
+) -> Result<(), RuntimeError> {
+    let value = expect_f64(get_reg(registers, value)?)?;
+    set_reg(registers, dst, Value::I64(op(value)))
 }
 
 fn expect_i32(value: Value) -> Result<i32, RuntimeError> {

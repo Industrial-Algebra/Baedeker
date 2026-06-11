@@ -122,6 +122,14 @@ pub enum UnaryOp {
     I32WrapI64,
     I32Extend8S,
     I32Extend16S,
+    I32TruncF32S,
+    I32TruncF32U,
+    I32TruncF64S,
+    I32TruncF64U,
+    F32ConvertI32S,
+    F32ConvertI32U,
+    F64ConvertI32S,
+    F64ConvertI32U,
     F32Neg,
     F32Abs,
     F32Sqrt,
@@ -138,6 +146,14 @@ pub enum UnaryOp {
     I64Extend8S,
     I64Extend16S,
     I64Extend32S,
+    I64TruncF32S,
+    I64TruncF32U,
+    I64TruncF64S,
+    I64TruncF64U,
+    F32ConvertI64S,
+    F32ConvertI64U,
+    F64ConvertI64S,
+    F64ConvertI64U,
     F64Neg,
     F64Abs,
     F64Sqrt,
@@ -145,6 +161,20 @@ pub enum UnaryOp {
     F64Floor,
     F64Trunc,
     F64Nearest,
+    F32DemoteF64,
+    F64PromoteF32,
+    I32ReinterpretF32,
+    F32ReinterpretI32,
+    I64ReinterpretF64,
+    F64ReinterpretI64,
+    I32TruncSatF32S,
+    I32TruncSatF32U,
+    I32TruncSatF64S,
+    I32TruncSatF64U,
+    I64TruncSatF32S,
+    I64TruncSatF32U,
+    I64TruncSatF64S,
+    I64TruncSatF64U,
 }
 
 /// Binary numeric operation lowered into register IR.
@@ -236,6 +266,14 @@ impl UnaryOp {
             UnaryOp::I32WrapI64 => "i32.wrap_i64",
             UnaryOp::I32Extend8S => "i32.extend8_s",
             UnaryOp::I32Extend16S => "i32.extend16_s",
+            UnaryOp::I32TruncF32S => "i32.trunc_f32_s",
+            UnaryOp::I32TruncF32U => "i32.trunc_f32_u",
+            UnaryOp::I32TruncF64S => "i32.trunc_f64_s",
+            UnaryOp::I32TruncF64U => "i32.trunc_f64_u",
+            UnaryOp::F32ConvertI32S => "f32.convert_i32_s",
+            UnaryOp::F32ConvertI32U => "f32.convert_i32_u",
+            UnaryOp::F64ConvertI32S => "f64.convert_i32_s",
+            UnaryOp::F64ConvertI32U => "f64.convert_i32_u",
             UnaryOp::F32Neg => "f32.neg",
             UnaryOp::F32Abs => "f32.abs",
             UnaryOp::F32Sqrt => "f32.sqrt",
@@ -252,6 +290,14 @@ impl UnaryOp {
             UnaryOp::I64Extend8S => "i64.extend8_s",
             UnaryOp::I64Extend16S => "i64.extend16_s",
             UnaryOp::I64Extend32S => "i64.extend32_s",
+            UnaryOp::I64TruncF32S => "i64.trunc_f32_s",
+            UnaryOp::I64TruncF32U => "i64.trunc_f32_u",
+            UnaryOp::I64TruncF64S => "i64.trunc_f64_s",
+            UnaryOp::I64TruncF64U => "i64.trunc_f64_u",
+            UnaryOp::F32ConvertI64S => "f32.convert_i64_s",
+            UnaryOp::F32ConvertI64U => "f32.convert_i64_u",
+            UnaryOp::F64ConvertI64S => "f64.convert_i64_s",
+            UnaryOp::F64ConvertI64U => "f64.convert_i64_u",
             UnaryOp::F64Neg => "f64.neg",
             UnaryOp::F64Abs => "f64.abs",
             UnaryOp::F64Sqrt => "f64.sqrt",
@@ -259,6 +305,20 @@ impl UnaryOp {
             UnaryOp::F64Floor => "f64.floor",
             UnaryOp::F64Trunc => "f64.trunc",
             UnaryOp::F64Nearest => "f64.nearest",
+            UnaryOp::F32DemoteF64 => "f32.demote_f64",
+            UnaryOp::F64PromoteF32 => "f64.promote_f32",
+            UnaryOp::I32ReinterpretF32 => "i32.reinterpret_f32",
+            UnaryOp::F32ReinterpretI32 => "f32.reinterpret_i32",
+            UnaryOp::I64ReinterpretF64 => "i64.reinterpret_f64",
+            UnaryOp::F64ReinterpretI64 => "f64.reinterpret_i64",
+            UnaryOp::I32TruncSatF32S => "i32.trunc_sat_f32_s",
+            UnaryOp::I32TruncSatF32U => "i32.trunc_sat_f32_u",
+            UnaryOp::I32TruncSatF64S => "i32.trunc_sat_f64_s",
+            UnaryOp::I32TruncSatF64U => "i32.trunc_sat_f64_u",
+            UnaryOp::I64TruncSatF32S => "i64.trunc_sat_f32_s",
+            UnaryOp::I64TruncSatF32U => "i64.trunc_sat_f32_u",
+            UnaryOp::I64TruncSatF64S => "i64.trunc_sat_f64_s",
+            UnaryOp::I64TruncSatF64U => "i64.trunc_sat_f64_u",
         }
     }
 
@@ -271,7 +331,12 @@ impl UnaryOp {
             | UnaryOp::I32Extend8S
             | UnaryOp::I32Extend16S
             | UnaryOp::I64ExtendI32S
-            | UnaryOp::I64ExtendI32U => ValType::Num(NumType::I32),
+            | UnaryOp::I64ExtendI32U
+            | UnaryOp::F32ConvertI32S
+            | UnaryOp::F32ConvertI32U
+            | UnaryOp::F64ConvertI32S
+            | UnaryOp::F64ConvertI32U
+            | UnaryOp::F32ReinterpretI32 => ValType::Num(NumType::I32),
             UnaryOp::I64Clz
             | UnaryOp::I64Ctz
             | UnaryOp::I64Popcnt
@@ -279,21 +344,46 @@ impl UnaryOp {
             | UnaryOp::I32WrapI64
             | UnaryOp::I64Extend8S
             | UnaryOp::I64Extend16S
-            | UnaryOp::I64Extend32S => ValType::Num(NumType::I64),
+            | UnaryOp::I64Extend32S
+            | UnaryOp::F32ConvertI64S
+            | UnaryOp::F32ConvertI64U
+            | UnaryOp::F64ConvertI64S
+            | UnaryOp::F64ConvertI64U
+            | UnaryOp::F64ReinterpretI64 => ValType::Num(NumType::I64),
             UnaryOp::F32Neg
             | UnaryOp::F32Abs
             | UnaryOp::F32Sqrt
             | UnaryOp::F32Ceil
             | UnaryOp::F32Floor
             | UnaryOp::F32Trunc
-            | UnaryOp::F32Nearest => ValType::Num(NumType::F32),
+            | UnaryOp::F32Nearest
+            | UnaryOp::I32TruncF32S
+            | UnaryOp::I32TruncF32U
+            | UnaryOp::I64TruncF32S
+            | UnaryOp::I64TruncF32U
+            | UnaryOp::F64PromoteF32
+            | UnaryOp::I32ReinterpretF32
+            | UnaryOp::I32TruncSatF32S
+            | UnaryOp::I32TruncSatF32U
+            | UnaryOp::I64TruncSatF32S
+            | UnaryOp::I64TruncSatF32U => ValType::Num(NumType::F32),
             UnaryOp::F64Neg
             | UnaryOp::F64Abs
             | UnaryOp::F64Sqrt
             | UnaryOp::F64Ceil
             | UnaryOp::F64Floor
             | UnaryOp::F64Trunc
-            | UnaryOp::F64Nearest => ValType::Num(NumType::F64),
+            | UnaryOp::F64Nearest
+            | UnaryOp::I32TruncF64S
+            | UnaryOp::I32TruncF64U
+            | UnaryOp::I64TruncF64S
+            | UnaryOp::I64TruncF64U
+            | UnaryOp::F32DemoteF64
+            | UnaryOp::I64ReinterpretF64
+            | UnaryOp::I32TruncSatF64S
+            | UnaryOp::I32TruncSatF64U
+            | UnaryOp::I64TruncSatF64S
+            | UnaryOp::I64TruncSatF64U => ValType::Num(NumType::F64),
         }
     }
 
@@ -305,7 +395,16 @@ impl UnaryOp {
             | UnaryOp::I32Eqz
             | UnaryOp::I32WrapI64
             | UnaryOp::I32Extend8S
-            | UnaryOp::I32Extend16S => ValType::Num(NumType::I32),
+            | UnaryOp::I32Extend16S
+            | UnaryOp::I32TruncF32S
+            | UnaryOp::I32TruncF32U
+            | UnaryOp::I32TruncF64S
+            | UnaryOp::I32TruncF64U
+            | UnaryOp::I32TruncSatF32S
+            | UnaryOp::I32TruncSatF32U
+            | UnaryOp::I32TruncSatF64S
+            | UnaryOp::I32TruncSatF64U
+            | UnaryOp::I32ReinterpretF32 => ValType::Num(NumType::I32),
             UnaryOp::I64Clz
             | UnaryOp::I64Ctz
             | UnaryOp::I64Popcnt
@@ -313,21 +412,42 @@ impl UnaryOp {
             | UnaryOp::I64ExtendI32U
             | UnaryOp::I64Extend8S
             | UnaryOp::I64Extend16S
-            | UnaryOp::I64Extend32S => ValType::Num(NumType::I64),
+            | UnaryOp::I64Extend32S
+            | UnaryOp::I64TruncF32S
+            | UnaryOp::I64TruncF32U
+            | UnaryOp::I64TruncF64S
+            | UnaryOp::I64TruncF64U
+            | UnaryOp::I64TruncSatF32S
+            | UnaryOp::I64TruncSatF32U
+            | UnaryOp::I64TruncSatF64S
+            | UnaryOp::I64TruncSatF64U
+            | UnaryOp::I64ReinterpretF64 => ValType::Num(NumType::I64),
             UnaryOp::F32Neg
             | UnaryOp::F32Abs
             | UnaryOp::F32Sqrt
             | UnaryOp::F32Ceil
             | UnaryOp::F32Floor
             | UnaryOp::F32Trunc
-            | UnaryOp::F32Nearest => ValType::Num(NumType::F32),
+            | UnaryOp::F32Nearest
+            | UnaryOp::F32ConvertI32S
+            | UnaryOp::F32ConvertI32U
+            | UnaryOp::F32ConvertI64S
+            | UnaryOp::F32ConvertI64U
+            | UnaryOp::F32DemoteF64
+            | UnaryOp::F32ReinterpretI32 => ValType::Num(NumType::F32),
             UnaryOp::F64Neg
             | UnaryOp::F64Abs
             | UnaryOp::F64Sqrt
             | UnaryOp::F64Ceil
             | UnaryOp::F64Floor
             | UnaryOp::F64Trunc
-            | UnaryOp::F64Nearest => ValType::Num(NumType::F64),
+            | UnaryOp::F64Nearest
+            | UnaryOp::F64ConvertI32S
+            | UnaryOp::F64ConvertI32U
+            | UnaryOp::F64ConvertI64S
+            | UnaryOp::F64ConvertI64U
+            | UnaryOp::F64PromoteF32
+            | UnaryOp::F64ReinterpretI64 => ValType::Num(NumType::F64),
             UnaryOp::I64Eqz => ValType::Num(NumType::I32),
         }
     }
@@ -939,6 +1059,14 @@ fn unary_op(instr: &Instr) -> Option<UnaryOp> {
         Instr::I32WrapI64 => Some(UnaryOp::I32WrapI64),
         Instr::I32Extend8S => Some(UnaryOp::I32Extend8S),
         Instr::I32Extend16S => Some(UnaryOp::I32Extend16S),
+        Instr::I32TruncF32S => Some(UnaryOp::I32TruncF32S),
+        Instr::I32TruncF32U => Some(UnaryOp::I32TruncF32U),
+        Instr::I32TruncF64S => Some(UnaryOp::I32TruncF64S),
+        Instr::I32TruncF64U => Some(UnaryOp::I32TruncF64U),
+        Instr::F32ConvertI32S => Some(UnaryOp::F32ConvertI32S),
+        Instr::F32ConvertI32U => Some(UnaryOp::F32ConvertI32U),
+        Instr::F64ConvertI32S => Some(UnaryOp::F64ConvertI32S),
+        Instr::F64ConvertI32U => Some(UnaryOp::F64ConvertI32U),
         Instr::F32Neg => Some(UnaryOp::F32Neg),
         Instr::F32Abs => Some(UnaryOp::F32Abs),
         Instr::F32Sqrt => Some(UnaryOp::F32Sqrt),
@@ -955,6 +1083,14 @@ fn unary_op(instr: &Instr) -> Option<UnaryOp> {
         Instr::I64Extend8S => Some(UnaryOp::I64Extend8S),
         Instr::I64Extend16S => Some(UnaryOp::I64Extend16S),
         Instr::I64Extend32S => Some(UnaryOp::I64Extend32S),
+        Instr::I64TruncF32S => Some(UnaryOp::I64TruncF32S),
+        Instr::I64TruncF32U => Some(UnaryOp::I64TruncF32U),
+        Instr::I64TruncF64S => Some(UnaryOp::I64TruncF64S),
+        Instr::I64TruncF64U => Some(UnaryOp::I64TruncF64U),
+        Instr::F32ConvertI64S => Some(UnaryOp::F32ConvertI64S),
+        Instr::F32ConvertI64U => Some(UnaryOp::F32ConvertI64U),
+        Instr::F64ConvertI64S => Some(UnaryOp::F64ConvertI64S),
+        Instr::F64ConvertI64U => Some(UnaryOp::F64ConvertI64U),
         Instr::F64Neg => Some(UnaryOp::F64Neg),
         Instr::F64Abs => Some(UnaryOp::F64Abs),
         Instr::F64Sqrt => Some(UnaryOp::F64Sqrt),
@@ -962,6 +1098,20 @@ fn unary_op(instr: &Instr) -> Option<UnaryOp> {
         Instr::F64Floor => Some(UnaryOp::F64Floor),
         Instr::F64Trunc => Some(UnaryOp::F64Trunc),
         Instr::F64Nearest => Some(UnaryOp::F64Nearest),
+        Instr::F32DemoteF64 => Some(UnaryOp::F32DemoteF64),
+        Instr::F64PromoteF32 => Some(UnaryOp::F64PromoteF32),
+        Instr::I32ReinterpretF32 => Some(UnaryOp::I32ReinterpretF32),
+        Instr::F32ReinterpretI32 => Some(UnaryOp::F32ReinterpretI32),
+        Instr::I64ReinterpretF64 => Some(UnaryOp::I64ReinterpretF64),
+        Instr::F64ReinterpretI64 => Some(UnaryOp::F64ReinterpretI64),
+        Instr::I32TruncSatF32S => Some(UnaryOp::I32TruncSatF32S),
+        Instr::I32TruncSatF32U => Some(UnaryOp::I32TruncSatF32U),
+        Instr::I32TruncSatF64S => Some(UnaryOp::I32TruncSatF64S),
+        Instr::I32TruncSatF64U => Some(UnaryOp::I32TruncSatF64U),
+        Instr::I64TruncSatF32S => Some(UnaryOp::I64TruncSatF32S),
+        Instr::I64TruncSatF32U => Some(UnaryOp::I64TruncSatF32U),
+        Instr::I64TruncSatF64S => Some(UnaryOp::I64TruncSatF64S),
+        Instr::I64TruncSatF64U => Some(UnaryOp::I64TruncSatF64U),
         _ => None,
     }
 }
