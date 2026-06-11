@@ -6,7 +6,7 @@
 
 use alloc::{string::String, vec::Vec};
 
-use crate::lower::{BinaryOp, Reg, RegFunc, RegModule, RegOp, UnaryOp};
+use crate::lower::{BinaryOp, Reg, RegFunc, RegInstr, RegModule, RegOp, RegTerm, UnaryOp};
 use crate::types::{NumType, ValType};
 
 /// A runtime WebAssembly value.
@@ -122,56 +122,94 @@ pub fn execute_func(func: &RegFunc, args: &[Value]) -> Result<Vec<Value>, Runtim
 
     let mut registers = alloc::vec![None; func.reg_types.len()];
 
-    for instr in &func.instrs {
-        match &instr.op {
-            RegOp::LocalGet { dst, local } => {
-                let value = locals
-                    .get(local.0 as usize)
-                    .and_then(|value| *value)
-                    .ok_or(RuntimeError {
-                        kind: RuntimeErrorKind::UninitializedLocal { local: local.0 },
-                    })?;
-                set_reg(&mut registers, *dst, value)?;
-            }
-            RegOp::LocalSet { local, value } | RegOp::LocalTee { local, value } => {
-                let value = get_reg(&registers, *value)?;
-                let slot = locals.get_mut(local.0 as usize).ok_or(RuntimeError {
-                    kind: RuntimeErrorKind::UninitializedLocal { local: local.0 },
-                })?;
-                *slot = Some(value);
-            }
-            RegOp::Drop { value } => {
-                get_reg(&registers, *value)?;
-            }
-            RegOp::I32Const { dst, value } => {
-                set_reg(&mut registers, *dst, Value::I32(*value))?;
-            }
-            RegOp::I64Const { dst, value } => {
-                set_reg(&mut registers, *dst, Value::I64(*value))?;
-            }
-            RegOp::F32Const { dst, value } => {
-                set_reg(&mut registers, *dst, Value::F32(*value))?;
-            }
-            RegOp::F64Const { dst, value } => {
-                set_reg(&mut registers, *dst, Value::F64(*value))?;
-            }
-            RegOp::Unary { op, dst, value } => execute_unary_op(&mut registers, *op, *dst, *value)?,
-            RegOp::Binary { op, dst, lhs, rhs } => {
-                execute_binary_op(&mut registers, *op, *dst, *lhs, *rhs)?
-            }
-            RegOp::Return { values } => {
+    if func.blocks.is_empty() {
+        return Err(RuntimeError {
+            kind: RuntimeErrorKind::MissingReturn,
+        });
+    }
+
+    let mut block_idx: u32 = 0;
+    loop {
+        let block = func
+            .blocks
+            .get(block_idx as usize)
+            .ok_or(RuntimeError {
+                kind: RuntimeErrorKind::MissingReturn,
+            })?;
+
+        // Execute straight-line instructions in this block
+        for instr in &block.instrs {
+            execute_reg_op(&mut registers, &mut locals, instr)?;
+        }
+
+        // Follow the terminator
+        match &block.term {
+            RegTerm::Return { values } => {
                 let mut results = Vec::with_capacity(values.len());
                 for &reg in values {
                     results.push(get_reg(&registers, reg)?);
                 }
                 return Ok(results);
             }
+            RegTerm::Br { target, .. } => {
+                block_idx = target.0;
+                // Continue the loop to execute the target block
+            }
+            RegTerm::Fallthrough => {
+                block_idx += 1;
+                if block_idx as usize >= func.blocks.len() {
+                    return Err(RuntimeError {
+                        kind: RuntimeErrorKind::MissingReturn,
+                    });
+                }
+            }
         }
     }
+}
 
-    Err(RuntimeError {
-        kind: RuntimeErrorKind::MissingReturn,
-    })
+fn execute_reg_op(
+    registers: &mut [Option<Value>],
+    locals: &mut [Option<Value>],
+    instr: &RegInstr,
+) -> Result<(), RuntimeError> {
+    match &instr.op {
+        RegOp::LocalGet { dst, local } => {
+            let value = locals
+                .get(local.0 as usize)
+                .and_then(|value| *value)
+                .ok_or(RuntimeError {
+                    kind: RuntimeErrorKind::UninitializedLocal { local: local.0 },
+                })?;
+            set_reg(registers, *dst, value)?;
+        }
+        RegOp::LocalSet { local, value } | RegOp::LocalTee { local, value } => {
+            let value = get_reg(registers, *value)?;
+            let slot = locals.get_mut(local.0 as usize).ok_or(RuntimeError {
+                kind: RuntimeErrorKind::UninitializedLocal { local: local.0 },
+            })?;
+            *slot = Some(value);
+        }
+        RegOp::Drop { value } => {
+            get_reg(registers, *value)?;
+        }
+        RegOp::I32Const { dst, value } => {
+            set_reg(registers, *dst, Value::I32(*value))?;
+        }
+        RegOp::I64Const { dst, value } => {
+            set_reg(registers, *dst, Value::I64(*value))?;
+        }
+        RegOp::F32Const { dst, value } => {
+            set_reg(registers, *dst, Value::F32(*value))?;
+        }
+        RegOp::F64Const { dst, value } => {
+            set_reg(registers, *dst, Value::F64(*value))?;
+        }
+        RegOp::Unary { op, dst, value } => execute_unary_op(registers, *op, *dst, *value)?,
+        RegOp::Binary { op, dst, lhs, rhs } => {
+            execute_binary_op(registers, *op, *dst, *lhs, *rhs)?
+        }
+    }
+    Ok(())
 }
 
 fn set_reg(registers: &mut [Option<Value>], reg: Reg, value: Value) -> Result<(), RuntimeError> {

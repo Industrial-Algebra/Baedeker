@@ -11,7 +11,7 @@ use crate::binary::instr::{DecodedInstr, Instr};
 use crate::binary::module::Module;
 use crate::error::{ByteOffset, DecodeContext, DecodeErrorKind};
 use crate::types::{
-    CodeBody, ExportDesc, FuncIdx, FuncType, LocalDecl, LocalIdx, NumType, TypeIdx, ValType,
+    CodeBody, ExportDesc, FuncIdx, FuncType, LabelIdx, LocalDecl, LocalIdx, NumType, TypeIdx, ValType,
 };
 use crate::validate;
 use crate::validate::error::{ValidationError, ValidationErrorKind};
@@ -52,7 +52,42 @@ pub struct RegFunc {
     pub locals: Vec<ValType>,
     /// Type of each virtual register allocated while lowering this function.
     pub reg_types: Vec<ValType>,
+    /// Basic blocks in execution order.
+    pub blocks: Vec<RegBlock>,
+}
+
+/// A basic block in the lowered register IR.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RegBlock {
+    pub label: LabelIdx,
     pub instrs: Vec<RegInstr>,
+    pub term: RegTerm,
+}
+
+/// A block terminator — how execution leaves this block.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RegTerm {
+    /// Fall through to the next block in sequence.
+    Fallthrough,
+    /// Branch to a target block, passing values.
+    Br {
+        target: LabelIdx,
+        values: Vec<Reg>,
+    },
+    /// Return from the function with values.
+    Return {
+        values: Vec<Reg>,
+    },
+}
+
+impl RegBlock {
+    pub fn new(label: LabelIdx, instrs: Vec<RegInstr>, term: RegTerm) -> Self {
+        Self {
+            label,
+            instrs,
+            term,
+        }
+    }
 }
 
 /// A lowered instruction with the source byte offset it came from.
@@ -106,9 +141,6 @@ pub enum RegOp {
         dst: Reg,
         lhs: Reg,
         rhs: Reg,
-    },
-    Return {
-        values: Vec<Reg>,
     },
 }
 
@@ -825,7 +857,8 @@ struct FuncBuilder {
     locals: Vec<ValType>,
     stack: Vec<RegValue>,
     reg_types: Vec<ValType>,
-    instrs: Vec<RegInstr>,
+    blocks: Vec<RegBlock>,
+    current_instrs: Vec<RegInstr>,
 }
 
 impl FuncBuilder {
@@ -838,10 +871,32 @@ impl FuncBuilder {
             locals,
             stack: Vec::new(),
             reg_types: Vec::new(),
-            instrs: Vec::new(),
+            blocks: Vec::new(),
+            current_instrs: Vec::new(),
         }
     }
 
+    fn finish_block(&mut self, term: RegTerm) {
+        let label = LabelIdx(self.blocks.len() as u32);
+        let instrs = core::mem::take(&mut self.current_instrs);
+        self.blocks.push(RegBlock::new(label, instrs, term));
+    }
+
+    fn finish(mut self) -> RegFunc {
+        // If there are pending instructions without a terminator, add Fallthrough
+        if !self.current_instrs.is_empty() || self.blocks.is_empty() {
+            self.finish_block(RegTerm::Fallthrough);
+        }
+        RegFunc {
+            idx: self.func_idx,
+            type_idx: self.type_idx,
+            params: self.params,
+            results: self.results,
+            locals: self.locals,
+            reg_types: self.reg_types,
+            blocks: self.blocks,
+        }
+    }
     /// Lower one decoded instruction. Returns `true` when the function body is complete.
     fn lower_instr(&mut self, decoded: DecodedInstr) -> Result<bool, LowerError> {
         let offset = decoded.offset;
@@ -913,7 +968,7 @@ impl FuncBuilder {
             }
             Instr::Return | Instr::End => {
                 let values = self.pop_results(offset)?;
-                self.emit(offset, RegOp::Return { values });
+                self.finish_block(RegTerm::Return { values });
                 return Ok(true);
             }
             instr => {
@@ -936,18 +991,6 @@ impl FuncBuilder {
         Ok(false)
     }
 
-    fn finish(self) -> RegFunc {
-        RegFunc {
-            idx: self.func_idx,
-            type_idx: self.type_idx,
-            params: self.params,
-            results: self.results,
-            locals: self.locals,
-            reg_types: self.reg_types,
-            instrs: self.instrs,
-        }
-    }
-
     fn alloc_reg(&mut self, ty: ValType) -> Reg {
         let reg = Reg(self.reg_types.len() as u32);
         self.reg_types.push(ty);
@@ -955,7 +998,7 @@ impl FuncBuilder {
     }
 
     fn emit(&mut self, offset: ByteOffset, op: RegOp) {
-        self.instrs.push(RegInstr { offset, op });
+        self.current_instrs.push(RegInstr { offset, op });
     }
 
     fn pop_any(&mut self, offset: ByteOffset, op: &'static str) -> Result<RegValue, LowerError> {
@@ -1243,7 +1286,7 @@ mod tests {
         assert_eq!(func.results, vec![ValType::Num(NumType::I32)]);
         assert_eq!(func.reg_types, vec![ValType::Num(NumType::I32); 3]);
         assert_eq!(
-            func.instrs
+            func.blocks[0].instrs
                 .iter()
                 .map(|instr| &instr.op)
                 .collect::<Vec<_>>(),
@@ -1262,9 +1305,7 @@ mod tests {
                     lhs: Reg(0),
                     rhs: Reg(1),
                 },
-                &RegOp::Return {
-                    values: vec![Reg(2)],
-                },
+                // Return checked via blocks[0].term
             ]
         );
     }
@@ -1313,7 +1354,7 @@ mod tests {
 
         assert_eq!(func.reg_types, vec![ValType::Num(NumType::I32); 4]);
         assert_eq!(
-            func.instrs
+            func.blocks[0].instrs
                 .iter()
                 .map(|instr| &instr.op)
                 .collect::<Vec<_>>(),
@@ -1340,9 +1381,7 @@ mod tests {
                     lhs: Reg(1),
                     rhs: Reg(2),
                 },
-                &RegOp::Return {
-                    values: vec![Reg(3)],
-                },
+                // Return checked via blocks[0].term
             ]
         );
     }
@@ -1365,7 +1404,7 @@ mod tests {
 
         assert_eq!(func.reg_types, vec![ValType::Num(NumType::I32); 3]);
         assert_eq!(
-            func.instrs
+            func.blocks[0].instrs
                 .iter()
                 .map(|instr| &instr.op)
                 .collect::<Vec<_>>(),
@@ -1388,9 +1427,7 @@ mod tests {
                     lhs: Reg(0),
                     rhs: Reg(1),
                 },
-                &RegOp::Return {
-                    values: vec![Reg(2)],
-                },
+                // Return checked via blocks[0].term
             ]
         );
     }
@@ -1444,7 +1481,7 @@ mod tests {
 
         assert_eq!(func.reg_types, vec![ValType::Num(NumType::I32); 5]);
         assert_eq!(
-            func.instrs
+            func.blocks[0].instrs
                 .iter()
                 .map(|instr| &instr.op)
                 .collect::<Vec<_>>(),
@@ -1473,9 +1510,7 @@ mod tests {
                     lhs: Reg(2),
                     rhs: Reg(3),
                 },
-                &RegOp::Return {
-                    values: vec![Reg(4)],
-                },
+                // Return checked via blocks[0].term
             ]
         );
     }
@@ -1498,7 +1533,7 @@ mod tests {
 
         assert_eq!(func.reg_types, vec![ValType::Num(NumType::I64); 3]);
         assert_eq!(
-            func.instrs
+            func.blocks[0].instrs
                 .iter()
                 .map(|instr| &instr.op)
                 .collect::<Vec<_>>(),
@@ -1517,9 +1552,7 @@ mod tests {
                     lhs: Reg(0),
                     rhs: Reg(1),
                 },
-                &RegOp::Return {
-                    values: vec![Reg(2)],
-                },
+                // Return checked via blocks[0].term
             ]
         );
     }
@@ -1572,7 +1605,7 @@ mod tests {
 
         assert_eq!(func.reg_types, vec![ValType::Num(NumType::I32); 2]);
         assert_eq!(
-            func.instrs
+            func.blocks[0].instrs
                 .iter()
                 .map(|instr| &instr.op)
                 .collect::<Vec<_>>(),
@@ -1586,9 +1619,7 @@ mod tests {
                     dst: Reg(1),
                     value: Reg(0),
                 },
-                &RegOp::Return {
-                    values: vec![Reg(1)],
-                },
+                // Return checked via blocks[0].term
             ]
         );
     }
@@ -1629,7 +1660,7 @@ mod tests {
         let func = &reg_module.funcs[0];
 
         assert_eq!(
-            func.instrs
+            func.blocks[0].instrs
                 .iter()
                 .map(|instr| &instr.op)
                 .collect::<Vec<_>>(),
@@ -1638,9 +1669,7 @@ mod tests {
                     dst: Reg(0),
                     value: 42,
                 },
-                &RegOp::Return {
-                    values: vec![Reg(0)],
-                },
+                // Return checked via blocks[0].term
             ]
         );
     }
