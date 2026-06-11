@@ -915,6 +915,9 @@ first.
 - Execute that IR with a small, auditable runtime core.
 - Keep validation as the gatekeeper for unsupported modules and unsupported type-system surfaces.
 - Avoid baking the current flat-functype limitation too deeply into runtime internals.
+- Build GPU-offload awareness into the engine architecture from the start, so Borsalino-backed
+  Metal compute dispatch has a natural home in the runtime without a later retrofit.
+  (See [`docs/borsalino-integration.md`](borsalino-integration.md) for the full design.)
 
 ### Phase 2 design guardrails
 - **No more micro-expansion by default.** Validation-only work should now happen when it fixes a
@@ -926,6 +929,9 @@ first.
   executable; when that happens, lowering/runtime should fail clearly and intentionally.
 - **Use the validator's shape, not a new ad hoc semantics.** Lowering should reuse the control-flow
   and stack-shape knowledge Phase 1 already established.
+- **Keep GPU dispatch extensible.** The engine state should carry an optional GPU backend slot
+  early, and the register IR should preserve basic-block structure so arithmetic-only blocks can
+  be identified for GPU offload without a separate decompilation pass.
 
 ### Checkpoint 1 — IR shape and lowering skeleton
 **Goal:** define the execution-side vocabulary.
@@ -965,32 +971,41 @@ unit tests.
 - Implement `block`, `loop`, `if`, `else`, `br`, `br_if`, `br_table`, `return`, `unreachable`, and
   `select` in the lowered/runtime model.
 - Preserve the branch-result and block-result discipline already proven by the validator.
+- **Extract basic-block structure during lowering.** The register IR should identify block
+  boundaries, entry points, and exit edges so that arithmetic-only basic blocks can later be
+  compiled to WGSL for GPU offload without a separate decompilation pass.
 - Add runtime-focused tests for branch transfer, loop back-edges, and result threading.
 
-**Milestone:** pass the core control/numeric execution slices needed for nontrivial functions.
+**Milestone:** pass the core control/numeric execution slices needed for nontrivial functions,
+with basic-block boundaries visible in the lowered IR.
 
 **Reading path**
 - [Execution Instructions](https://webassembly.github.io/spec/core/exec/instructions.html)
 - [Control Instructions](https://webassembly.github.io/spec/core/syntax/instructions.html#control-instructions)
 - Revisit `labels.wast`, `switch.wast`, `br.wast`, `br_if.wast`, and `br_table.wast`
 
-### Checkpoint 4 — Calls, tables, memory, and globals on the execution path
-**Goal:** make real modules start working, not just arithmetic kernels.
+### Checkpoint 4 — Widen execution and prepare GPU offload
+**Goal:** push execution breadth into calls, SIMD, and linear memory — the prerequisites for both
+real modules and Borsalino GPU acceleration.
 
-- Implement direct calls, indirect calls, tables, globals, linear memory, and the first bulk-memory
-  execution slices actually needed by the active test corpus.
-- Keep execution support staged: runtime parity should broaden in deliberate cohorts just like the
-  validator did, but now in service of actual execution milestones.
+- **SIMD execution.** Implement `v128` lowering and runtime execution for the core SIMD
+  instruction set. This unblocks Borsalino integration Level 1 (bulk SIMD offload).
+- **Direct and indirect calls.** Implement function call frames so multi-function modules execute.
+- **Linear memory, globals, tables.** The state machinery needed for real workloads.
+- **GPU backend slot.** Add an optional `GpuBackend` to the engine state with a trait-based
+  interface, so the Metal backend can be plugged in on iOS without changing the core engine.
+- Keep execution support staged: runtime parity should broaden in deliberate cohorts.
 - Use Node/V8 / external-runtime parity where useful once runtime semantics are comparable.
 
-**Milestone:** run modules that use locals, control flow, memory access, globals, and indirect
-calls through tables.
+**Milestone:** run modules that use locals, control flow, SIMD, memory access, globals, and calls.
+GPU dispatch can be exercised on bulk SIMD operations.
 
 **Reading path**
 - [Function Instances](https://webassembly.github.io/spec/core/exec/runtime.html#function-instances)
 - [Table Instances](https://webassembly.github.io/spec/core/exec/runtime.html#table-instances)
 - [Memory Instances](https://webassembly.github.io/spec/core/exec/runtime.html#memory-instances)
 - [Global Instances](https://webassembly.github.io/spec/core/exec/runtime.html#global-instances)
+- [`docs/borsalino-integration.md`](borsalino-integration.md)
 
 ### Why Phase 2 starts now
 Phase 1 is finished as a semantic foundation. Remaining recursive/GC-era completeness work still
@@ -1002,6 +1017,11 @@ This is where Orlando's transducer philosophy becomes relevant. The stack-to-reg
 pass is a transformation of transformations: you're rewriting a sequence of stack effects into
 a sequence of register transfers. If you can express this as a composable transducer pipeline,
 you get a clean architecture for layering optimization passes later.
+
+This is also where Borsalino enters the picture. The register IR's basic-block structure feeds
+directly into WGSL compilation for Metal GPU dispatch. The lowering pass produces both a CPU
+execution plan and — for arithmetic-only blocks — a candidate GPU shader. See
+[`docs/borsalino-integration.md`](borsalino-integration.md) for the integration design.
 
 ---
 
