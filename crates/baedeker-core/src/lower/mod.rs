@@ -11,7 +11,8 @@ use crate::binary::instr::{DecodedInstr, Instr};
 use crate::binary::module::Module;
 use crate::error::{ByteOffset, DecodeContext, DecodeErrorKind};
 use crate::types::{
-    CodeBody, ExportDesc, FuncIdx, FuncType, LabelIdx, LocalDecl, LocalIdx, NumType, TypeIdx, ValType,
+    BlockType, CodeBody, ExportDesc, FuncIdx, FuncType, LabelIdx, LocalDecl, LocalIdx, NumType,
+    TypeIdx, ValType,
 };
 use crate::validate;
 use crate::validate::error::{ValidationError, ValidationErrorKind};
@@ -69,9 +70,9 @@ pub struct RegBlock {
 pub enum RegTerm {
     /// Fall through to the next block in sequence.
     Fallthrough,
-    /// Branch to a target block, passing values.
+    /// Branch to a target label, passing values. The label is resolved at runtime.
     Br {
-        target: LabelIdx,
+        target_label: LabelIdx,
         values: Vec<Reg>,
     },
     /// Return from the function with values.
@@ -859,10 +860,22 @@ struct FuncBuilder {
     reg_types: Vec<ValType>,
     blocks: Vec<RegBlock>,
     current_instrs: Vec<RegInstr>,
+    /// Stack of active block/loop/if frames. Each entry records the label of
+    /// the block that should follow the `end` of this control structure.
+    label_stack: Vec<LabelFrame>,
+}
+
+struct LabelFrame {
+    /// The label that `br` with this index targets.
+    label: LabelIdx,
+    /// The result types expected at the `end` of this control structure.
+    result_types: Vec<ValType>,
 }
 
 impl FuncBuilder {
     fn new(func_idx: FuncIdx, type_idx: TypeIdx, ty: &FuncType, locals: Vec<ValType>) -> Self {
+        // The function body itself is label 0, targeting a block that will
+        // receive function-end returns (created on demand).
         Self {
             func_idx,
             type_idx,
@@ -873,13 +886,21 @@ impl FuncBuilder {
             reg_types: Vec::new(),
             blocks: Vec::new(),
             current_instrs: Vec::new(),
+            label_stack: alloc::vec![LabelFrame {
+                label: LabelIdx(0),
+                result_types: ty.results.clone(),
+            }],
         }
+    }
+
+    fn finish_block_with_label(&mut self, label: LabelIdx, term: RegTerm) {
+        let instrs = core::mem::take(&mut self.current_instrs);
+        self.blocks.push(RegBlock::new(label, instrs, term));
     }
 
     fn finish_block(&mut self, term: RegTerm) {
         let label = LabelIdx(self.blocks.len() as u32);
-        let instrs = core::mem::take(&mut self.current_instrs);
-        self.blocks.push(RegBlock::new(label, instrs, term));
+        self.finish_block_with_label(label, term);
     }
 
     fn finish(mut self) -> RegFunc {
@@ -966,7 +987,72 @@ impl FuncBuilder {
                 });
                 self.emit(offset, RegOp::F64Const { dst, value });
             }
-            Instr::Return | Instr::End => {
+            Instr::Block(block_type) => {
+                self.finish_block(RegTerm::Fallthrough);
+                let result_types = block_type_to_vec(block_type);
+                self.label_stack.push(LabelFrame {
+                    label: LabelIdx(self.label_stack.len() as u32),
+                    result_types,
+                });
+            }
+            Instr::End => {
+                let frame = self
+                    .label_stack
+                    .pop()
+                    .ok_or(LowerError {
+                        offset,
+                        function: Some(self.func_idx),
+                        kind: LowerErrorKind::MissingFunctionEnd,
+                    })?;
+                // The outermost end is the function end.
+                if self.label_stack.is_empty() {
+                    let values = self.pop_results(offset)?;
+                    self.finish_block(RegTerm::Return { values });
+                    return Ok(true);
+                }
+                // Pop results matching this control frame's expected types.
+                let result_count = frame.result_types.len();
+                let mut values = Vec::with_capacity(result_count);
+                for &expected in frame.result_types.iter().rev() {
+                    let found = self.pop_expect(offset, "end", expected)?;
+                    values.push(found.reg);
+                }
+                values.reverse();
+                // Push the block's result values back onto the outer stack.
+                for (&reg, &ty) in values.iter().zip(frame.result_types.iter()) {
+                    self.stack.push(RegValue { reg, ty });
+                }
+                // Finish the body block and start a new continuation block.
+                // The continuation block uses the frame's label so that `br N`
+                // targeting this frame resolves to the right block.
+                self.finish_block(RegTerm::Fallthrough);
+                self.finish_block_with_label(frame.label, RegTerm::Fallthrough);
+            }
+            Instr::Br(label) => {
+                let frame = self
+                    .label_stack
+                    .iter()
+                    .rev()
+                    .nth(label.0 as usize)
+                    .ok_or(LowerError {
+                        offset,
+                        function: Some(self.func_idx),
+                        kind: LowerErrorKind::UnsupportedInstr { op: "br" },
+                    })?;
+                let target_label = frame.label;
+                let result_types = frame.result_types.clone();
+                let mut values = Vec::with_capacity(result_types.len());
+                for &expected in result_types.iter().rev() {
+                    let found = self.pop_expect(offset, "br", expected)?;
+                    values.push(found.reg);
+                }
+                values.reverse();
+                self.finish_block(RegTerm::Br {
+                    target_label,
+                    values,
+                });
+            }
+            Instr::Return => {
                 let values = self.pop_results(offset)?;
                 self.finish_block(RegTerm::Return { values });
                 return Ok(true);
@@ -1239,6 +1325,15 @@ fn binary_op(instr: &Instr) -> Option<BinaryOp> {
     }
 }
 
+fn block_type_to_vec(block_type: BlockType) -> Vec<ValType> {
+    match block_type {
+        BlockType::Empty => alloc::vec![],
+        BlockType::Val(ty) => alloc::vec![ty],
+        // BlockType::Func not yet supported
+        BlockType::TypeIdx(_) => alloc::vec![],
+    }
+}
+
 fn instr_name(instr: &Instr) -> &'static str {
     match instr {
         Instr::Unreachable => "unreachable",
@@ -1311,7 +1406,7 @@ mod tests {
     }
 
     #[test]
-    fn lower_rejects_unsupported_control_for_now() {
+    fn lower_block_and_return() {
         let bytes = [
             0x00, 0x61, 0x73, 0x6d, // magic
             0x01, 0x00, 0x00, 0x00, // version
@@ -1321,11 +1416,13 @@ mod tests {
             0x02, 0x40, 0x0b, 0x0b, // block end end
         ];
         let module = Module::decode(&bytes).unwrap();
-        let err = module.lower().unwrap_err();
-        assert!(matches!(
-            err.kind,
-            LowerErrorKind::UnsupportedInstr { op: "block" }
-        ));
+        let reg_module = module.lower().unwrap();
+        let func = &reg_module.funcs[0];
+        // Should have: pre-block (empty), block body (empty), return (empty)
+        assert_eq!(func.blocks.len(), 3);
+        assert!(matches!(func.blocks[0].term, RegTerm::Fallthrough));
+        assert!(matches!(func.blocks[1].term, RegTerm::Fallthrough));
+        assert!(matches!(&func.blocks[2].term, RegTerm::Return { values } if values.is_empty()));
     }
 
     #[test]

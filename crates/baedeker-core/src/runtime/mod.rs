@@ -129,7 +129,15 @@ pub fn execute_func(func: &RegFunc, args: &[Value]) -> Result<Vec<Value>, Runtim
     }
 
     let mut block_idx: u32 = 0;
+    let max_iterations = func.blocks.len() * 100;
+    let mut iteration: usize = 0;
     loop {
+        iteration += 1;
+        if iteration > max_iterations {
+            return Err(RuntimeError {
+                kind: RuntimeErrorKind::MissingReturn,
+            });
+        }
         let block = func
             .blocks
             .get(block_idx as usize)
@@ -151,9 +159,15 @@ pub fn execute_func(func: &RegFunc, args: &[Value]) -> Result<Vec<Value>, Runtim
                 }
                 return Ok(results);
             }
-            RegTerm::Br { target, .. } => {
-                block_idx = target.0;
-                // Continue the loop to execute the target block
+            RegTerm::Br { target_label, values } => {
+                // Resolve label to block index by scanning blocks in order
+                block_idx = func
+                    .blocks
+                    .iter()
+                    .position(|b| b.label == *target_label)
+                    .ok_or(RuntimeError {
+                        kind: RuntimeErrorKind::MissingReturn,
+                    })? as u32;
             }
             RegTerm::Fallthrough => {
                 block_idx += 1;
