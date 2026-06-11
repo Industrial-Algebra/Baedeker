@@ -138,12 +138,9 @@ pub fn execute_func(func: &RegFunc, args: &[Value]) -> Result<Vec<Value>, Runtim
                 kind: RuntimeErrorKind::MissingReturn,
             });
         }
-        let block = func
-            .blocks
-            .get(block_idx as usize)
-            .ok_or(RuntimeError {
-                kind: RuntimeErrorKind::MissingReturn,
-            })?;
+        let block = func.blocks.get(block_idx as usize).ok_or(RuntimeError {
+            kind: RuntimeErrorKind::MissingReturn,
+        })?;
 
         // Execute straight-line instructions in this block
         for instr in &block.instrs {
@@ -159,15 +156,8 @@ pub fn execute_func(func: &RegFunc, args: &[Value]) -> Result<Vec<Value>, Runtim
                 }
                 return Ok(results);
             }
-            RegTerm::Br { target_label, values } => {
-                // Resolve label to block index by scanning blocks in order
-                block_idx = func
-                    .blocks
-                    .iter()
-                    .position(|b| b.label == *target_label)
-                    .ok_or(RuntimeError {
-                        kind: RuntimeErrorKind::MissingReturn,
-                    })? as u32;
+            RegTerm::Br { target_block, .. } => {
+                block_idx = *target_block;
             }
             RegTerm::Fallthrough => {
                 block_idx += 1;
@@ -219,9 +209,7 @@ fn execute_reg_op(
             set_reg(registers, *dst, Value::F64(*value))?;
         }
         RegOp::Unary { op, dst, value } => execute_unary_op(registers, *op, *dst, *value)?,
-        RegOp::Binary { op, dst, lhs, rhs } => {
-            execute_binary_op(registers, *op, *dst, *lhs, *rhs)?
-        }
+        RegOp::Binary { op, dst, lhs, rhs } => execute_binary_op(registers, *op, *dst, *lhs, *rhs)?,
     }
     Ok(())
 }

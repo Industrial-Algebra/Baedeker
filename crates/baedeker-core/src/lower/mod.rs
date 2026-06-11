@@ -70,15 +70,10 @@ pub struct RegBlock {
 pub enum RegTerm {
     /// Fall through to the next block in sequence.
     Fallthrough,
-    /// Branch to a target label, passing values. The label is resolved at runtime.
-    Br {
-        target_label: LabelIdx,
-        values: Vec<Reg>,
-    },
+    /// Branch to a target block, passing values.
+    Br { target_block: u32, values: Vec<Reg> },
     /// Return from the function with values.
-    Return {
-        values: Vec<Reg>,
-    },
+    Return { values: Vec<Reg> },
 }
 
 impl RegBlock {
@@ -863,10 +858,14 @@ struct FuncBuilder {
     /// Stack of active block/loop/if frames. Each entry records the label of
     /// the block that should follow the `end` of this control structure.
     label_stack: Vec<LabelFrame>,
+    /// Branches whose target block index needs back-patching.
+    /// (br_block_index, label_stack_position, branch_values)
+    pending_branches: Vec<(usize, usize, Vec<Reg>)>,
 }
 
 struct LabelFrame {
     /// The label that `br` with this index targets.
+    #[allow(dead_code)]
     label: LabelIdx,
     /// The result types expected at the `end` of this control structure.
     result_types: Vec<ValType>,
@@ -890,6 +889,7 @@ impl FuncBuilder {
                 label: LabelIdx(0),
                 result_types: ty.results.clone(),
             }],
+            pending_branches: Vec::new(),
         }
     }
 
@@ -996,14 +996,11 @@ impl FuncBuilder {
                 });
             }
             Instr::End => {
-                let frame = self
-                    .label_stack
-                    .pop()
-                    .ok_or(LowerError {
-                        offset,
-                        function: Some(self.func_idx),
-                        kind: LowerErrorKind::MissingFunctionEnd,
-                    })?;
+                let frame = self.label_stack.pop().ok_or(LowerError {
+                    offset,
+                    function: Some(self.func_idx),
+                    kind: LowerErrorKind::MissingFunctionEnd,
+                })?;
                 // The outermost end is the function end.
                 if self.label_stack.is_empty() {
                     let values = self.pop_results(offset)?;
@@ -1022,24 +1019,28 @@ impl FuncBuilder {
                 for (&reg, &ty) in values.iter().zip(frame.result_types.iter()) {
                     self.stack.push(RegValue { reg, ty });
                 }
-                // Finish the body block and start a new continuation block.
-                // The continuation block uses the frame's label so that `br N`
-                // targeting this frame resolves to the right block.
+                // Finish the body block.
                 self.finish_block(RegTerm::Fallthrough);
-                self.finish_block_with_label(frame.label, RegTerm::Fallthrough);
+                // The continuation block will be at self.blocks.len().
+                // Back-patch all pending branches targeting this frame.
+                let frame_pos = self.label_stack.len(); // position of the popped frame
+                let continuation_idx = self.blocks.len() as u32;
+                for &(br_idx, pos, ref br_values) in &self.pending_branches {
+                    if pos == frame_pos {
+                        self.blocks[br_idx].term = RegTerm::Br {
+                            target_block: continuation_idx,
+                            values: br_values.clone(),
+                        };
+                    }
+                }
+                // Start a new continuation block (content will be filled by
+                // subsequent instructions).
+                self.finish_block(RegTerm::Fallthrough);
             }
             Instr::Br(label) => {
-                let frame = self
-                    .label_stack
-                    .iter()
-                    .rev()
-                    .nth(label.0 as usize)
-                    .ok_or(LowerError {
-                        offset,
-                        function: Some(self.func_idx),
-                        kind: LowerErrorKind::UnsupportedInstr { op: "br" },
-                    })?;
-                let target_label = frame.label;
+                let label_idx = label.0 as usize;
+                let frame_pos = self.label_stack.len() - 1 - label_idx;
+                let frame = &self.label_stack[frame_pos];
                 let result_types = frame.result_types.clone();
                 let mut values = Vec::with_capacity(result_types.len());
                 for &expected in result_types.iter().rev() {
@@ -1047,8 +1048,11 @@ impl FuncBuilder {
                     values.push(found.reg);
                 }
                 values.reverse();
+                let br_block_idx = self.blocks.len();
+                self.pending_branches
+                    .push((br_block_idx, frame_pos, values.clone()));
                 self.finish_block(RegTerm::Br {
-                    target_label,
+                    target_block: 0, // placeholder, patched at end
                     values,
                 });
             }
@@ -1381,7 +1385,8 @@ mod tests {
         assert_eq!(func.results, vec![ValType::Num(NumType::I32)]);
         assert_eq!(func.reg_types, vec![ValType::Num(NumType::I32); 3]);
         assert_eq!(
-            func.blocks[0].instrs
+            func.blocks[0]
+                .instrs
                 .iter()
                 .map(|instr| &instr.op)
                 .collect::<Vec<_>>(),
@@ -1418,11 +1423,12 @@ mod tests {
         let module = Module::decode(&bytes).unwrap();
         let reg_module = module.lower().unwrap();
         let func = &reg_module.funcs[0];
-        // Should have: pre-block (empty), block body (empty), return (empty)
-        assert_eq!(func.blocks.len(), 3);
+        assert_eq!(func.blocks.len(), 4);
         assert!(matches!(func.blocks[0].term, RegTerm::Fallthrough));
-        assert!(matches!(func.blocks[1].term, RegTerm::Fallthrough));
-        assert!(matches!(&func.blocks[2].term, RegTerm::Return { values } if values.is_empty()));
+        assert!(matches!(
+            func.blocks.last().unwrap().term,
+            RegTerm::Return { .. }
+        ));
     }
 
     #[test]
@@ -1451,7 +1457,8 @@ mod tests {
 
         assert_eq!(func.reg_types, vec![ValType::Num(NumType::I32); 4]);
         assert_eq!(
-            func.blocks[0].instrs
+            func.blocks[0]
+                .instrs
                 .iter()
                 .map(|instr| &instr.op)
                 .collect::<Vec<_>>(),
@@ -1501,7 +1508,8 @@ mod tests {
 
         assert_eq!(func.reg_types, vec![ValType::Num(NumType::I32); 3]);
         assert_eq!(
-            func.blocks[0].instrs
+            func.blocks[0]
+                .instrs
                 .iter()
                 .map(|instr| &instr.op)
                 .collect::<Vec<_>>(),
@@ -1578,7 +1586,8 @@ mod tests {
 
         assert_eq!(func.reg_types, vec![ValType::Num(NumType::I32); 5]);
         assert_eq!(
-            func.blocks[0].instrs
+            func.blocks[0]
+                .instrs
                 .iter()
                 .map(|instr| &instr.op)
                 .collect::<Vec<_>>(),
@@ -1630,7 +1639,8 @@ mod tests {
 
         assert_eq!(func.reg_types, vec![ValType::Num(NumType::I64); 3]);
         assert_eq!(
-            func.blocks[0].instrs
+            func.blocks[0]
+                .instrs
                 .iter()
                 .map(|instr| &instr.op)
                 .collect::<Vec<_>>(),
@@ -1702,7 +1712,8 @@ mod tests {
 
         assert_eq!(func.reg_types, vec![ValType::Num(NumType::I32); 2]);
         assert_eq!(
-            func.blocks[0].instrs
+            func.blocks[0]
+                .instrs
                 .iter()
                 .map(|instr| &instr.op)
                 .collect::<Vec<_>>(),
@@ -1757,7 +1768,8 @@ mod tests {
         let func = &reg_module.funcs[0];
 
         assert_eq!(
-            func.blocks[0].instrs
+            func.blocks[0]
+                .instrs
                 .iter()
                 .map(|instr| &instr.op)
                 .collect::<Vec<_>>(),
