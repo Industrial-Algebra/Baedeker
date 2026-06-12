@@ -72,6 +72,18 @@ pub enum RegTerm {
     Fallthrough,
     /// Branch to a target block, passing values.
     Br { target_block: u32, values: Vec<Reg> },
+    /// Conditional branch: if cond is non-zero, branch; otherwise fall through.
+    BrIf {
+        cond: Reg,
+        target_block: u32,
+        values: Vec<Reg>,
+    },
+    /// Two-way fork: if cond is non-zero, go to then_block; else to else_block.
+    IfFork {
+        cond: Reg,
+        then_block: u32,
+        else_block: u32,
+    },
     /// Return from the function with values.
     Return { values: Vec<Reg> },
 }
@@ -1052,7 +1064,28 @@ impl FuncBuilder {
                 self.pending_branches
                     .push((br_block_idx, frame_pos, values.clone()));
                 self.finish_block(RegTerm::Br {
-                    target_block: 0, // placeholder, patched at end
+                    target_block: 0,
+                    values,
+                });
+            }
+            Instr::BrIf(label) => {
+                let cond = self.pop_expect(offset, "br_if", ValType::Num(NumType::I32))?;
+                let label_idx = label.0 as usize;
+                let frame_pos = self.label_stack.len() - 1 - label_idx;
+                let frame = &self.label_stack[frame_pos];
+                let result_types = frame.result_types.clone();
+                let mut values = Vec::with_capacity(result_types.len());
+                for &expected in result_types.iter().rev() {
+                    let found = self.pop_expect(offset, "br_if", expected)?;
+                    values.push(found.reg);
+                }
+                values.reverse();
+                let br_block_idx = self.blocks.len();
+                self.pending_branches
+                    .push((br_block_idx, frame_pos, values.clone()));
+                self.finish_block(RegTerm::BrIf {
+                    cond: cond.reg,
+                    target_block: 0,
                     values,
                 });
             }
