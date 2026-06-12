@@ -15,5 +15,7 @@ extern crate alloc;
 
 pub mod binary;
 pub mod error;
+pub mod lower;
+pub mod runtime;
 pub mod types;
 pub mod validate;

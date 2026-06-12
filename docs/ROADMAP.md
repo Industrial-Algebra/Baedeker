@@ -3,6 +3,30 @@
 > A WASM runtime built in Rust, named for the most cautious and methodical of Pierson's Puppeteers.
 > Like its namesake, Baedeker proceeds carefully through unknown territory — but gets there.
 
+## Tracking
+
+**Roadmap phases and checkpoints are tracked as GitHub Issues.**
+
+- **Epics:** [Phase 0](https://github.com/Industrial-Algebra/Baedeker/issues/8) ·
+  [Phase 1](https://github.com/Industrial-Algebra/Baedeker/issues/9) ·
+  [Phase 2](https://github.com/Industrial-Algebra/Baedeker/issues/10) ·
+  [Phase 3](https://github.com/Industrial-Algebra/Baedeker/issues/11) ·
+  [Phase 4](https://github.com/Industrial-Algebra/Baedeker/issues/12) ·
+  [Phase 5](https://github.com/Industrial-Algebra/Baedeker/issues/13) ·
+  [Phase 6](https://github.com/Industrial-Algebra/Baedeker/issues/14) ·
+  [Deferred](https://github.com/Industrial-Algebra/Baedeker/issues/15)
+- **Phase 2 Checkpoints:**
+  [C1](https://github.com/Industrial-Algebra/Baedeker/issues/16) ·
+  [C2](https://github.com/Industrial-Algebra/Baedeker/issues/17) ·
+  [C3](https://github.com/Industrial-Algebra/Baedeker/issues/18) ·
+  [C4](https://github.com/Industrial-Algebra/Baedeker/issues/19)
+- **Cross-cutting:** [Spec Compliance](https://github.com/Industrial-Algebra/Baedeker/issues/20) ·
+  [Fuzzing](https://github.com/Industrial-Algebra/Baedeker/issues/21) ·
+  [Creusot Contracts](https://github.com/Industrial-Algebra/Baedeker/issues/22)
+
+The document below remains as the authoritative prose description of each phase's goals
+and design rationale. For current status, check the linked issues.
+
 ## Philosophy
 
 Baedeker is a language-runtime and systems project: its binary decoding, validation, malformed-input
@@ -871,22 +895,15 @@ leaving it as silent Phase 1 debt.
   - Explicit recursive-group and non-function-type portions of `type-rec.wast`
   - Broader recursive/GC type-system work needed for those files
 
-### Final verification snapshot
-- Current `baedeker-core` unit test count: **530 passing**
-- Current spec-harness integration tests: **8 passing** (`spec`: 3, `spec_wast`: 2, `spec_node`: 3)
-- Current corpus snapshot:
-  - `wast-upstream`: **87** active files / **622** directives
-  - raw `valid`: **236** fixtures
-  - raw `invalid-validate`: **173** fixtures
-  - raw `invalid-decode`: **38** fixtures
-  - custom `spec/wast`: **17** files
-- `spec_node` continues to cross-check the active supported raw and upstream-derived surface, while
-  Baedeker-specific boundary assertions remain outside strict Node/V8 enforcement where documented.
+### Final verification snapshot (Phase 1 closure, June 2026)
+- `baedeker-core` unit test count: **530 passing** at closure (now 550 with Phase 2 runtime)
+- Spec-harness integration tests: **8 passing** (`spec`: 3, `spec_wast`: 2, `spec_node`: 3)
+- Corpus: 87 upstream subset files, 236 valid fixtures, 173 invalid-validate fixtures, 38 invalid-decode fixtures
+- `spec_node` continues to cross-check the active supported surface.
 
-### Current branch snapshot
-Phase 1 wrap-up was completed on `feat/phase-1-part-4-final-checklist` and merged into `develop`.
-The validator and fixture/docs support matrix are now treated as the completed semantic baseline,
-with explicit follow-ons pushed out of the critical path.
+**Tracking moved to GitHub Issues as of June 2026.** See the [Tracking](#tracking) section at
+the top of this document for current issue links. Status below reflects the design intent of
+each phase; linked issues carry live progress.
 
 ### Phase 1 note
 The validator stack remains the spec-facing abstract operand/control stack used for proof of
@@ -915,6 +932,9 @@ first.
 - Execute that IR with a small, auditable runtime core.
 - Keep validation as the gatekeeper for unsupported modules and unsupported type-system surfaces.
 - Avoid baking the current flat-functype limitation too deeply into runtime internals.
+- Build GPU-offload awareness into the engine architecture from the start, so Borsalino-backed
+  Metal compute dispatch has a natural home in the runtime without a later retrofit.
+  (See [`docs/borsalino-integration.md`](borsalino-integration.md) for the full design.)
 
 ### Phase 2 design guardrails
 - **No more micro-expansion by default.** Validation-only work should now happen when it fixes a
@@ -926,6 +946,9 @@ first.
   executable; when that happens, lowering/runtime should fail clearly and intentionally.
 - **Use the validator's shape, not a new ad hoc semantics.** Lowering should reuse the control-flow
   and stack-shape knowledge Phase 1 already established.
+- **Keep GPU dispatch extensible.** The engine state should carry an optional GPU backend slot
+  early, and the register IR should preserve basic-block structure so arithmetic-only blocks can
+  be identified for GPU offload without a separate decompilation pass.
 
 ### Checkpoint 1 — IR shape and lowering skeleton
 **Goal:** define the execution-side vocabulary.
@@ -965,32 +988,41 @@ unit tests.
 - Implement `block`, `loop`, `if`, `else`, `br`, `br_if`, `br_table`, `return`, `unreachable`, and
   `select` in the lowered/runtime model.
 - Preserve the branch-result and block-result discipline already proven by the validator.
+- **Extract basic-block structure during lowering.** The register IR should identify block
+  boundaries, entry points, and exit edges so that arithmetic-only basic blocks can later be
+  compiled to WGSL for GPU offload without a separate decompilation pass.
 - Add runtime-focused tests for branch transfer, loop back-edges, and result threading.
 
-**Milestone:** pass the core control/numeric execution slices needed for nontrivial functions.
+**Milestone:** pass the core control/numeric execution slices needed for nontrivial functions,
+with basic-block boundaries visible in the lowered IR.
 
 **Reading path**
 - [Execution Instructions](https://webassembly.github.io/spec/core/exec/instructions.html)
 - [Control Instructions](https://webassembly.github.io/spec/core/syntax/instructions.html#control-instructions)
 - Revisit `labels.wast`, `switch.wast`, `br.wast`, `br_if.wast`, and `br_table.wast`
 
-### Checkpoint 4 — Calls, tables, memory, and globals on the execution path
-**Goal:** make real modules start working, not just arithmetic kernels.
+### Checkpoint 4 — Widen execution and prepare GPU offload
+**Goal:** push execution breadth into calls, SIMD, and linear memory — the prerequisites for both
+real modules and Borsalino GPU acceleration.
 
-- Implement direct calls, indirect calls, tables, globals, linear memory, and the first bulk-memory
-  execution slices actually needed by the active test corpus.
-- Keep execution support staged: runtime parity should broaden in deliberate cohorts just like the
-  validator did, but now in service of actual execution milestones.
+- **SIMD execution.** Implement `v128` lowering and runtime execution for the core SIMD
+  instruction set. This unblocks Borsalino integration Level 1 (bulk SIMD offload).
+- **Direct and indirect calls.** Implement function call frames so multi-function modules execute.
+- **Linear memory, globals, tables.** The state machinery needed for real workloads.
+- **GPU backend slot.** Add an optional `GpuBackend` to the engine state with a trait-based
+  interface, so the Metal backend can be plugged in on iOS without changing the core engine.
+- Keep execution support staged: runtime parity should broaden in deliberate cohorts.
 - Use Node/V8 / external-runtime parity where useful once runtime semantics are comparable.
 
-**Milestone:** run modules that use locals, control flow, memory access, globals, and indirect
-calls through tables.
+**Milestone:** run modules that use locals, control flow, SIMD, memory access, globals, and calls.
+GPU dispatch can be exercised on bulk SIMD operations.
 
 **Reading path**
 - [Function Instances](https://webassembly.github.io/spec/core/exec/runtime.html#function-instances)
 - [Table Instances](https://webassembly.github.io/spec/core/exec/runtime.html#table-instances)
 - [Memory Instances](https://webassembly.github.io/spec/core/exec/runtime.html#memory-instances)
 - [Global Instances](https://webassembly.github.io/spec/core/exec/runtime.html#global-instances)
+- [`docs/borsalino-integration.md`](borsalino-integration.md)
 
 ### Why Phase 2 starts now
 Phase 1 is finished as a semantic foundation. Remaining recursive/GC-era completeness work still
@@ -1002,6 +1034,11 @@ This is where Orlando's transducer philosophy becomes relevant. The stack-to-reg
 pass is a transformation of transformations: you're rewriting a sequence of stack effects into
 a sequence of register transfers. If you can express this as a composable transducer pipeline,
 you get a clean architecture for layering optimization passes later.
+
+This is also where Borsalino enters the picture. The register IR's basic-block structure feeds
+directly into WGSL compilation for Metal GPU dispatch. The lowering pass produces both a CPU
+execution plan and — for arithmetic-only blocks — a candidate GPU shader. See
+[`docs/borsalino-integration.md`](borsalino-integration.md) for the integration design.
 
 ---
 

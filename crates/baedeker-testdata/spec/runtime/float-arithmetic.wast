@@ -1,0 +1,33 @@
+;; Float arithmetic/unary execution cohort.
+
+(module
+  (func (export "f32_add") (param f32 f32) (result f32) local.get 0 local.get 1 f32.add)
+  (func (export "f32_sub") (param f32 f32) (result f32) local.get 0 local.get 1 f32.sub)
+  (func (export "f32_mul") (param f32 f32) (result f32) local.get 0 local.get 1 f32.mul)
+  (func (export "f32_div") (param f32 f32) (result f32) local.get 0 local.get 1 f32.div)
+  (func (export "f32_sqrt") (param f32) (result f32) local.get 0 f32.sqrt)
+  (func (export "f32_neg") (param f32) (result f32) local.get 0 f32.neg)
+  (func (export "f32_abs") (param f32) (result f32) local.get 0 f32.abs)
+  (func (export "f64_add") (param f64 f64) (result f64) local.get 0 local.get 1 f64.add)
+  (func (export "f64_sub") (param f64 f64) (result f64) local.get 0 local.get 1 f64.sub)
+  (func (export "f64_mul") (param f64 f64) (result f64) local.get 0 local.get 1 f64.mul)
+  (func (export "f64_div") (param f64 f64) (result f64) local.get 0 local.get 1 f64.div)
+  (func (export "f64_sqrt") (param f64) (result f64) local.get 0 f64.sqrt)
+  (func (export "f64_neg") (param f64) (result f64) local.get 0 f64.neg)
+  (func (export "f64_abs") (param f64) (result f64) local.get 0 f64.abs))
+
+(assert_return (invoke "f32_add" (f32.const 1.5) (f32.const 2.5)) (f32.const 4.0))
+(assert_return (invoke "f32_sub" (f32.const 7.0) (f32.const 3.0)) (f32.const 4.0))
+(assert_return (invoke "f32_mul" (f32.const 2.5) (f32.const 4.0)) (f32.const 10.0))
+(assert_return (invoke "f32_div" (f32.const 10.0) (f32.const 4.0)) (f32.const 2.5))
+(assert_return (invoke "f32_sqrt" (f32.const 16.0)) (f32.const 4.0))
+(assert_return (invoke "f32_neg" (f32.const 3.0)) (f32.const -3.0))
+(assert_return (invoke "f32_abs" (f32.const -3.0)) (f32.const 3.0))
+
+(assert_return (invoke "f64_add" (f64.const 1.5) (f64.const 2.5)) (f64.const 4.0))
+(assert_return (invoke "f64_sub" (f64.const 7.0) (f64.const 3.0)) (f64.const 4.0))
+(assert_return (invoke "f64_mul" (f64.const 2.5) (f64.const 4.0)) (f64.const 10.0))
+(assert_return (invoke "f64_div" (f64.const 10.0) (f64.const 4.0)) (f64.const 2.5))
+(assert_return (invoke "f64_sqrt" (f64.const 16.0)) (f64.const 4.0))
+(assert_return (invoke "f64_neg" (f64.const 3.0)) (f64.const -3.0))
+(assert_return (invoke "f64_abs" (f64.const -3.0)) (f64.const 3.0))
