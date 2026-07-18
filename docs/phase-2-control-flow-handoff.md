@@ -2,7 +2,7 @@
 
 **Branch:** `feature/phase-2-part-5-control-flow-2`
 **Date:** June 2026
-**Status:** block/br/br_if/if/else/loop complete with WAST coverage; br_table and select remain
+**Status:** All Checkpoint 3 control flow complete: block/br/br_if/br_table/if/else/loop/select with WAST coverage
 
 ## What's in this branch
 
@@ -12,6 +12,7 @@
 | `Fallthrough` | ✅ Working |
 | `Br { target_block, values }` | ✅ Working (incl. loop back-edges) |
 | `BrIf { cond, target_block, values }` | ✅ Working |
+| `BrTable { index, targets, default, values }` | ✅ Working |
 | `IfFork { cond, then_block, else_block }` | ✅ Working |
 | `Return { values }` | ✅ Working (no longer stops lowering) |
 | `Trap` | ✅ Working (`unreachable`) |
@@ -23,8 +24,8 @@
 | `if`, `else` | ✅ IfFork with back-patched then/else edges |
 | `loop` | ✅ Back-edge `br`/`br_if` to header resolved at lowering time |
 | `unreachable`, `nop` | ✅ |
-| `br_table` | ⬜ Not implemented (see design note below) |
-| `select` / typed select | ⬜ Not implemented |
+| `br_table` | ✅ Multi-slot back-patching; loop headers resolve immediately |
+| `select` / typed select | ✅ `RegOp::Select` |
 | `call` etc. | ⬜ Phase 2 C4 |
 
 ### Key mechanisms (this branch)
@@ -61,6 +62,18 @@ emit terminators targeting the header immediately (no back-patching), and
 pop the frame's *parameter* types (empty until multi-value block types) —
 all other frames pop *result* types.
 
+**br_table.** `PendingBranch` entries carry a `BranchSlot` (`Single` vs
+`Table(i)`) so one terminator's many targets back-patch independently.
+Loop-header slots resolve at lowering time. Copies for every targeted
+frame accumulate in the dispatch block: each frame's continuation registers
+are disjoint allocation ranges and all copies share the same source
+registers, so per-frame copies in one block are sound (no trampolines
+needed). Loop targets can only appear when all arities are 0, so no copies
+are needed for them.
+
+**select.** `RegOp::Select { dst, v1, v2, cond }`. Untyped select discovers
+the operand type from the stack; typed select uses the annotation.
+
 ### Runtime
 - `RegOp::Copy` executes as a register move.
 - `RegTerm::Trap` → `RuntimeTrap::Unreachable` (WAST message `"unreachable"`).
@@ -80,25 +93,20 @@ all other frames pop *result* types.
 | `crates/baedeker-testdata/spec/runtime/control-br-if.wast` | br_if cohort |
 | `crates/baedeker-testdata/spec/runtime/control-if-else.wast` | if/else cohort + unreachable trap |
 | `crates/baedeker-testdata/spec/runtime/control-loop.wast` | loop cohort |
+| `crates/baedeker-testdata/spec/runtime/control-br-table.wast` | br_table cohort |
+| `crates/baedeker-testdata/spec/runtime/control-select.wast` | select cohort |
 
 ## Test baseline
-- 560 unit tests: all passing (10 new: if/else shape + paths, loop back-edge,
-  br value copies, return-continues regression, unreachable trap, else error)
-- Runtime WAST: 14 fixtures, 223 assertions, all passing
+- 564 unit tests: all passing (14 new on this branch)
+- Runtime WAST: 16 fixtures, 244 assertions, all passing
 - `cargo fmt`, `cargo clippy --all-targets -- -D warnings`: clean
 
 ## Next steps
-1. **`br_table`.** Design note: each target label may sit at a different
-   frame depth, so copy destinations differ per target. Lower to a dispatch
-   terminator (`RegTerm::BrTable { index, targets, default }`) whose target
-   block indices are *trampoline blocks*: each trampoline runs the copies
-   for its frame, then `Br` to the real continuation. Trampolines can be
-   synthesized at lowering time after all frames close.
-2. **`select` / typed select.** Simple: `RegOp::Select { dst, v1, v2, cond }`.
-   Typed select needs result-type checking at lowering.
-3. **Multi-value block types** (`BlockType::TypeIdx`): `block_type_to_vec`
+1. **Multi-value block types** (`BlockType::TypeIdx`): `block_type_to_vec`
    currently returns `[]`. Needs func-type lookup for params/results; loop
    branch values then use real param types (plumbing already in place).
-4. Consider deleting unreachable trailing blocks (after `br`/`return`) to
+   Note: br_table copies for loop targets will then need header-param
+   registers, not continuation registers — revisit the copy mechanism then.
+2. Consider deleting unreachable trailing blocks (after `br`/`return`) to
    slim the IR; currently they are lowered but never execute.
-5. Phase 2 C4: calls, memory, globals.
+3. Phase 2 C4: calls, memory, globals.

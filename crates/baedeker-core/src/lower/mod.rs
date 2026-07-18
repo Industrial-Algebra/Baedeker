@@ -84,6 +84,14 @@ pub enum RegTerm {
         then_block: u32,
         else_block: u32,
     },
+    /// Multi-target dispatch (`br_table`): branch to `targets[i]` when the
+    /// index value equals i, or to `default` when out of range.
+    BrTable {
+        index: Reg,
+        targets: Vec<u32>,
+        default: u32,
+        values: Vec<Reg>,
+    },
     /// Return from the function with values.
     Return { values: Vec<Reg> },
     /// Unconditional trap (`unreachable`).
@@ -158,6 +166,13 @@ pub enum RegOp {
     Copy {
         dst: Reg,
         src: Reg,
+    },
+    /// Conditional selection (`select`): dst = cond != 0 ? v1 : v2.
+    Select {
+        dst: Reg,
+        v1: Reg,
+        v2: Reg,
+        cond: Reg,
     },
 }
 
@@ -884,8 +899,29 @@ struct FuncBuilder {
     /// the block that should follow the `end` of this control structure.
     label_stack: Vec<LabelFrame>,
     /// Branches whose target block index needs back-patching.
-    /// (br_block_index, label_stack_position, branch_values)
-    pending_branches: Vec<(usize, usize, Vec<Reg>)>,
+    pending_branches: Vec<PendingBranch>,
+}
+
+/// A branch whose target block index needs back-patching once the target
+/// frame's continuation block is known.
+struct PendingBranch {
+    /// The block containing the branch terminator.
+    block: usize,
+    /// Position in `label_stack` of the targeted frame.
+    frame_pos: usize,
+    /// Branch-carried values (copy sources for the continuation).
+    values: Vec<Reg>,
+    /// Which terminator slot to patch.
+    slot: BranchSlot,
+}
+
+/// Which target slot of a branch terminator a pending branch patches.
+enum BranchSlot {
+    /// The single target of `br` / `br_if` / an if-then exit.
+    Single,
+    /// The i-th target of `br_table` (`i == targets.len()` patches the
+    /// default target).
+    Table(usize),
 }
 
 struct LabelFrame {
@@ -1006,6 +1042,54 @@ impl FuncBuilder {
                 let value = self.pop_any(offset, "drop")?;
                 self.emit(offset, RegOp::Drop { value: value.reg });
             }
+            Instr::Select => {
+                let cond = self.pop_expect(offset, "select", ValType::Num(NumType::I32))?;
+                // Untyped select: both operands must share the same numeric
+                // type; the second operand's type is discovered from the
+                // stack (the validator has already proven they match).
+                let v2 = self.pop_any(offset, "select")?;
+                let v1 = self.pop_expect(offset, "select", v2.ty)?;
+                let dst = self.alloc_reg(v1.ty);
+                self.stack.push(RegValue {
+                    reg: dst,
+                    ty: v1.ty,
+                });
+                self.emit(
+                    offset,
+                    RegOp::Select {
+                        dst,
+                        v1: v1.reg,
+                        v2: v2.reg,
+                        cond: cond.reg,
+                    },
+                );
+            }
+            Instr::SelectTyped(types) => {
+                let cond = self.pop_expect(offset, "select", ValType::Num(NumType::I32))?;
+                // The validator guarantees exactly one result type.
+                let Some(&ty) = types.first() else {
+                    return Err(LowerError {
+                        offset,
+                        function: Some(self.func_idx),
+                        kind: LowerErrorKind::UnsupportedInstr {
+                            op: "select with empty type annotation",
+                        },
+                    });
+                };
+                let v2 = self.pop_expect(offset, "select", ty)?;
+                let v1 = self.pop_expect(offset, "select", ty)?;
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(
+                    offset,
+                    RegOp::Select {
+                        dst,
+                        v1: v1.reg,
+                        v2: v2.reg,
+                        cond: cond.reg,
+                    },
+                );
+            }
             Instr::I32Const(value) => {
                 let dst = self.alloc_reg(ValType::Num(NumType::I32));
                 self.stack.push(RegValue {
@@ -1122,8 +1206,12 @@ impl FuncBuilder {
                 }
                 values.reverse();
                 let br_block_idx = self.blocks.len();
-                self.pending_branches
-                    .push((br_block_idx, frame_pos, values.clone()));
+                self.pending_branches.push(PendingBranch {
+                    block: br_block_idx,
+                    frame_pos,
+                    values: values.clone(),
+                    slot: BranchSlot::Single,
+                });
                 self.finish_block(RegTerm::Br {
                     target_block: 0,
                     values,
@@ -1191,28 +1279,50 @@ impl FuncBuilder {
                 let frame_pos = self.label_stack.len(); // position of the popped frame
                 let continuation_idx = self.blocks.len() as u32;
                 let mut remaining = Vec::with_capacity(self.pending_branches.len());
-                for (br_idx, pos, br_values) in core::mem::take(&mut self.pending_branches) {
-                    if pos == frame_pos {
-                        match &mut self.blocks[br_idx].term {
+                for pending in core::mem::take(&mut self.pending_branches) {
+                    if pending.frame_pos != frame_pos {
+                        remaining.push(pending);
+                        continue;
+                    }
+                    let term = &mut self.blocks[pending.block].term;
+                    match pending.slot {
+                        BranchSlot::Single => match term {
                             RegTerm::Br { target_block, .. }
                             | RegTerm::BrIf { target_block, .. } => {
                                 *target_block = continuation_idx;
                             }
-                            _ => unreachable!("pending branch block has non-branch terminator"),
-                        }
-                        for (dst, src) in values.iter().zip(br_values.iter()) {
-                            if dst != src {
-                                self.blocks[br_idx].instrs.push(RegInstr {
-                                    offset,
-                                    op: RegOp::Copy {
-                                        dst: *dst,
-                                        src: *src,
-                                    },
-                                });
+                            other => unreachable!(
+                                "pending branch block has non-branch terminator: {other:?}"
+                            ),
+                        },
+                        BranchSlot::Table(slot) => match term {
+                            RegTerm::BrTable {
+                                targets, default, ..
+                            } => {
+                                if slot < targets.len() {
+                                    targets[slot] = continuation_idx;
+                                } else {
+                                    *default = continuation_idx;
+                                }
                             }
+                            other => unreachable!(
+                                "pending branch block has non-branch terminator: {other:?}"
+                            ),
+                        },
+                    }
+                    // Copies from every targeted frame write disjoint
+                    // register sets from the same sources, so appending
+                    // per-frame copies to one block is sound.
+                    for (dst, src) in values.iter().zip(pending.values.iter()) {
+                        if dst != src {
+                            self.blocks[pending.block].instrs.push(RegInstr {
+                                offset,
+                                op: RegOp::Copy {
+                                    dst: *dst,
+                                    src: *src,
+                                },
+                            });
                         }
-                    } else {
-                        remaining.push((br_idx, pos, br_values));
                     }
                 }
                 self.pending_branches = remaining;
@@ -1235,15 +1345,7 @@ impl FuncBuilder {
                 // Branches to a loop label jump to the header carrying the
                 // loop's parameters; all other branches jump to the frame's
                 // continuation carrying its results.
-                let (branch_types, loop_header) = {
-                    let frame = &self.label_stack[frame_pos];
-                    match frame.kind {
-                        FrameKind::Loop { header_block } => {
-                            (frame.param_types.clone(), Some(header_block))
-                        }
-                        _ => (frame.result_types.clone(), None),
-                    }
-                };
+                let (branch_types, loop_header) = self.branch_types_at(frame_pos);
                 let mut values = Vec::with_capacity(branch_types.len());
                 for &expected in branch_types.iter().rev() {
                     let found = self.pop_expect(offset, "br", expected)?;
@@ -1258,8 +1360,12 @@ impl FuncBuilder {
                     });
                 } else {
                     let br_block_idx = self.blocks.len();
-                    self.pending_branches
-                        .push((br_block_idx, frame_pos, values.clone()));
+                    self.pending_branches.push(PendingBranch {
+                        block: br_block_idx,
+                        frame_pos,
+                        values: values.clone(),
+                        slot: BranchSlot::Single,
+                    });
                     self.finish_block(RegTerm::Br {
                         target_block: 0,
                         values,
@@ -1270,15 +1376,7 @@ impl FuncBuilder {
             Instr::BrIf(label) => {
                 let cond = self.pop_expect(offset, "br_if", ValType::Num(NumType::I32))?;
                 let frame_pos = self.label_position(offset, label)?;
-                let (branch_types, loop_header) = {
-                    let frame = &self.label_stack[frame_pos];
-                    match frame.kind {
-                        FrameKind::Loop { header_block } => {
-                            (frame.param_types.clone(), Some(header_block))
-                        }
-                        _ => (frame.result_types.clone(), None),
-                    }
-                };
+                let (branch_types, loop_header) = self.branch_types_at(frame_pos);
                 let mut values = Vec::with_capacity(branch_types.len());
                 for &expected in branch_types.iter().rev() {
                     let found = self.pop_expect(offset, "br_if", expected)?;
@@ -1297,14 +1395,60 @@ impl FuncBuilder {
                     });
                 } else {
                     let br_block_idx = self.blocks.len();
-                    self.pending_branches
-                        .push((br_block_idx, frame_pos, values.clone()));
+                    self.pending_branches.push(PendingBranch {
+                        block: br_block_idx,
+                        frame_pos,
+                        values: values.clone(),
+                        slot: BranchSlot::Single,
+                    });
                     self.finish_block(RegTerm::BrIf {
                         cond: cond.reg,
                         target_block: 0,
                         values,
                     });
                 }
+            }
+            Instr::BrTable { targets, default } => {
+                let index = self.pop_expect(offset, "br_table", ValType::Num(NumType::I32))?;
+                // All targets must agree on branch arity and types (the
+                // validator guarantees this); pop using the default target.
+                let default_pos = self.label_position(offset, default)?;
+                let (branch_types, _) = self.branch_types_at(default_pos);
+                let mut values = Vec::with_capacity(branch_types.len());
+                for &expected in branch_types.iter().rev() {
+                    let found = self.pop_expect(offset, "br_table", expected)?;
+                    values.push(found.reg);
+                }
+                values.reverse();
+                // Resolve targets: loop headers are known immediately; other
+                // frames get a pending entry per slot for back-patching at
+                // their `end`.
+                let br_block_idx = self.blocks.len();
+                let mut target_blocks = Vec::with_capacity(targets.len() + 1);
+                for (slot, target) in targets.iter().chain(core::iter::once(&default)).enumerate() {
+                    let frame_pos = self.label_position(offset, *target)?;
+                    let (_, loop_header) = self.branch_types_at(frame_pos);
+                    match loop_header {
+                        Some(header_block) => target_blocks.push(header_block),
+                        None => {
+                            target_blocks.push(0);
+                            self.pending_branches.push(PendingBranch {
+                                block: br_block_idx,
+                                frame_pos,
+                                values: values.clone(),
+                                slot: BranchSlot::Table(slot),
+                            });
+                        }
+                    }
+                }
+                let default_block = target_blocks.pop().expect("default included above");
+                self.finish_block(RegTerm::BrTable {
+                    index: index.reg,
+                    targets: target_blocks,
+                    default: default_block,
+                    values,
+                });
+                self.set_unreachable();
             }
             Instr::Return => {
                 let values = self.pop_results(offset)?;
@@ -1395,6 +1539,17 @@ impl FuncBuilder {
             });
         }
         Ok(self.label_stack.len() - 1 - label_idx)
+    }
+
+    /// The value types a branch to the frame at `frame_pos` must carry, and
+    /// the loop header block when the target is a loop (immediate target,
+    /// no back-patching needed).
+    fn branch_types_at(&self, frame_pos: usize) -> (Vec<ValType>, Option<u32>) {
+        let frame = &self.label_stack[frame_pos];
+        match frame.kind {
+            FrameKind::Loop { header_block } => (frame.param_types.clone(), Some(header_block)),
+            _ => (frame.result_types.clone(), None),
+        }
     }
 
     /// Mark the current control frame unreachable: the stack is truncated to
@@ -2350,6 +2505,131 @@ mod tests {
         assert_eq!(
             error.kind,
             crate::runtime::RuntimeErrorKind::Trap(crate::runtime::RuntimeTrap::Unreachable)
+        );
+    }
+
+    #[test]
+    fn execute_select_variants() {
+        let source = "(module (func (param i32 i32 i32) (result i32)
+            local.get 0
+            local.get 1
+            local.get 2
+            select))";
+        assert_eq!(
+            run_wat(
+                source,
+                &[
+                    crate::runtime::Value::I32(10),
+                    crate::runtime::Value::I32(20),
+                    crate::runtime::Value::I32(1),
+                ],
+            ),
+            vec![crate::runtime::Value::I32(10)]
+        );
+        assert_eq!(
+            run_wat(
+                source,
+                &[
+                    crate::runtime::Value::I32(10),
+                    crate::runtime::Value::I32(20),
+                    crate::runtime::Value::I32(0),
+                ],
+            ),
+            vec![crate::runtime::Value::I32(20)]
+        );
+    }
+
+    #[test]
+    fn lower_select_shape() {
+        let reg_module = lower_wat(
+            "(module (func (param i32 i32 i32) (result i32)
+               local.get 0
+               local.get 1
+               local.get 2
+               select))",
+        );
+        let func = &reg_module.funcs[0];
+        assert!(func.blocks[0].instrs.iter().any(|instr| matches!(
+            instr.op,
+            RegOp::Select {
+                dst: Reg(3),
+                v1: Reg(0),
+                v2: Reg(1),
+                cond: Reg(2),
+            }
+        )));
+    }
+
+    #[test]
+    fn lower_br_table_shape_and_patching() {
+        let reg_module = lower_wat(
+            "(module (func (param i32) (result i32)
+               block (result i32)
+                 block (result i32)
+                   i32.const 0
+                   local.get 0
+                   br_table 0 1
+                 end
+                 i32.const 10
+                 i32.add
+                 br 0
+               end))",
+        );
+        let func = &reg_module.funcs[0];
+        let br_table_block = func
+            .blocks
+            .iter()
+            .find(|block| matches!(block.term, RegTerm::BrTable { .. }))
+            .expect("expected a BrTable block");
+        let RegTerm::BrTable {
+            targets, default, ..
+        } = &br_table_block.term
+        else {
+            unreachable!()
+        };
+        // Both slots back-patched to real continuation blocks.
+        assert_eq!(targets.len(), 1);
+        assert_ne!(targets[0], 0);
+        assert_ne!(*default, 0);
+        assert_ne!(targets[0], *default);
+        // The block carries copies delivering the branch value.
+        assert!(
+            br_table_block
+                .instrs
+                .iter()
+                .any(|instr| matches!(instr.op, RegOp::Copy { .. }))
+        );
+    }
+
+    #[test]
+    fn execute_br_table_dispatch() {
+        let source = "(module (func (param i32) (result i32)
+            block (result i32)
+              block (result i32)
+                i32.const 0
+                local.get 0
+                br_table 0 1
+              end
+              i32.const 10
+              i32.add
+              br 0
+            end))";
+        assert_eq!(
+            run_wat(source, &[crate::runtime::Value::I32(0)]),
+            vec![crate::runtime::Value::I32(10)]
+        );
+        assert_eq!(
+            run_wat(source, &[crate::runtime::Value::I32(1)]),
+            vec![crate::runtime::Value::I32(0)]
+        );
+        // Out-of-range and negative indices take the default.
+        assert_eq!(
+            run_wat(source, &[crate::runtime::Value::I32(9)]),
+            vec![crate::runtime::Value::I32(0)]
+        );
+        assert_eq!(
+            run_wat(source, &[crate::runtime::Value::I32(-1)]),
+            vec![crate::runtime::Value::I32(0)]
         );
     }
 

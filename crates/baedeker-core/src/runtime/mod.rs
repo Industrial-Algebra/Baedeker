@@ -206,6 +206,25 @@ pub fn execute_func(func: &RegFunc, args: &[Value]) -> Result<Vec<Value>, Runtim
                     block_idx += 1;
                 }
             }
+            RegTerm::BrTable {
+                index,
+                targets,
+                default,
+                ..
+            } => {
+                let val = get_reg(&registers, *index)?;
+                // The index is read as u32: negative i32 values are large
+                // and fall through to the default target.
+                let idx = match val {
+                    Value::I32(v) => v as u32 as usize,
+                    _ => targets.len(),
+                };
+                block_idx = if idx < targets.len() {
+                    targets[idx]
+                } else {
+                    *default
+                };
+            }
             RegTerm::Fallthrough => {
                 block_idx += 1;
                 if block_idx as usize >= func.blocks.len() {
@@ -262,6 +281,12 @@ fn execute_reg_op(
         RegOp::Binary { op, dst, lhs, rhs } => execute_binary_op(registers, *op, *dst, *lhs, *rhs)?,
         RegOp::Copy { dst, src } => {
             let value = get_reg(registers, *src)?;
+            set_reg(registers, *dst, value)?;
+        }
+        RegOp::Select { dst, v1, v2, cond } => {
+            let cond_value = get_reg(registers, *cond)?;
+            let taken = matches!(cond_value, Value::I32(v) if v != 0);
+            let value = get_reg(registers, if taken { *v1 } else { *v2 })?;
             set_reg(registers, *dst, value)?;
         }
     }
