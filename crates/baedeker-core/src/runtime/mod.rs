@@ -156,8 +156,40 @@ pub fn execute_func(func: &RegFunc, args: &[Value]) -> Result<Vec<Value>, Runtim
                 }
                 return Ok(results);
             }
+            RegTerm::IfFork {
+                cond,
+                then_block,
+                else_block,
+            } => {
+                let val = get_reg(&registers, *cond)?;
+                if let Value::I32(v) = val {
+                    if v != 0 {
+                        block_idx = *then_block;
+                    } else {
+                        block_idx = *else_block;
+                    }
+                } else {
+                    block_idx = *else_block;
+                }
+            }
             RegTerm::Br { target_block, .. } => {
                 block_idx = *target_block;
+            }
+            RegTerm::BrIf {
+                cond,
+                target_block,
+                ..
+            } => {
+                let val = get_reg(&registers, *cond)?;
+                if let Value::I32(v) = val {
+                    if v != 0 {
+                        block_idx = *target_block;
+                    } else {
+                        block_idx += 1;
+                    }
+                } else {
+                    block_idx += 1;
+                }
             }
             RegTerm::Fallthrough => {
                 block_idx += 1;
