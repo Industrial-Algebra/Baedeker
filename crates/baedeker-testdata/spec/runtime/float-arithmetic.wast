@@ -31,3 +31,9 @@
 (assert_return (invoke "f64_sqrt" (f64.const 16.0)) (f64.const 4.0))
 (assert_return (invoke "f64_neg" (f64.const 3.0)) (f64.const -3.0))
 (assert_return (invoke "f64_abs" (f64.const -3.0)) (f64.const 3.0))
+
+;; NaN results match canonical/arithmetic NaN patterns.
+(assert_return (invoke "f32_div" (f32.const 0.0) (f32.const 0.0)) (f32.const nan:canonical))
+(assert_return (invoke "f64_div" (f64.const 0.0) (f64.const 0.0)) (f64.const nan:canonical))
+(assert_return (invoke "f32_sqrt" (f32.const -1.0)) (f32.const nan:arithmetic))
+(assert_return (invoke "f64_sqrt" (f64.const -1.0)) (f64.const nan:arithmetic))

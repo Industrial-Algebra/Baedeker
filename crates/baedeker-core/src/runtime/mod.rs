@@ -7,7 +7,7 @@
 use alloc::{string::String, vec::Vec};
 
 use crate::lower::{BinaryOp, Reg, RegFunc, RegInstr, RegModule, RegOp, RegTerm, UnaryOp};
-use crate::types::{NumType, ValType};
+use crate::types::{FuncIdx, NumType, ValType};
 
 /// A runtime WebAssembly value.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -46,6 +46,8 @@ pub enum RuntimeErrorKind {
     UnknownRegister { reg: Reg },
     UnknownExport { name: String },
     ExportedFunctionNotLowered { func: u32 },
+    UnknownFunction { func: u32 },
+    ImportedFunctionCallUnsupported { func: u32 },
     MissingReturn,
 }
 
@@ -53,6 +55,7 @@ pub enum RuntimeErrorKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeTrap {
     Unreachable,
+    CallStackExhausted,
     IntegerDivideByZero,
     IntegerOverflow,
     InvalidConversionToInteger,
@@ -63,6 +66,7 @@ impl RuntimeTrap {
     pub fn wast_message(self) -> &'static str {
         match self {
             RuntimeTrap::Unreachable => "unreachable",
+            RuntimeTrap::CallStackExhausted => "call stack exhausted",
             RuntimeTrap::IntegerDivideByZero => "integer divide by zero",
             RuntimeTrap::IntegerOverflow => "integer overflow",
             RuntimeTrap::InvalidConversionToInteger => "invalid conversion to integer",
@@ -94,11 +98,60 @@ pub fn execute_export(
             },
         })?;
 
-    execute_func(func, args)
+    execute_func_in(Some(module), func, args, 0)
 }
 
+/// Resolve and invoke a direct call target.
+fn execute_call(
+    module: Option<&RegModule>,
+    callee_idx: &FuncIdx,
+    call_args: &[Value],
+    depth: usize,
+) -> Result<Vec<Value>, RuntimeError> {
+    let module = module.ok_or(RuntimeError {
+        kind: RuntimeErrorKind::UnknownFunction { func: callee_idx.0 },
+    })?;
+    if callee_idx.0 < module.imported_func_count {
+        // Host functions are not yet supported; fail explicitly.
+        return Err(RuntimeError {
+            kind: RuntimeErrorKind::ImportedFunctionCallUnsupported { func: callee_idx.0 },
+        });
+    }
+    let callee = module
+        .funcs
+        .iter()
+        .find(|func| func.idx == *callee_idx)
+        .ok_or(RuntimeError {
+            kind: RuntimeErrorKind::UnknownFunction { func: callee_idx.0 },
+        })?;
+    execute_func_in(Some(module), callee, call_args, depth + 1)
+}
+
+/// Maximum call depth before the interpreter traps with stack exhaustion.
+/// Bounded so that unbounded recursion exhausts the interpreter before the
+/// host thread's stack does (test threads run with small stacks).
+const MAX_CALL_DEPTH: usize = 128;
+
 /// Execute a single lowered function with positional arguments.
+///
+/// Functions containing `call` instructions require module context; use
+/// [`execute_export`] for those (a bare `execute_func` call fails with
+/// [`RuntimeErrorKind::UnknownFunction`] on any `call`).
 pub fn execute_func(func: &RegFunc, args: &[Value]) -> Result<Vec<Value>, RuntimeError> {
+    execute_func_in(None, func, args, 0)
+}
+
+/// Execute a function with optional module context for resolving `call`
+/// targets, tracking recursion depth for stack exhaustion.
+fn execute_func_in(
+    module: Option<&RegModule>,
+    func: &RegFunc,
+    args: &[Value],
+    depth: usize,
+) -> Result<Vec<Value>, RuntimeError> {
+    if depth >= MAX_CALL_DEPTH {
+        return Err(trap(RuntimeTrap::CallStackExhausted));
+    }
     if args.len() != func.params.len() {
         return Err(RuntimeError {
             kind: RuntimeErrorKind::ArityMismatch {
@@ -161,7 +214,23 @@ pub fn execute_func(func: &RegFunc, args: &[Value]) -> Result<Vec<Value>, Runtim
 
         // Execute straight-line instructions in this block
         for instr in &block.instrs {
-            execute_reg_op(&mut registers, &mut locals, instr)?;
+            if let RegOp::Call {
+                func: callee_idx,
+                args: arg_regs,
+                results,
+            } = &instr.op
+            {
+                let call_args = arg_regs
+                    .iter()
+                    .map(|&reg| get_reg(&registers, reg))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let returned = execute_call(module, callee_idx, &call_args, depth)?;
+                for (&dst, value) in results.iter().zip(returned) {
+                    set_reg(&mut registers, dst, value)?;
+                }
+            } else {
+                execute_reg_op(&mut registers, &mut locals, instr)?;
+            }
         }
 
         // Follow the terminator
@@ -288,6 +357,13 @@ fn execute_reg_op(
             let taken = matches!(cond_value, Value::I32(v) if v != 0);
             let value = get_reg(registers, if taken { *v1 } else { *v2 })?;
             set_reg(registers, *dst, value)?;
+        }
+        RegOp::Call { func, .. } => {
+            // Calls are handled in `execute_func_in`, which has module
+            // context; reaching this arm means there was none.
+            return Err(RuntimeError {
+                kind: RuntimeErrorKind::UnknownFunction { func: func.0 },
+            });
         }
     }
     Ok(())
