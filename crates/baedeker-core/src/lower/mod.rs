@@ -86,6 +86,8 @@ pub enum RegTerm {
     },
     /// Return from the function with values.
     Return { values: Vec<Reg> },
+    /// Unconditional trap (`unreachable`).
+    Trap,
 }
 
 impl RegBlock {
@@ -149,6 +151,13 @@ pub enum RegOp {
         dst: Reg,
         lhs: Reg,
         rhs: Reg,
+    },
+    /// Copy a register — used to deliver branch-carried values into the
+    /// registers a continuation block expects (phi lowering via copies in
+    /// predecessor blocks).
+    Copy {
+        dst: Reg,
+        src: Reg,
     },
 }
 
@@ -760,6 +769,10 @@ pub enum LowerErrorKind {
         expected: ValType,
         found: ValType,
     },
+    InvalidLabel {
+        label: u32,
+    },
+    UnexpectedElse,
     MissingFunctionEnd,
 }
 
@@ -879,8 +892,30 @@ struct LabelFrame {
     /// The label that `br` with this index targets.
     #[allow(dead_code)]
     label: LabelIdx,
+    /// What kind of control structure this frame belongs to.
+    kind: FrameKind,
     /// The result types expected at the `end` of this control structure.
     result_types: Vec<ValType>,
+    /// The parameter types consumed at the start of this control structure.
+    /// Branches to a `loop` label carry parameters (to the loop header);
+    /// branches to any other label carry results (to the continuation).
+    param_types: Vec<ValType>,
+    /// Operand stack height at frame entry (after consuming parameters).
+    height: usize,
+    /// Whether the code currently being lowered in this frame is
+    /// unreachable (polymorphic stack, per the spec validation algorithm).
+    unreachable: bool,
+}
+
+/// The kind of control structure a label frame describes.
+enum FrameKind {
+    /// `block` (or the implicit function body frame).
+    Block,
+    /// `loop` — branches target the loop header block directly.
+    Loop { header_block: u32 },
+    /// `if` — `cond_block` is the IfFork block whose `else_block` field needs
+    /// back-patching; `else_seen` records whether an `else` was lowered.
+    If { cond_block: usize, else_seen: bool },
 }
 
 impl FuncBuilder {
@@ -899,7 +934,11 @@ impl FuncBuilder {
             current_instrs: Vec::new(),
             label_stack: alloc::vec![LabelFrame {
                 label: LabelIdx(0),
+                kind: FrameKind::Block,
                 result_types: ty.results.clone(),
+                param_types: Vec::new(),
+                height: 0,
+                unreachable: false,
             }],
             pending_branches: Vec::new(),
         }
@@ -999,64 +1038,86 @@ impl FuncBuilder {
                 });
                 self.emit(offset, RegOp::F64Const { dst, value });
             }
+            Instr::Unreachable => {
+                self.finish_block(RegTerm::Trap);
+                self.set_unreachable();
+            }
+            Instr::Nop => {}
             Instr::Block(block_type) => {
                 self.finish_block(RegTerm::Fallthrough);
-                let result_types = block_type_to_vec(block_type);
                 self.label_stack.push(LabelFrame {
                     label: LabelIdx(self.label_stack.len() as u32),
-                    result_types,
+                    kind: FrameKind::Block,
+                    result_types: block_type_to_vec(block_type),
+                    param_types: Vec::new(),
+                    height: self.stack.len(),
+                    unreachable: false,
                 });
             }
-            Instr::End => {
-                let frame = self.label_stack.pop().ok_or(LowerError {
-                    offset,
-                    function: Some(self.func_idx),
-                    kind: LowerErrorKind::MissingFunctionEnd,
-                })?;
-                // The outermost end is the function end.
-                if self.label_stack.is_empty() {
-                    let values = self.pop_results(offset)?;
-                    self.finish_block(RegTerm::Return { values });
-                    return Ok(true);
-                }
-                // Pop results matching this control frame's expected types.
-                let result_count = frame.result_types.len();
-                let mut values = Vec::with_capacity(result_count);
-                for &expected in frame.result_types.iter().rev() {
-                    let found = self.pop_expect(offset, "end", expected)?;
-                    values.push(found.reg);
-                }
-                values.reverse();
-                // Push the block's result values back onto the outer stack.
-                for (&reg, &ty) in values.iter().zip(frame.result_types.iter()) {
-                    self.stack.push(RegValue { reg, ty });
-                }
-                // Finish the body block.
+            Instr::Loop(block_type) => {
                 self.finish_block(RegTerm::Fallthrough);
-                // The continuation block will be at self.blocks.len().
-                // Back-patch all pending branches targeting this frame.
-                let frame_pos = self.label_stack.len(); // position of the popped frame
-                let continuation_idx = self.blocks.len() as u32;
-                for &(br_idx, pos, ref br_values) in &self.pending_branches {
-                    if pos == frame_pos {
-                        self.blocks[br_idx].term = RegTerm::Br {
-                            target_block: continuation_idx,
-                            values: br_values.clone(),
-                        };
-                    }
-                }
-                // Start a new continuation block (content will be filled by
-                // subsequent instructions).
-                self.finish_block(RegTerm::Fallthrough);
+                // The loop body starts a fresh block; branches to the loop
+                // label jump back to it (back-edge), so its index is known
+                // immediately and needs no back-patching.
+                let header_block = self.blocks.len() as u32;
+                self.label_stack.push(LabelFrame {
+                    label: LabelIdx(self.label_stack.len() as u32),
+                    kind: FrameKind::Loop { header_block },
+                    result_types: block_type_to_vec(block_type),
+                    param_types: Vec::new(),
+                    height: self.stack.len(),
+                    unreachable: false,
+                });
             }
-            Instr::Br(label) => {
-                let label_idx = label.0 as usize;
-                let frame_pos = self.label_stack.len() - 1 - label_idx;
-                let frame = &self.label_stack[frame_pos];
-                let result_types = frame.result_types.clone();
+            Instr::If(block_type) => {
+                let cond = self.pop_expect(offset, "if", ValType::Num(NumType::I32))?;
+                let cond_block = self.blocks.len();
+                self.finish_block(RegTerm::IfFork {
+                    cond: cond.reg,
+                    then_block: (cond_block + 1) as u32,
+                    // Back-patched at `else` (else-body start) or at `end`
+                    // (no else: the continuation).
+                    else_block: 0,
+                });
+                self.label_stack.push(LabelFrame {
+                    label: LabelIdx(self.label_stack.len() as u32),
+                    kind: FrameKind::If {
+                        cond_block,
+                        else_seen: false,
+                    },
+                    result_types: block_type_to_vec(block_type),
+                    param_types: Vec::new(),
+                    height: self.stack.len(),
+                    unreachable: false,
+                });
+            }
+            Instr::Else => {
+                let frame_pos = self.label_stack.len() - 1;
+                let (cond_block, result_types, frame_height) = match self.label_stack.last() {
+                    Some(LabelFrame {
+                        kind:
+                            FrameKind::If {
+                                cond_block,
+                                else_seen: false,
+                            },
+                        result_types,
+                        height,
+                        ..
+                    }) => (*cond_block, result_types.clone(), *height),
+                    _ => {
+                        return Err(LowerError {
+                            offset,
+                            function: Some(self.func_idx),
+                            kind: LowerErrorKind::UnexpectedElse,
+                        });
+                    }
+                };
+                // Pop the then-body's results; they become the values of a
+                // synthetic branch from the then-body exit to the
+                // continuation, back-patched at `end` like any other branch.
                 let mut values = Vec::with_capacity(result_types.len());
                 for &expected in result_types.iter().rev() {
-                    let found = self.pop_expect(offset, "br", expected)?;
+                    let found = self.pop_expect(offset, "else", expected)?;
                     values.push(found.reg);
                 }
                 values.reverse();
@@ -1067,32 +1128,191 @@ impl FuncBuilder {
                     target_block: 0,
                     values,
                 });
+                // The else-body starts at the next block.
+                let else_start = self.blocks.len() as u32;
+                if let RegTerm::IfFork { else_block, .. } = &mut self.blocks[cond_block].term {
+                    *else_block = else_start;
+                }
+                // Reset to the frame entry state for the else-body.
+                self.stack.truncate(frame_height);
+                let frame = self.label_stack.last_mut().expect("if frame checked above");
+                frame.unreachable = false;
+                if let FrameKind::If { else_seen, .. } = &mut frame.kind {
+                    *else_seen = true;
+                }
+            }
+            Instr::End => {
+                // The outermost end is the function end. The frame must
+                // still be on the stack while results are popped (pops are
+                // frame-aware), so handle it before popping.
+                if self.label_stack.len() == 1 {
+                    let values = self.pop_results(offset)?;
+                    self.label_stack.pop();
+                    self.finish_block(RegTerm::Return { values });
+                    return Ok(true);
+                }
+                // Pop results matching this control frame's expected types.
+                // The frame must still be on the stack while they are
+                // popped: pops are frame-aware (entry height and
+                // polymorphic-stack state).
+                let result_types = self
+                    .label_stack
+                    .last()
+                    .ok_or(LowerError {
+                        offset,
+                        function: Some(self.func_idx),
+                        kind: LowerErrorKind::MissingFunctionEnd,
+                    })?
+                    .result_types
+                    .clone();
+                let mut values = Vec::with_capacity(result_types.len());
+                for &expected in result_types.iter().rev() {
+                    let found = self.pop_expect(offset, "end", expected)?;
+                    values.push(found.reg);
+                }
+                values.reverse();
+                let frame = self
+                    .label_stack
+                    .pop()
+                    .expect("frame presence checked above");
+                // Reset the operand stack to the frame entry height, then push
+                // the block's result values back onto the outer stack.
+                self.stack.truncate(frame.height);
+                for (&reg, &ty) in values.iter().zip(frame.result_types.iter()) {
+                    self.stack.push(RegValue { reg, ty });
+                }
+                // Finish the body block.
+                self.finish_block(RegTerm::Fallthrough);
+                // The continuation block will be at self.blocks.len().
+                // Back-patch all pending branches targeting this frame,
+                // preserving each terminator's kind (Br vs BrIf), and append
+                // copies delivering each branch's values into the registers
+                // the continuation expects.
+                let frame_pos = self.label_stack.len(); // position of the popped frame
+                let continuation_idx = self.blocks.len() as u32;
+                let mut remaining = Vec::with_capacity(self.pending_branches.len());
+                for (br_idx, pos, br_values) in core::mem::take(&mut self.pending_branches) {
+                    if pos == frame_pos {
+                        match &mut self.blocks[br_idx].term {
+                            RegTerm::Br { target_block, .. }
+                            | RegTerm::BrIf { target_block, .. } => {
+                                *target_block = continuation_idx;
+                            }
+                            _ => unreachable!("pending branch block has non-branch terminator"),
+                        }
+                        for (dst, src) in values.iter().zip(br_values.iter()) {
+                            if dst != src {
+                                self.blocks[br_idx].instrs.push(RegInstr {
+                                    offset,
+                                    op: RegOp::Copy {
+                                        dst: *dst,
+                                        src: *src,
+                                    },
+                                });
+                            }
+                        }
+                    } else {
+                        remaining.push((br_idx, pos, br_values));
+                    }
+                }
+                self.pending_branches = remaining;
+                // For an `if` without `else`, the IfFork's else edge targets
+                // the continuation directly.
+                if let FrameKind::If {
+                    cond_block,
+                    else_seen: false,
+                } = frame.kind
+                    && let RegTerm::IfFork { else_block, .. } = &mut self.blocks[cond_block].term
+                {
+                    *else_block = continuation_idx;
+                }
+                // Start a new continuation block (content will be filled by
+                // subsequent instructions).
+                self.finish_block(RegTerm::Fallthrough);
+            }
+            Instr::Br(label) => {
+                let frame_pos = self.label_position(offset, label)?;
+                // Branches to a loop label jump to the header carrying the
+                // loop's parameters; all other branches jump to the frame's
+                // continuation carrying its results.
+                let (branch_types, loop_header) = {
+                    let frame = &self.label_stack[frame_pos];
+                    match frame.kind {
+                        FrameKind::Loop { header_block } => {
+                            (frame.param_types.clone(), Some(header_block))
+                        }
+                        _ => (frame.result_types.clone(), None),
+                    }
+                };
+                let mut values = Vec::with_capacity(branch_types.len());
+                for &expected in branch_types.iter().rev() {
+                    let found = self.pop_expect(offset, "br", expected)?;
+                    values.push(found.reg);
+                }
+                values.reverse();
+                if let Some(header_block) = loop_header {
+                    // Back-edge: target known immediately, no back-patching.
+                    self.finish_block(RegTerm::Br {
+                        target_block: header_block,
+                        values,
+                    });
+                } else {
+                    let br_block_idx = self.blocks.len();
+                    self.pending_branches
+                        .push((br_block_idx, frame_pos, values.clone()));
+                    self.finish_block(RegTerm::Br {
+                        target_block: 0,
+                        values,
+                    });
+                }
+                self.set_unreachable();
             }
             Instr::BrIf(label) => {
                 let cond = self.pop_expect(offset, "br_if", ValType::Num(NumType::I32))?;
-                let label_idx = label.0 as usize;
-                let frame_pos = self.label_stack.len() - 1 - label_idx;
-                let frame = &self.label_stack[frame_pos];
-                let result_types = frame.result_types.clone();
-                let mut values = Vec::with_capacity(result_types.len());
-                for &expected in result_types.iter().rev() {
+                let frame_pos = self.label_position(offset, label)?;
+                let (branch_types, loop_header) = {
+                    let frame = &self.label_stack[frame_pos];
+                    match frame.kind {
+                        FrameKind::Loop { header_block } => {
+                            (frame.param_types.clone(), Some(header_block))
+                        }
+                        _ => (frame.result_types.clone(), None),
+                    }
+                };
+                let mut values = Vec::with_capacity(branch_types.len());
+                for &expected in branch_types.iter().rev() {
                     let found = self.pop_expect(offset, "br_if", expected)?;
                     values.push(found.reg);
                 }
                 values.reverse();
-                let br_block_idx = self.blocks.len();
-                self.pending_branches
-                    .push((br_block_idx, frame_pos, values.clone()));
-                self.finish_block(RegTerm::BrIf {
-                    cond: cond.reg,
-                    target_block: 0,
-                    values,
-                });
+                // The not-taken path keeps the branch values on the stack.
+                for (&reg, &ty) in values.iter().zip(branch_types.iter()) {
+                    self.stack.push(RegValue { reg, ty });
+                }
+                if let Some(header_block) = loop_header {
+                    self.finish_block(RegTerm::BrIf {
+                        cond: cond.reg,
+                        target_block: header_block,
+                        values,
+                    });
+                } else {
+                    let br_block_idx = self.blocks.len();
+                    self.pending_branches
+                        .push((br_block_idx, frame_pos, values.clone()));
+                    self.finish_block(RegTerm::BrIf {
+                        cond: cond.reg,
+                        target_block: 0,
+                        values,
+                    });
+                }
             }
             Instr::Return => {
                 let values = self.pop_results(offset)?;
                 self.finish_block(RegTerm::Return { values });
-                return Ok(true);
+                // Code after `return` is unreachable, but lowering continues:
+                // instructions up to the function's final `end` must still be
+                // processed (under polymorphic stack discipline).
+                self.set_unreachable();
             }
             instr => {
                 if let Some(op) = unary_op(&instr) {
@@ -1125,14 +1345,67 @@ impl FuncBuilder {
     }
 
     fn pop_any(&mut self, offset: ByteOffset, op: &'static str) -> Result<RegValue, LowerError> {
-        self.stack.pop().ok_or(LowerError {
-            offset,
-            function: Some(self.func_idx),
-            kind: LowerErrorKind::StackUnderflow {
-                op,
-                expected: ValType::Num(NumType::I32),
-            },
-        })
+        if self.at_frame_boundary() {
+            if self.current_frame_unreachable() {
+                // Polymorphic stack: synthesize an undefined register. The
+                // surrounding code is unreachable, so the register is never
+                // read at runtime.
+                let ty = ValType::Num(NumType::I32);
+                let reg = self.alloc_reg(ty);
+                return Ok(RegValue { reg, ty });
+            }
+            return Err(LowerError {
+                offset,
+                function: Some(self.func_idx),
+                kind: LowerErrorKind::StackUnderflow {
+                    op,
+                    expected: ValType::Num(NumType::I32),
+                },
+            });
+        }
+        Ok(self.stack.pop().expect("stack height checked"))
+    }
+
+    /// Whether the operand stack is exactly at the current frame's entry
+    /// height — pops below this point are frame-boundary pops.
+    fn at_frame_boundary(&self) -> bool {
+        let frame = self
+            .label_stack
+            .last()
+            .expect("function frame is always present");
+        self.stack.len() == frame.height
+    }
+
+    fn current_frame_unreachable(&self) -> bool {
+        self.label_stack
+            .last()
+            .expect("function frame is always present")
+            .unreachable
+    }
+
+    /// Resolve a branch label to a position in `label_stack`, or fail on an
+    /// out-of-range label.
+    fn label_position(&self, offset: ByteOffset, label: LabelIdx) -> Result<usize, LowerError> {
+        let label_idx = label.0 as usize;
+        if label_idx >= self.label_stack.len() {
+            return Err(LowerError {
+                offset,
+                function: Some(self.func_idx),
+                kind: LowerErrorKind::InvalidLabel { label: label.0 },
+            });
+        }
+        Ok(self.label_stack.len() - 1 - label_idx)
+    }
+
+    /// Mark the current control frame unreachable: the stack is truncated to
+    /// the frame's entry height and further pops become polymorphic.
+    fn set_unreachable(&mut self) {
+        let frame = self
+            .label_stack
+            .last_mut()
+            .expect("function frame is always present");
+        self.stack.truncate(frame.height);
+        frame.unreachable = true;
     }
 
     fn lower_binary_op(&mut self, offset: ByteOffset, op: BinaryOp) -> Result<(), LowerError> {
@@ -1183,11 +1456,21 @@ impl FuncBuilder {
         op: &'static str,
         expected: ValType,
     ) -> Result<RegValue, LowerError> {
-        let found = self.stack.pop().ok_or(LowerError {
-            offset,
-            function: Some(self.func_idx),
-            kind: LowerErrorKind::StackUnderflow { op, expected },
-        })?;
+        if self.at_frame_boundary() {
+            if self.current_frame_unreachable() {
+                // Polymorphic stack: synthesize an undefined register of the
+                // expected type.
+                let reg = self.alloc_reg(expected);
+                return Ok(RegValue { reg, ty: expected });
+            }
+            return Err(LowerError {
+                offset,
+                function: Some(self.func_idx),
+                kind: LowerErrorKind::StackUnderflow { op, expected },
+            });
+        }
+
+        let found = self.stack.pop().expect("stack height checked");
 
         if found.ty != expected {
             return Err(LowerError {
@@ -1837,5 +2120,258 @@ mod tests {
             0x0f, // return
             0x0b, // end
         ]
+    }
+
+    /// Lower a WAT module for control-flow shape tests.
+    fn lower_wat(source: &str) -> RegModule {
+        let buf = wast::parser::ParseBuffer::new(source).unwrap();
+        let mut wat = wast::parser::parse::<wast::Wat<'_>>(&buf).unwrap();
+        let bytes = wat.encode().unwrap();
+        let module = Module::decode(&bytes).unwrap();
+        module.lower().unwrap()
+    }
+
+    fn run_wat(source: &str, args: &[crate::runtime::Value]) -> Vec<crate::runtime::Value> {
+        let reg_module = lower_wat(source);
+        crate::runtime::execute_func(&reg_module.funcs[0], args).unwrap()
+    }
+
+    #[test]
+    fn lower_if_else_shape() {
+        let reg_module = lower_wat(
+            "(module (func (param i32) (result i32)
+               local.get 0
+               if (result i32)
+                 i32.const 1
+               else
+                 i32.const 2
+               end))",
+        );
+        let func = &reg_module.funcs[0];
+
+        // Block 0 must end in an IfFork whose then/else targets were
+        // back-patched to real block indices.
+        let RegTerm::IfFork {
+            then_block,
+            else_block,
+            ..
+        } = func.blocks[0].term
+        else {
+            panic!("expected IfFork, got {:?}", func.blocks[0].term);
+        };
+        assert_eq!(then_block, 1);
+        assert_ne!(else_block, 0);
+        // The then-body must exit via a branch over the else-body.
+        assert!(matches!(
+            func.blocks[then_block as usize].term,
+            RegTerm::Br { .. }
+        ));
+    }
+
+    #[test]
+    fn execute_if_else_paths() {
+        let source = "(module (func (param i32) (result i32)
+            local.get 0
+            if (result i32)
+              i32.const 1
+            else
+              i32.const 2
+            end))";
+        assert_eq!(
+            run_wat(source, &[crate::runtime::Value::I32(1)]),
+            vec![crate::runtime::Value::I32(1)]
+        );
+        assert_eq!(
+            run_wat(source, &[crate::runtime::Value::I32(0)]),
+            vec![crate::runtime::Value::I32(2)]
+        );
+    }
+
+    #[test]
+    fn lower_if_without_else_patches_else_to_continuation() {
+        let reg_module = lower_wat(
+            "(module (func (param i32) (result i32)
+               local.get 0
+               if
+                 i32.const 42
+                 drop
+               end
+               i32.const 7))",
+        );
+        let func = &reg_module.funcs[0];
+        let RegTerm::IfFork { else_block, .. } = func.blocks[0].term else {
+            panic!("expected IfFork, got {:?}", func.blocks[0].term);
+        };
+        // With no else, the else edge must reach the continuation whose
+        // fallthrough chain leads to the final Return.
+        let mut idx = else_block;
+        loop {
+            match func.blocks[idx as usize].term {
+                RegTerm::Fallthrough => idx += 1,
+                RegTerm::Return { .. } => break,
+                ref other => panic!("unexpected terminator on else path: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn lower_loop_back_edge_targets_header() {
+        let reg_module = lower_wat(
+            "(module (func (param i32) (result i32)
+               (local i32)
+               block
+                 loop
+                   local.get 0
+                   i32.eqz
+                   br_if 1
+                   local.get 0
+                   i32.const 1
+                   i32.sub
+                   local.set 0
+                   br 0
+                 end
+               end
+               local.get 1))",
+        );
+        let func = &reg_module.funcs[0];
+        // The loop body contains a `br 0` back-edge: a Br terminator whose
+        // target is an earlier (header) block.
+        let back_edge = func
+            .blocks
+            .iter()
+            .enumerate()
+            .find_map(|(idx, block)| match block.term {
+                RegTerm::Br { target_block, .. } if (target_block as usize) < idx => {
+                    Some(target_block)
+                }
+                _ => None,
+            })
+            .expect("expected a loop back-edge Br");
+        // The header block is where the pre-loop block falls through to
+        // (block 0 = pre-block, block 1 = pre-loop, block 2 = loop header).
+        assert_eq!(back_edge, 2);
+    }
+
+    #[test]
+    fn execute_loop_sum() {
+        let source = "(module (func (param i32) (result i32)
+            (local i32)
+            block
+              loop
+                local.get 0
+                i32.eqz
+                br_if 1
+                local.get 1
+                local.get 0
+                i32.add
+                local.set 1
+                local.get 0
+                i32.const 1
+                i32.sub
+                local.set 0
+                br 0
+              end
+            end
+            local.get 1))";
+        assert_eq!(
+            run_wat(source, &[crate::runtime::Value::I32(5)]),
+            vec![crate::runtime::Value::I32(15)]
+        );
+        assert_eq!(
+            run_wat(source, &[crate::runtime::Value::I32(0)]),
+            vec![crate::runtime::Value::I32(0)]
+        );
+    }
+
+    #[test]
+    fn lower_br_value_appends_copy_to_branch_block() {
+        let reg_module = lower_wat(
+            "(module (func (result i32)
+               block (result i32)
+                 i32.const 1
+                 br 0
+                 i32.const 2
+               end))",
+        );
+        let func = &reg_module.funcs[0];
+        // The block containing `br 0` must deliver its value into the
+        // continuation's expected register via a Copy before branching.
+        let br_block = func
+            .blocks
+            .iter()
+            .find(|block| matches!(block.term, RegTerm::Br { .. }))
+            .expect("expected a Br block");
+        assert!(
+            br_block
+                .instrs
+                .iter()
+                .any(|instr| matches!(instr.op, RegOp::Copy { .. })),
+            "expected a Copy instruction in the branch block: {br_block:?}"
+        );
+    }
+
+    #[test]
+    fn execute_br_value_delivers_branch_site_value() {
+        let source = "(module (func (result i32)
+            block (result i32)
+              i32.const 1
+              br 0
+              i32.const 2
+            end))";
+        assert_eq!(run_wat(source, &[]), vec![crate::runtime::Value::I32(1)]);
+    }
+
+    #[test]
+    fn execute_return_does_not_stop_lowering() {
+        // Regression: `return` used to halt lowering, dropping the code
+        // after the block's `end`.
+        let source = "(module (func (param i32) (result i32)
+            block
+              local.get 0
+              br_if 0
+              i32.const 10
+              return
+            end
+            i32.const 20))";
+        assert_eq!(
+            run_wat(source, &[crate::runtime::Value::I32(0)]),
+            vec![crate::runtime::Value::I32(10)]
+        );
+        assert_eq!(
+            run_wat(source, &[crate::runtime::Value::I32(1)]),
+            vec![crate::runtime::Value::I32(20)]
+        );
+    }
+
+    #[test]
+    fn execute_unreachable_traps() {
+        let reg_module = lower_wat("(module (func (result i32) unreachable))");
+        let error = crate::runtime::execute_func(&reg_module.funcs[0], &[]).unwrap_err();
+        assert_eq!(
+            error.kind,
+            crate::runtime::RuntimeErrorKind::Trap(crate::runtime::RuntimeTrap::Unreachable)
+        );
+    }
+
+    #[test]
+    fn lower_else_without_if_is_an_error() {
+        // (func i32.const 1 else end) — else outside an if frame.
+        let bytes = [
+            0x00, 0x61, 0x73, 0x6d, // magic
+            0x01, 0x00, 0x00, 0x00, // version
+            0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type: [] -> []
+            0x03, 0x02, 0x01, 0x00, // function type 0
+            0x0a, 0x05, 0x01, 0x03, 0x00, // one body, no locals
+            0x05, // else
+            0x0b, // end
+        ];
+        let module = Module::decode(&bytes).unwrap();
+        // The validator rejects it; if it reaches lowering, lowering must
+        // reject it too.
+        let error = module.lower().unwrap_err();
+        assert!(matches!(
+            error.kind,
+            LowerErrorKind::Validation(_) | LowerErrorKind::UnexpectedElse
+        ));
     }
 }

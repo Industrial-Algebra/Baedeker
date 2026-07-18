@@ -52,6 +52,7 @@ pub enum RuntimeErrorKind {
 /// WebAssembly runtime traps surfaced by the interpreter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeTrap {
+    Unreachable,
     IntegerDivideByZero,
     IntegerOverflow,
     InvalidConversionToInteger,
@@ -61,6 +62,7 @@ impl RuntimeTrap {
     /// The canonical WAST assertion message for this trap.
     pub fn wast_message(self) -> &'static str {
         match self {
+            RuntimeTrap::Unreachable => "unreachable",
             RuntimeTrap::IntegerDivideByZero => "integer divide by zero",
             RuntimeTrap::IntegerOverflow => "integer overflow",
             RuntimeTrap::InvalidConversionToInteger => "invalid conversion to integer",
@@ -119,6 +121,18 @@ pub fn execute_func(func: &RegFunc, args: &[Value]) -> Result<Vec<Value>, Runtim
     for (idx, &arg) in args.iter().enumerate() {
         locals[idx] = Some(arg);
     }
+    // Non-parameter locals are zero-initialized per the spec.
+    for (slot, &ty) in locals.iter_mut().zip(func.locals.iter()).skip(args.len()) {
+        if slot.is_none() {
+            *slot = match ty {
+                ValType::Num(NumType::I32) => Some(Value::I32(0)),
+                ValType::Num(NumType::I64) => Some(Value::I64(0)),
+                ValType::Num(NumType::F32) => Some(Value::F32(0.0)),
+                ValType::Num(NumType::F64) => Some(Value::F64(0.0)),
+                _ => None,
+            };
+        }
+    }
 
     let mut registers = alloc::vec![None; func.reg_types.len()];
 
@@ -129,7 +143,10 @@ pub fn execute_func(func: &RegFunc, args: &[Value]) -> Result<Vec<Value>, Runtim
     }
 
     let mut block_idx: u32 = 0;
-    let max_iterations = func.blocks.len() * 100;
+    // Coarse fuel guard against infinite loops. Loops consume one unit per
+    // back-edge, so this must be generous; a configurable fuel mechanism is
+    // future work.
+    let max_iterations = 10_000_000;
     let mut iteration: usize = 0;
     loop {
         iteration += 1;
@@ -176,9 +193,7 @@ pub fn execute_func(func: &RegFunc, args: &[Value]) -> Result<Vec<Value>, Runtim
                 block_idx = *target_block;
             }
             RegTerm::BrIf {
-                cond,
-                target_block,
-                ..
+                cond, target_block, ..
             } => {
                 let val = get_reg(&registers, *cond)?;
                 if let Value::I32(v) = val {
@@ -198,6 +213,9 @@ pub fn execute_func(func: &RegFunc, args: &[Value]) -> Result<Vec<Value>, Runtim
                         kind: RuntimeErrorKind::MissingReturn,
                     });
                 }
+            }
+            RegTerm::Trap => {
+                return Err(trap(RuntimeTrap::Unreachable));
             }
         }
     }
@@ -242,6 +260,10 @@ fn execute_reg_op(
         }
         RegOp::Unary { op, dst, value } => execute_unary_op(registers, *op, *dst, *value)?,
         RegOp::Binary { op, dst, lhs, rhs } => execute_binary_op(registers, *op, *dst, *lhs, *rhs)?,
+        RegOp::Copy { dst, src } => {
+            let value = get_reg(registers, *src)?;
+            set_reg(registers, *dst, value)?;
+        }
     }
     Ok(())
 }
