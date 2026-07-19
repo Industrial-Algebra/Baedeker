@@ -117,6 +117,10 @@ fn run_runtime_wast_case(path: &Path) -> RuntimeWastStats {
                 stats.assertions += 1;
                 assert_trap(path, current_module.as_ref(), exec, message);
             }
+            WastDirective::AssertExhaustion { call, message, .. } => {
+                stats.assertions += 1;
+                assert_exhaustion(path, current_module.as_ref(), call, message);
+            }
             WastDirective::Invoke(invoke) => {
                 stats.assertions += 1;
                 execute_invoke(path, current_module.as_ref(), invoke);
@@ -158,15 +162,76 @@ fn assert_return(
         );
     };
     let actual = execute_invoke(path, module, invoke);
-    let expected = expected
-        .into_iter()
-        .map(|result| expected_value(path, result))
-        .collect::<Vec<_>>();
 
     assert_eq!(
-        actual,
-        expected,
-        "{}: assert_return mismatch",
+        actual.len(),
+        expected.len(),
+        "{}: assert_return arity mismatch",
+        path.display()
+    );
+    for (actual, expected) in actual.iter().zip(expected.iter()) {
+        assert!(
+            result_matches(actual, expected),
+            "{}: assert_return mismatch: actual {actual:?}, expected {expected:?}",
+            path.display()
+        );
+    }
+}
+
+/// Whether an actual runtime value satisfies an expected WAST result,
+/// including NaN patterns.
+fn result_matches(actual: &Value, expected: &WastRet<'_>) -> bool {
+    match expected {
+        WastRet::Core(WastRetCore::I32(value)) => *actual == Value::I32(*value),
+        WastRet::Core(WastRetCore::I64(value)) => *actual == Value::I64(*value),
+        WastRet::Core(WastRetCore::F32(pattern)) => match (actual, pattern) {
+            (Value::F32(actual), wast::core::NanPattern::Value(expected)) => {
+                *actual == f32::from_bits(expected.bits)
+            }
+            (Value::F32(actual), wast::core::NanPattern::CanonicalNan) => {
+                actual.to_bits() & 0x7fff_ffff == 0x7fc0_0000
+            }
+            (Value::F32(actual), wast::core::NanPattern::ArithmeticNan) => actual.is_nan(),
+            _ => false,
+        },
+        WastRet::Core(WastRetCore::F64(pattern)) => match (actual, pattern) {
+            (Value::F64(actual), wast::core::NanPattern::Value(expected)) => {
+                *actual == f64::from_bits(expected.bits)
+            }
+            (Value::F64(actual), wast::core::NanPattern::CanonicalNan) => {
+                actual.to_bits() & 0x7fff_ffff_ffff_ffff == 0x7ff8_0000_0000_0000
+            }
+            (Value::F64(actual), wast::core::NanPattern::ArithmeticNan) => actual.is_nan(),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn assert_exhaustion(
+    path: &Path,
+    module: Option<&RegModule>,
+    invoke: wast::WastInvoke<'_>,
+    message: &str,
+) {
+    let error = execute_invoke_result(path, module, invoke).expect_err(&format!(
+        "{}: assert_exhaustion expected {:?} but invocation returned successfully",
+        path.display(),
+        message
+    ));
+
+    let RuntimeErrorKind::Trap(trap) = error.kind else {
+        panic!(
+            "{}: assert_exhaustion expected {:?} but got runtime error: {error:?}",
+            path.display(),
+            message
+        );
+    };
+
+    assert_eq!(
+        trap.wast_message(),
+        message,
+        "{}: assert_exhaustion message mismatch",
         path.display()
     );
 }
@@ -251,31 +316,6 @@ fn arg_value(path: &Path, arg: WastArg<'_>) -> Value {
         WastArg::Core(WastArgCore::F64(value)) => Value::F64(f64::from_bits(value.bits)),
         other => panic!(
             "{}: unsupported runtime WAST argument: {other:?}",
-            path.display()
-        ),
-    }
-}
-
-fn expected_value(path: &Path, result: WastRet<'_>) -> Value {
-    match result {
-        WastRet::Core(WastRetCore::I32(value)) => Value::I32(value),
-        WastRet::Core(WastRetCore::I64(value)) => Value::I64(value),
-        WastRet::Core(WastRetCore::F32(pattern)) => match pattern {
-            wast::core::NanPattern::Value(val) => Value::F32(f32::from_bits(val.bits)),
-            _ => panic!(
-                "{}: unsupported float NaN pattern in assert_return",
-                path.display()
-            ),
-        },
-        WastRet::Core(WastRetCore::F64(pattern)) => match pattern {
-            wast::core::NanPattern::Value(val) => Value::F64(f64::from_bits(val.bits)),
-            _ => panic!(
-                "{}: unsupported float NaN pattern in assert_return",
-                path.display()
-            ),
-        },
-        other => panic!(
-            "{}: unsupported runtime WAST expected result: {other:?}",
             path.display()
         ),
     }

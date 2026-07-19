@@ -11,8 +11,8 @@ use crate::binary::instr::{DecodedInstr, Instr};
 use crate::binary::module::Module;
 use crate::error::{ByteOffset, DecodeContext, DecodeErrorKind};
 use crate::types::{
-    BlockType, CodeBody, ExportDesc, FuncIdx, FuncType, LabelIdx, LocalDecl, LocalIdx, NumType,
-    TypeIdx, ValType,
+    BlockType, CodeBody, ExportDesc, FuncIdx, FuncType, ImportDesc, LabelIdx, LocalDecl, LocalIdx,
+    NumType, TypeIdx, ValType,
 };
 use crate::validate;
 use crate::validate::error::{ValidationError, ValidationErrorKind};
@@ -33,6 +33,9 @@ pub struct RegValue {
 pub struct RegModule {
     pub funcs: Vec<RegFunc>,
     pub exports: Vec<RegExport>,
+    /// Number of imported functions: `FuncIdx` values below this are not
+    /// lowered and cannot be called by the interpreter yet.
+    pub imported_func_count: u32,
 }
 
 /// A function export in lowered register IR.
@@ -166,6 +169,13 @@ pub enum RegOp {
     Copy {
         dst: Reg,
         src: Reg,
+    },
+    /// Direct call (`call`): invoke `func` with `args`, writing each result
+    /// register.
+    Call {
+        func: FuncIdx,
+        args: Vec<Reg>,
+        results: Vec<Reg>,
     },
     /// Conditional selection (`select`): dst = cond != 0 ? v1 : v2.
     Select {
@@ -787,6 +797,9 @@ pub enum LowerErrorKind {
     InvalidLabel {
         label: u32,
     },
+    InvalidFunction {
+        func: u32,
+    },
     UnexpectedElse,
     MissingFunctionEnd,
 }
@@ -813,13 +826,14 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
     validate::validate_module(module)?;
 
     let imported_func_count = module.imported_function_count() as u32;
+    let func_types = func_type_table(module);
     let mut funcs = Vec::new();
 
     for (defined_idx, (type_idx, code)) in module.functions().iter().zip(module.codes()).enumerate()
     {
         let func_idx = FuncIdx(imported_func_count + defined_idx as u32);
         let ty = &module.types()[type_idx.0 as usize];
-        funcs.push(lower_function(func_idx, *type_idx, ty, code)?);
+        funcs.push(lower_function(func_idx, *type_idx, ty, code, &func_types)?);
     }
 
     let exports = module
@@ -834,7 +848,26 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
         })
         .collect();
 
-    Ok(RegModule { funcs, exports })
+    Ok(RegModule {
+        funcs,
+        exports,
+        imported_func_count,
+    })
+}
+
+/// Resolve the `FuncType` for every function in the index space (imported
+/// first, then defined), so `call` lowering can type its operands.
+fn func_type_table<'a, 'm>(module: &'a Module<'m>) -> Vec<&'a FuncType> {
+    let mut table = Vec::new();
+    for import in module.imports() {
+        if let ImportDesc::Func(type_idx) = import.desc {
+            table.push(&module.types()[type_idx.0 as usize]);
+        }
+    }
+    for type_idx in module.functions() {
+        table.push(&module.types()[type_idx.0 as usize]);
+    }
+    table
 }
 
 fn lower_function(
@@ -842,6 +875,7 @@ fn lower_function(
     type_idx: TypeIdx,
     ty: &FuncType,
     code: &CodeBody<'_>,
+    func_types: &[&FuncType],
 ) -> Result<RegFunc, LowerError> {
     let instrs = code
         .instructions_with_offsets()
@@ -855,7 +889,7 @@ fn lower_function(
         })?;
 
     let locals = local_types(ty, code.locals.as_slice());
-    let mut builder = FuncBuilder::new(func_idx, type_idx, ty, locals);
+    let mut builder = FuncBuilder::new(func_idx, type_idx, ty, locals, func_types);
 
     for decoded in instrs {
         if builder.lower_instr(decoded)? {
@@ -885,7 +919,7 @@ fn local_types(ty: &FuncType, locals: &[LocalDecl]) -> Vec<ValType> {
     types
 }
 
-struct FuncBuilder {
+struct FuncBuilder<'b> {
     func_idx: FuncIdx,
     type_idx: TypeIdx,
     params: Vec<ValType>,
@@ -895,6 +929,9 @@ struct FuncBuilder {
     reg_types: Vec<ValType>,
     blocks: Vec<RegBlock>,
     current_instrs: Vec<RegInstr>,
+    /// Function types for the whole index space (imported first), used to
+    /// type direct calls.
+    func_types: &'b [&'b FuncType],
     /// Stack of active block/loop/if frames. Each entry records the label of
     /// the block that should follow the `end` of this control structure.
     label_stack: Vec<LabelFrame>,
@@ -954,8 +991,14 @@ enum FrameKind {
     If { cond_block: usize, else_seen: bool },
 }
 
-impl FuncBuilder {
-    fn new(func_idx: FuncIdx, type_idx: TypeIdx, ty: &FuncType, locals: Vec<ValType>) -> Self {
+impl<'b> FuncBuilder<'b> {
+    fn new(
+        func_idx: FuncIdx,
+        type_idx: TypeIdx,
+        ty: &FuncType,
+        locals: Vec<ValType>,
+        func_types: &'b [&'b FuncType],
+    ) -> Self {
         // The function body itself is label 0, targeting a block that will
         // receive function-end returns (created on demand).
         Self {
@@ -977,6 +1020,7 @@ impl FuncBuilder {
                 unreachable: false,
             }],
             pending_branches: Vec::new(),
+            func_types,
         }
     }
 
@@ -1457,6 +1501,35 @@ impl FuncBuilder {
                 // instructions up to the function's final `end` must still be
                 // processed (under polymorphic stack discipline).
                 self.set_unreachable();
+            }
+            Instr::Call(func) => {
+                let Some(callee_ty) = self.func_types.get(func.0 as usize) else {
+                    return Err(LowerError {
+                        offset,
+                        function: Some(self.func_idx),
+                        kind: LowerErrorKind::InvalidFunction { func: func.0 },
+                    });
+                };
+                let mut args = Vec::with_capacity(callee_ty.params.len());
+                for &expected in callee_ty.params.iter().rev() {
+                    let found = self.pop_expect(offset, "call", expected)?;
+                    args.push(found.reg);
+                }
+                args.reverse();
+                let mut results = Vec::with_capacity(callee_ty.results.len());
+                for &ty in callee_ty.results.iter() {
+                    let dst = self.alloc_reg(ty);
+                    self.stack.push(RegValue { reg: dst, ty });
+                    results.push(dst);
+                }
+                self.emit(
+                    offset,
+                    RegOp::Call {
+                        func,
+                        args,
+                        results,
+                    },
+                );
             }
             instr => {
                 if let Some(op) = unary_op(&instr) {
@@ -2505,6 +2578,104 @@ mod tests {
         assert_eq!(
             error.kind,
             crate::runtime::RuntimeErrorKind::Trap(crate::runtime::RuntimeTrap::Unreachable)
+        );
+    }
+
+    /// Execute an exported function with full module context (required for
+    /// `call` instructions).
+    fn run_wat_export(
+        source: &str,
+        name: &str,
+        args: &[crate::runtime::Value],
+    ) -> Result<Vec<crate::runtime::Value>, crate::runtime::RuntimeError> {
+        let reg_module = lower_wat(source);
+        crate::runtime::execute_export(&reg_module, name, args)
+    }
+
+    #[test]
+    fn lower_call_shape() {
+        let reg_module = lower_wat(
+            "(module
+               (func $add (param i32 i32) (result i32)
+                 local.get 0 local.get 1 i32.add)
+               (func (export \"main\") (param i32 i32) (result i32)
+                 local.get 0 local.get 1 call $add))",
+        );
+        let func = &reg_module.funcs[1];
+        let call = func.blocks[0]
+            .instrs
+            .iter()
+            .find_map(|instr| match &instr.op {
+                RegOp::Call {
+                    func,
+                    args,
+                    results,
+                } => Some((func, args, results)),
+                _ => None,
+            })
+            .expect("expected a Call op");
+        assert_eq!(*call.0, FuncIdx(0));
+        assert_eq!(call.1.as_slice(), &[Reg(0), Reg(1)]);
+        assert_eq!(call.2.as_slice(), &[Reg(2)]);
+    }
+
+    #[test]
+    fn execute_call_recursion_and_multi_result() {
+        let fac = run_wat_export(
+            "(module
+               (func $fac (param i32) (result i32)
+                 local.get 0
+                 i32.const 2
+                 i32.lt_s
+                 if (result i32)
+                   i32.const 1
+                 else
+                   local.get 0
+                   local.get 0
+                   i32.const 1
+                   i32.sub
+                   call $fac
+                   i32.mul
+                 end)
+               (func (export \"fac\") (param i32) (result i32)
+                 local.get 0
+                 call $fac))",
+            "fac",
+            &[crate::runtime::Value::I32(5)],
+        );
+        assert_eq!(fac, Ok(vec![crate::runtime::Value::I32(120)]));
+
+        let rem = run_wat_export(
+            "(module
+               (func $divmod (param i32 i32) (result i32 i32)
+                 local.get 0 local.get 1 i32.div_u
+                 local.get 0 local.get 1 i32.rem_u)
+               (func (export \"rem\") (param i32 i32) (result i32)
+                 (local i32)
+                 local.get 0 local.get 1 call $divmod
+                 local.set 2
+                 drop
+                 local.get 2))",
+            "rem",
+            &[
+                crate::runtime::Value::I32(17),
+                crate::runtime::Value::I32(5),
+            ],
+        );
+        assert_eq!(rem, Ok(vec![crate::runtime::Value::I32(2)]));
+    }
+
+    #[test]
+    fn execute_call_exhaustion_traps() {
+        let error = run_wat_export(
+            "(module (func $boom (export \"boom\") call $boom))",
+            "boom",
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.kind,
+            crate::runtime::RuntimeErrorKind::Trap(crate::runtime::RuntimeTrap::CallStackExhausted)
         );
     }
 
