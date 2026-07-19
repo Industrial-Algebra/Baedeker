@@ -3,7 +3,7 @@ use std::path::Path;
 
 use baedeker_core::binary::module::Module;
 use baedeker_core::lower::RegModule;
-use baedeker_core::runtime::{RuntimeError, RuntimeErrorKind, Value, execute_export};
+use baedeker_core::runtime::{RuntimeError, RuntimeErrorKind, Store, Value, execute_export};
 use wast::core::{WastArgCore, WastRetCore};
 use wast::parser::{ParseBuffer, parse};
 use wast::{QuoteWat, Wast, WastArg, WastDirective, WastExecute, WastRet};
@@ -101,29 +101,60 @@ fn run_runtime_wast_case(path: &Path) -> RuntimeWastStats {
         ..RuntimeWastStats::default()
     };
     let mut current_module = None;
+    let mut current_store = None;
 
     for directive in wast.directives {
         stats.directives += 1;
         match directive {
             WastDirective::Module(wat) | WastDirective::ModuleDefinition(wat) => {
                 stats.modules += 1;
-                current_module = Some(lower_wat_module(path, wat));
+                let module = lower_wat_module(path, wat);
+                current_store = Some(Store::instantiate(&module).unwrap_or_else(|error| {
+                    panic!(
+                        "{}: expected runtime module to instantiate: {error:?}",
+                        path.display()
+                    )
+                }));
+                current_module = Some(module);
             }
             WastDirective::AssertReturn { exec, results, .. } => {
                 stats.assertions += 1;
-                assert_return(path, current_module.as_ref(), exec, results);
+                assert_return(
+                    path,
+                    current_module.as_ref(),
+                    current_store.as_mut(),
+                    exec,
+                    results,
+                );
             }
             WastDirective::AssertTrap { exec, message, .. } => {
                 stats.assertions += 1;
-                assert_trap(path, current_module.as_ref(), exec, message);
+                assert_trap(
+                    path,
+                    current_module.as_ref(),
+                    current_store.as_mut(),
+                    exec,
+                    message,
+                );
             }
             WastDirective::AssertExhaustion { call, message, .. } => {
                 stats.assertions += 1;
-                assert_exhaustion(path, current_module.as_ref(), call, message);
+                assert_exhaustion(
+                    path,
+                    current_module.as_ref(),
+                    current_store.as_mut(),
+                    call,
+                    message,
+                );
             }
             WastDirective::Invoke(invoke) => {
                 stats.assertions += 1;
-                execute_invoke(path, current_module.as_ref(), invoke);
+                execute_invoke(
+                    path,
+                    current_module.as_ref(),
+                    current_store.as_mut(),
+                    invoke,
+                );
             }
             other => stats.record_unsupported(directive_name(&other)),
         }
@@ -152,6 +183,7 @@ fn lower_wat_module(path: &Path, wat: QuoteWat<'_>) -> RegModule {
 fn assert_return(
     path: &Path,
     module: Option<&RegModule>,
+    store: Option<&mut Store>,
     exec: WastExecute<'_>,
     expected: Vec<WastRet<'_>>,
 ) {
@@ -161,7 +193,7 @@ fn assert_return(
             path.display()
         );
     };
-    let actual = execute_invoke(path, module, invoke);
+    let actual = execute_invoke(path, module, store, invoke);
 
     assert_eq!(
         actual.len(),
@@ -211,10 +243,11 @@ fn result_matches(actual: &Value, expected: &WastRet<'_>) -> bool {
 fn assert_exhaustion(
     path: &Path,
     module: Option<&RegModule>,
+    store: Option<&mut Store>,
     invoke: wast::WastInvoke<'_>,
     message: &str,
 ) {
-    let error = execute_invoke_result(path, module, invoke).expect_err(&format!(
+    let error = execute_invoke_result(path, module, store, invoke).expect_err(&format!(
         "{}: assert_exhaustion expected {:?} but invocation returned successfully",
         path.display(),
         message
@@ -236,7 +269,13 @@ fn assert_exhaustion(
     );
 }
 
-fn assert_trap(path: &Path, module: Option<&RegModule>, exec: WastExecute<'_>, message: &str) {
+fn assert_trap(
+    path: &Path,
+    module: Option<&RegModule>,
+    store: Option<&mut Store>,
+    exec: WastExecute<'_>,
+    message: &str,
+) {
     let WastExecute::Invoke(invoke) = exec else {
         panic!(
             "{}: runtime assert_trap currently supports only invoke execution",
@@ -244,7 +283,7 @@ fn assert_trap(path: &Path, module: Option<&RegModule>, exec: WastExecute<'_>, m
         );
     };
 
-    let error = execute_invoke_result(path, module, invoke).expect_err(&format!(
+    let error = execute_invoke_result(path, module, store, invoke).expect_err(&format!(
         "{}: assert_trap expected {:?} trap but invocation returned successfully",
         path.display(),
         message
@@ -269,10 +308,11 @@ fn assert_trap(path: &Path, module: Option<&RegModule>, exec: WastExecute<'_>, m
 fn execute_invoke(
     path: &Path,
     module: Option<&RegModule>,
+    store: Option<&mut Store>,
     invoke: wast::WastInvoke<'_>,
 ) -> Vec<Value> {
     let name = invoke.name;
-    execute_invoke_result(path, module, invoke).unwrap_or_else(|error| {
+    execute_invoke_result(path, module, store, invoke).unwrap_or_else(|error| {
         panic!(
             "{}: invoke {:?} failed at runtime: {error:?}",
             path.display(),
@@ -284,6 +324,7 @@ fn execute_invoke(
 fn execute_invoke_result(
     path: &Path,
     module: Option<&RegModule>,
+    store: Option<&mut Store>,
     invoke: wast::WastInvoke<'_>,
 ) -> Result<Vec<Value>, RuntimeError> {
     if invoke.module.is_some() {
@@ -305,7 +346,12 @@ fn execute_invoke_result(
         .map(|arg| arg_value(path, arg))
         .collect::<Vec<_>>();
 
-    execute_export(module, invoke.name, &args)
+    execute_export(
+        module,
+        store.expect("store created with module"),
+        invoke.name,
+        &args,
+    )
 }
 
 fn arg_value(path: &Path, arg: WastArg<'_>) -> Value {
