@@ -6,8 +6,12 @@
 
 use alloc::{string::String, vec::Vec};
 
+mod store;
+
+pub use store::{PAGE_SIZE, Store};
+
 use crate::lower::{BinaryOp, Reg, RegFunc, RegInstr, RegModule, RegOp, RegTerm, UnaryOp};
-use crate::types::{FuncIdx, NumType, ValType};
+use crate::types::{FuncIdx, MemArg, NumType, ValType};
 
 /// A runtime WebAssembly value.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -48,6 +52,12 @@ pub enum RuntimeErrorKind {
     ExportedFunctionNotLowered { func: u32 },
     UnknownFunction { func: u32 },
     ImportedFunctionCallUnsupported { func: u32 },
+    UnknownMemory { memory: u32 },
+    UnknownGlobal { global: u32 },
+    ImportedMemoryAccessUnsupported { memory: u32 },
+    ImportedGlobalAccessUnsupported { global: u32 },
+    InvalidConstExpr,
+    MissingStore,
     MissingReturn,
 }
 
@@ -56,6 +66,7 @@ pub enum RuntimeErrorKind {
 pub enum RuntimeTrap {
     Unreachable,
     CallStackExhausted,
+    OutOfBoundsMemoryAccess,
     IntegerDivideByZero,
     IntegerOverflow,
     InvalidConversionToInteger,
@@ -67,6 +78,7 @@ impl RuntimeTrap {
         match self {
             RuntimeTrap::Unreachable => "unreachable",
             RuntimeTrap::CallStackExhausted => "call stack exhausted",
+            RuntimeTrap::OutOfBoundsMemoryAccess => "out of bounds memory access",
             RuntimeTrap::IntegerDivideByZero => "integer divide by zero",
             RuntimeTrap::IntegerOverflow => "integer overflow",
             RuntimeTrap::InvalidConversionToInteger => "invalid conversion to integer",
@@ -77,6 +89,7 @@ impl RuntimeTrap {
 /// Execute an exported lowered function by name.
 pub fn execute_export(
     module: &RegModule,
+    store: &mut Store,
     name: &str,
     args: &[Value],
 ) -> Result<Vec<Value>, RuntimeError> {
@@ -98,12 +111,13 @@ pub fn execute_export(
             },
         })?;
 
-    execute_func_in(Some(module), func, args, 0)
+    execute_func_in(Some(module), Some(store), func, args, 0)
 }
 
 /// Resolve and invoke a direct call target.
 fn execute_call(
     module: Option<&RegModule>,
+    store: Option<&mut Store>,
     callee_idx: &FuncIdx,
     call_args: &[Value],
     depth: usize,
@@ -124,7 +138,7 @@ fn execute_call(
         .ok_or(RuntimeError {
             kind: RuntimeErrorKind::UnknownFunction { func: callee_idx.0 },
         })?;
-    execute_func_in(Some(module), callee, call_args, depth + 1)
+    execute_func_in(Some(module), store, callee, call_args, depth + 1)
 }
 
 /// Maximum call depth before the interpreter traps with stack exhaustion.
@@ -138,13 +152,15 @@ const MAX_CALL_DEPTH: usize = 128;
 /// [`execute_export`] for those (a bare `execute_func` call fails with
 /// [`RuntimeErrorKind::UnknownFunction`] on any `call`).
 pub fn execute_func(func: &RegFunc, args: &[Value]) -> Result<Vec<Value>, RuntimeError> {
-    execute_func_in(None, func, args, 0)
+    execute_func_in(None, None, func, args, 0)
 }
 
 /// Execute a function with optional module context for resolving `call`
-/// targets, tracking recursion depth for stack exhaustion.
+/// targets and optional store context for memory/global access, tracking
+/// recursion depth for stack exhaustion.
 fn execute_func_in(
     module: Option<&RegModule>,
+    mut store: Option<&mut Store>,
     func: &RegFunc,
     args: &[Value],
     depth: usize,
@@ -224,12 +240,13 @@ fn execute_func_in(
                     .iter()
                     .map(|&reg| get_reg(&registers, reg))
                     .collect::<Result<Vec<_>, _>>()?;
-                let returned = execute_call(module, callee_idx, &call_args, depth)?;
+                let returned =
+                    execute_call(module, store.as_deref_mut(), callee_idx, &call_args, depth)?;
                 for (&dst, value) in results.iter().zip(returned) {
                     set_reg(&mut registers, dst, value)?;
                 }
             } else {
-                execute_reg_op(&mut registers, &mut locals, instr)?;
+                execute_reg_op(store.as_deref_mut(), &mut registers, &mut locals, instr)?;
             }
         }
 
@@ -310,6 +327,7 @@ fn execute_func_in(
 }
 
 fn execute_reg_op(
+    store: Option<&mut Store>,
     registers: &mut [Option<Value>],
     locals: &mut [Option<Value>],
     instr: &RegInstr,
@@ -365,8 +383,215 @@ fn execute_reg_op(
                 kind: RuntimeErrorKind::UnknownFunction { func: func.0 },
             });
         }
+        RegOp::Load {
+            op,
+            dst,
+            addr,
+            memarg,
+        } => {
+            let addr = expect_addr(get_reg(registers, *addr)?)?;
+            let bytes = memory_slice_mut(require_store(store)?, memarg, addr, op.byte_width())?;
+            let value = match op {
+                crate::lower::LoadOp::I32 => {
+                    Value::I32(i32::from_le_bytes(bytes.try_into().expect("width checked")))
+                }
+                crate::lower::LoadOp::I64 => {
+                    Value::I64(i64::from_le_bytes(bytes.try_into().expect("width checked")))
+                }
+                crate::lower::LoadOp::F32 => Value::F32(f32::from_bits(u32::from_le_bytes(
+                    bytes.try_into().expect("width checked"),
+                ))),
+                crate::lower::LoadOp::F64 => Value::F64(f64::from_bits(u64::from_le_bytes(
+                    bytes.try_into().expect("width checked"),
+                ))),
+                crate::lower::LoadOp::I32Load8S => Value::I32(bytes[0] as i8 as i32),
+                crate::lower::LoadOp::I32Load8U => Value::I32(bytes[0] as i32),
+                crate::lower::LoadOp::I32Load16S => {
+                    Value::I32(i16::from_le_bytes(bytes.try_into().expect("width checked")) as i32)
+                }
+                crate::lower::LoadOp::I32Load16U => {
+                    Value::I32(u16::from_le_bytes(bytes.try_into().expect("width checked")) as i32)
+                }
+                crate::lower::LoadOp::I64Load8S => Value::I64(bytes[0] as i8 as i64),
+                crate::lower::LoadOp::I64Load8U => Value::I64(bytes[0] as i64),
+                crate::lower::LoadOp::I64Load16S => {
+                    Value::I64(i16::from_le_bytes(bytes.try_into().expect("width checked")) as i64)
+                }
+                crate::lower::LoadOp::I64Load16U => {
+                    Value::I64(u16::from_le_bytes(bytes.try_into().expect("width checked")) as i64)
+                }
+                crate::lower::LoadOp::I64Load32S => {
+                    Value::I64(i32::from_le_bytes(bytes.try_into().expect("width checked")) as i64)
+                }
+                crate::lower::LoadOp::I64Load32U => {
+                    Value::I64(u32::from_le_bytes(bytes.try_into().expect("width checked")) as i64)
+                }
+            };
+            set_reg(registers, *dst, value)?;
+        }
+        RegOp::Store {
+            op,
+            addr,
+            value,
+            memarg,
+        } => {
+            let addr = expect_addr(get_reg(registers, *addr)?)?;
+            let value = get_reg(registers, *value)?;
+            let bytes = memory_slice_mut(require_store(store)?, memarg, addr, op.byte_width())?;
+            match (op, value) {
+                (crate::lower::StoreOp::I32, Value::I32(v)) => {
+                    bytes.copy_from_slice(&v.to_le_bytes());
+                }
+                (crate::lower::StoreOp::I64, Value::I64(v)) => {
+                    bytes.copy_from_slice(&v.to_le_bytes());
+                }
+                (crate::lower::StoreOp::F32, Value::F32(v)) => {
+                    bytes.copy_from_slice(&v.to_bits().to_le_bytes());
+                }
+                (crate::lower::StoreOp::F64, Value::F64(v)) => {
+                    bytes.copy_from_slice(&v.to_bits().to_le_bytes());
+                }
+                (crate::lower::StoreOp::I32Store8, Value::I32(v)) => {
+                    bytes[0] = v as u8;
+                }
+                (crate::lower::StoreOp::I64Store8, Value::I64(v)) => {
+                    bytes[0] = v as u8;
+                }
+                (crate::lower::StoreOp::I32Store16, Value::I32(v)) => {
+                    bytes.copy_from_slice(&(v as u16).to_le_bytes());
+                }
+                (crate::lower::StoreOp::I64Store16, Value::I64(v)) => {
+                    bytes.copy_from_slice(&(v as u16).to_le_bytes());
+                }
+                (crate::lower::StoreOp::I64Store32, Value::I64(v)) => {
+                    bytes.copy_from_slice(&(v as u32).to_le_bytes());
+                }
+                (op, value) => {
+                    return Err(RuntimeError {
+                        kind: RuntimeErrorKind::TypeMismatch {
+                            expected: op.value_type(),
+                            found: value.val_type(),
+                        },
+                    });
+                }
+            }
+        }
+        RegOp::GlobalGet { dst, global } => {
+            let store = require_store(store)?;
+            if store.is_imported_global(global.0) {
+                return Err(RuntimeError {
+                    kind: RuntimeErrorKind::ImportedGlobalAccessUnsupported { global: global.0 },
+                });
+            }
+            let value = store.global(global.0).ok_or(RuntimeError {
+                kind: RuntimeErrorKind::UnknownGlobal { global: global.0 },
+            })?;
+            set_reg(registers, *dst, value)?;
+        }
+        RegOp::GlobalSet { global, value } => {
+            let store = require_store(store)?;
+            if store.is_imported_global(global.0) {
+                return Err(RuntimeError {
+                    kind: RuntimeErrorKind::ImportedGlobalAccessUnsupported { global: global.0 },
+                });
+            }
+            let value = get_reg(registers, *value)?;
+            store.set_global(global.0, value).ok_or(RuntimeError {
+                kind: RuntimeErrorKind::UnknownGlobal { global: global.0 },
+            })?;
+        }
+        RegOp::MemorySize { dst, memory } => {
+            let store = require_store(store)?;
+            if store.is_imported_memory(memory.0) {
+                return Err(RuntimeError {
+                    kind: RuntimeErrorKind::ImportedMemoryAccessUnsupported { memory: memory.0 },
+                });
+            }
+            let pages = store
+                .memory_mut(memory.0)
+                .ok_or(RuntimeError {
+                    kind: RuntimeErrorKind::UnknownMemory { memory: memory.0 },
+                })?
+                .len()
+                / PAGE_SIZE;
+            set_reg(registers, *dst, Value::I32(pages as i32))?;
+        }
+        RegOp::MemoryGrow { dst, memory, delta } => {
+            let store = require_store(store)?;
+            if store.is_imported_memory(memory.0) {
+                return Err(RuntimeError {
+                    kind: RuntimeErrorKind::ImportedMemoryAccessUnsupported { memory: memory.0 },
+                });
+            }
+            let delta = expect_addr(get_reg(registers, *delta)?)?;
+            let max_pages = store
+                .memory_type(memory.0)
+                .and_then(|ty| ty.limits.max)
+                .unwrap_or(65536) as usize;
+            let mem = store.memory_mut(memory.0).ok_or(RuntimeError {
+                kind: RuntimeErrorKind::UnknownMemory { memory: memory.0 },
+            })?;
+            let old_pages = mem.len() / PAGE_SIZE;
+            let result = match old_pages.checked_add(delta as usize) {
+                Some(new_pages) if new_pages <= max_pages => {
+                    mem.resize(new_pages * PAGE_SIZE, 0);
+                    old_pages as i32
+                }
+                _ => -1,
+            };
+            set_reg(registers, *dst, Value::I32(result))?;
+        }
     }
     Ok(())
+}
+
+fn require_store(store: Option<&mut Store>) -> Result<&mut Store, RuntimeError> {
+    store.ok_or(RuntimeError {
+        kind: RuntimeErrorKind::MissingStore,
+    })
+}
+
+/// Extract an i32 memory address operand as u32.
+fn expect_addr(value: Value) -> Result<u32, RuntimeError> {
+    match value {
+        Value::I32(value) => Ok(value as u32),
+        other => Err(RuntimeError {
+            kind: RuntimeErrorKind::TypeMismatch {
+                expected: ValType::Num(NumType::I32),
+                found: other.val_type(),
+            },
+        }),
+    }
+}
+
+/// Bounds-checked mutable slice into linear memory for `addr + memarg.offset`
+/// over `width` bytes.
+fn memory_slice_mut<'s>(
+    store: &'s mut Store,
+    memarg: &MemArg,
+    addr: u32,
+    width: usize,
+) -> Result<&'s mut [u8], RuntimeError> {
+    if store.is_imported_memory(memarg.memory.0) {
+        return Err(RuntimeError {
+            kind: RuntimeErrorKind::ImportedMemoryAccessUnsupported {
+                memory: memarg.memory.0,
+            },
+        });
+    }
+    let mem = store.memory_mut(memarg.memory.0).ok_or(RuntimeError {
+        kind: RuntimeErrorKind::UnknownMemory {
+            memory: memarg.memory.0,
+        },
+    })?;
+    let ea = addr as u64 + memarg.offset as u64;
+    let end = ea
+        .checked_add(width as u64)
+        .ok_or(trap(RuntimeTrap::OutOfBoundsMemoryAccess))?;
+    if end > mem.len() as u64 {
+        return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
+    }
+    Ok(&mut mem[ea as usize..end as usize])
 }
 
 fn set_reg(registers: &mut [Option<Value>], reg: Reg, value: Value) -> Result<(), RuntimeError> {
@@ -1253,7 +1478,14 @@ mod tests {
     fn execute_exported_add_by_name() {
         let reg_module = lowered_add_module();
 
-        let result = execute_export(&reg_module, "add", &[Value::I32(20), Value::I32(22)]).unwrap();
+        let mut store = Store::instantiate(&reg_module).unwrap();
+        let result = execute_export(
+            &reg_module,
+            &mut store,
+            "add",
+            &[Value::I32(20), Value::I32(22)],
+        )
+        .unwrap();
 
         assert_eq!(result, alloc::vec![Value::I32(42)]);
     }
@@ -1262,7 +1494,8 @@ mod tests {
     fn reject_unknown_export_name() {
         let reg_module = lowered_add_module();
 
-        let err = execute_export(&reg_module, "missing", &[]).unwrap_err();
+        let mut store = Store::instantiate(&reg_module).unwrap();
+        let err = execute_export(&reg_module, &mut store, "missing", &[]).unwrap_err();
 
         assert_eq!(
             err.kind,
@@ -1276,7 +1509,8 @@ mod tests {
     fn reject_export_call_with_missing_arg() {
         let reg_module = lowered_add_module();
 
-        let err = execute_export(&reg_module, "add", &[Value::I32(20)]).unwrap_err();
+        let mut store = Store::instantiate(&reg_module).unwrap();
+        let err = execute_export(&reg_module, &mut store, "add", &[Value::I32(20)]).unwrap_err();
 
         assert_eq!(
             err.kind,
@@ -1291,8 +1525,10 @@ mod tests {
     fn reject_export_call_with_extra_arg() {
         let reg_module = lowered_add_module();
 
+        let mut store = Store::instantiate(&reg_module).unwrap();
         let err = execute_export(
             &reg_module,
+            &mut store,
             "add",
             &[Value::I32(20), Value::I32(22), Value::I32(1)],
         )
@@ -1311,8 +1547,14 @@ mod tests {
     fn reject_export_call_with_wrong_arg_type() {
         let reg_module = lowered_add_module();
 
-        let err =
-            execute_export(&reg_module, "add", &[Value::I64(20), Value::I32(22)]).unwrap_err();
+        let mut store = Store::instantiate(&reg_module).unwrap();
+        let err = execute_export(
+            &reg_module,
+            &mut store,
+            "add",
+            &[Value::I64(20), Value::I32(22)],
+        )
+        .unwrap_err();
 
         assert_eq!(
             err.kind,

@@ -7,12 +7,12 @@
 
 use alloc::{string::String, vec::Vec};
 
-use crate::binary::instr::{DecodedInstr, Instr};
+use crate::binary::instr::{DecodedInstr, Instr, decode_instr_sequence_with_offsets};
 use crate::binary::module::Module;
 use crate::error::{ByteOffset, DecodeContext, DecodeErrorKind};
 use crate::types::{
-    BlockType, CodeBody, ExportDesc, FuncIdx, FuncType, ImportDesc, LabelIdx, LocalDecl, LocalIdx,
-    NumType, TypeIdx, ValType,
+    BlockType, CodeBody, DataMode, ExportDesc, FuncIdx, FuncType, GlobalIdx, ImportDesc, LabelIdx,
+    LocalDecl, LocalIdx, MemArg, MemIdx, MemType, Mutability, NumType, TypeIdx, ValType,
 };
 use crate::validate;
 use crate::validate::error::{ValidationError, ValidationErrorKind};
@@ -36,6 +36,52 @@ pub struct RegModule {
     /// Number of imported functions: `FuncIdx` values below this are not
     /// lowered and cannot be called by the interpreter yet.
     pub imported_func_count: u32,
+    /// Defined memories (instantiated as zeroed linear memory).
+    pub memories: Vec<MemType>,
+    /// Defined globals, initialized in declaration order at instantiation.
+    pub globals: Vec<RegGlobal>,
+    /// Active data segments applied to memory at instantiation.
+    pub data: Vec<RegDataSegment>,
+    /// Number of imported memories (runtime access is not yet supported).
+    pub imported_memory_count: u32,
+    /// Number of imported globals (runtime access is not yet supported).
+    pub imported_global_count: u32,
+}
+
+/// A defined global in lowered register IR.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RegGlobal {
+    pub ty: ValType,
+    pub mutable: bool,
+    /// Const initializer, evaluated at instantiation.
+    pub init: Vec<RegConstInstr>,
+}
+
+/// An active data segment in lowered register IR.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegDataSegment {
+    pub memory: MemIdx,
+    /// Const offset expression, evaluated at instantiation.
+    pub offset: Vec<RegConstInstr>,
+    pub bytes: Vec<u8>,
+}
+
+/// An instruction in a lowered constant expression (global initializers,
+/// data segment offsets). Supports the const instrs plus the
+/// extended-const integer arithmetic the validator accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegConstInstr {
+    I32Const(i32),
+    I64Const(i64),
+    F32Const(u32),
+    F64Const(u64),
+    GlobalGet(GlobalIdx),
+    I32Add,
+    I32Sub,
+    I32Mul,
+    I64Add,
+    I64Sub,
+    I64Mul,
 }
 
 /// A function export in lowered register IR.
@@ -184,6 +230,143 @@ pub enum RegOp {
         v2: Reg,
         cond: Reg,
     },
+    /// Linear-memory load: dst = mem[effective(addr)..+width] per `op`.
+    Load {
+        op: LoadOp,
+        dst: Reg,
+        addr: Reg,
+        memarg: MemArg,
+    },
+    /// Linear-memory store: mem[effective(addr)..+width] = value per `op`.
+    Store {
+        op: StoreOp,
+        addr: Reg,
+        value: Reg,
+        memarg: MemArg,
+    },
+    /// Read a global.
+    GlobalGet {
+        dst: Reg,
+        global: GlobalIdx,
+    },
+    /// Write a global.
+    GlobalSet {
+        global: GlobalIdx,
+        value: Reg,
+    },
+    /// Current memory size in pages (`memory.size`).
+    MemorySize {
+        dst: Reg,
+        memory: MemIdx,
+    },
+    /// Grow memory by `delta` pages (`memory.grow`): dst = previous size,
+    /// or -1 on failure.
+    MemoryGrow {
+        dst: Reg,
+        memory: MemIdx,
+        delta: Reg,
+    },
+}
+
+/// Linear-memory load operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadOp {
+    I32,
+    I64,
+    F32,
+    F64,
+    I32Load8S,
+    I32Load8U,
+    I32Load16S,
+    I32Load16U,
+    I64Load8S,
+    I64Load8U,
+    I64Load16S,
+    I64Load16U,
+    I64Load32S,
+    I64Load32U,
+}
+
+impl LoadOp {
+    /// Bytes read from memory.
+    pub fn byte_width(self) -> usize {
+        match self {
+            LoadOp::I32 | LoadOp::F32 | LoadOp::I64Load32S | LoadOp::I64Load32U => 4,
+            LoadOp::I64 | LoadOp::F64 => 8,
+            LoadOp::I32Load8S | LoadOp::I32Load8U | LoadOp::I64Load8S | LoadOp::I64Load8U => 1,
+            LoadOp::I32Load16S | LoadOp::I32Load16U | LoadOp::I64Load16S | LoadOp::I64Load16U => 2,
+        }
+    }
+
+    /// Value type produced by the load.
+    pub fn result_type(self) -> ValType {
+        match self {
+            LoadOp::I32
+            | LoadOp::I32Load8S
+            | LoadOp::I32Load8U
+            | LoadOp::I32Load16S
+            | LoadOp::I32Load16U => ValType::Num(NumType::I32),
+            LoadOp::I64
+            | LoadOp::I64Load8S
+            | LoadOp::I64Load8U
+            | LoadOp::I64Load16S
+            | LoadOp::I64Load16U
+            | LoadOp::I64Load32S
+            | LoadOp::I64Load32U => ValType::Num(NumType::I64),
+            LoadOp::F32 => ValType::Num(NumType::F32),
+            LoadOp::F64 => ValType::Num(NumType::F64),
+        }
+    }
+
+    /// Whether the loaded value is sign-extended to the result type.
+    pub fn sign_extend(self) -> bool {
+        matches!(
+            self,
+            LoadOp::I32Load8S
+                | LoadOp::I32Load16S
+                | LoadOp::I64Load8S
+                | LoadOp::I64Load16S
+                | LoadOp::I64Load32S
+        )
+    }
+}
+
+/// Linear-memory store operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreOp {
+    I32,
+    I64,
+    F32,
+    F64,
+    I32Store8,
+    I32Store16,
+    I64Store8,
+    I64Store16,
+    I64Store32,
+}
+
+impl StoreOp {
+    /// Bytes written to memory.
+    pub fn byte_width(self) -> usize {
+        match self {
+            StoreOp::I32 | StoreOp::F32 | StoreOp::I64Store32 => 4,
+            StoreOp::I64 | StoreOp::F64 => 8,
+            StoreOp::I32Store8 | StoreOp::I64Store8 => 1,
+            StoreOp::I32Store16 | StoreOp::I64Store16 => 2,
+        }
+    }
+
+    /// Value type consumed by the store.
+    pub fn value_type(self) -> ValType {
+        match self {
+            StoreOp::I32 | StoreOp::I32Store8 | StoreOp::I32Store16 => ValType::Num(NumType::I32),
+            StoreOp::I64 | StoreOp::I64Store8 | StoreOp::I64Store16 | StoreOp::I64Store32 => {
+                ValType::Num(NumType::I64)
+            }
+            StoreOp::F32 => ValType::Num(NumType::F32),
+            StoreOp::F64 => ValType::Num(NumType::F64),
+        }
+    }
 }
 
 /// Unary numeric operation lowered into register IR.
@@ -800,6 +983,9 @@ pub enum LowerErrorKind {
     InvalidFunction {
         func: u32,
     },
+    InvalidGlobal {
+        global: u32,
+    },
     UnexpectedElse,
     MissingFunctionEnd,
 }
@@ -827,13 +1013,59 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
 
     let imported_func_count = module.imported_function_count() as u32;
     let func_types = func_type_table(module);
+    let global_types = global_type_table(module);
     let mut funcs = Vec::new();
 
     for (defined_idx, (type_idx, code)) in module.functions().iter().zip(module.codes()).enumerate()
     {
         let func_idx = FuncIdx(imported_func_count + defined_idx as u32);
         let ty = &module.types()[type_idx.0 as usize];
-        funcs.push(lower_function(func_idx, *type_idx, ty, code, &func_types)?);
+        funcs.push(lower_function(
+            func_idx,
+            *type_idx,
+            ty,
+            code,
+            &func_types,
+            &global_types,
+        )?);
+    }
+
+    let imported_memory_count = module
+        .imports()
+        .iter()
+        .filter(|import| matches!(import.desc, ImportDesc::Mem(_)))
+        .count() as u32;
+    let imported_global_count = module
+        .imports()
+        .iter()
+        .filter(|import| matches!(import.desc, ImportDesc::Global(_)))
+        .count() as u32;
+
+    let memories = module.memories().to_vec();
+
+    let mut globals = Vec::with_capacity(module.globals().len());
+    for global in module.globals() {
+        globals.push(RegGlobal {
+            ty: global.global_type.val_type,
+            mutable: global.global_type.mutability == Mutability::Var,
+            init: lower_const_expr(global.init_expr, global.init_offset)?,
+        });
+    }
+
+    let mut data = Vec::new();
+    for segment in module.data() {
+        if let DataMode::Active {
+            memory,
+            offset_expr,
+            offset_offset,
+        } = &segment.mode
+        {
+            data.push(RegDataSegment {
+                memory: *memory,
+                offset: lower_const_expr(offset_expr, *offset_offset)?,
+                bytes: segment.init.to_vec(),
+            });
+        }
     }
 
     let exports = module
@@ -852,7 +1084,55 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
         funcs,
         exports,
         imported_func_count,
+        memories,
+        globals,
+        data,
+        imported_memory_count,
+        imported_global_count,
     })
+}
+
+/// Lower a constant expression (global initializer, data segment offset)
+/// into owned form. Supports the const instructions plus the
+/// extended-const integer arithmetic the validator accepts.
+fn lower_const_expr(expr: &[u8], offset: usize) -> Result<Vec<RegConstInstr>, LowerError> {
+    let instrs = decode_instr_sequence_with_offsets(expr, offset).map_err(|error| LowerError {
+        offset: error.offset,
+        function: None,
+        kind: LowerErrorKind::Decode {
+            context: error.context,
+            kind: error.kind,
+        },
+    })?;
+
+    let mut lowered = Vec::with_capacity(instrs.len());
+    for decoded in instrs {
+        let const_instr = match decoded.instr {
+            Instr::I32Const(value) => RegConstInstr::I32Const(value),
+            Instr::I64Const(value) => RegConstInstr::I64Const(value),
+            Instr::F32Const(value) => RegConstInstr::F32Const(value.to_bits()),
+            Instr::F64Const(value) => RegConstInstr::F64Const(value.to_bits()),
+            Instr::GlobalGet(global) => RegConstInstr::GlobalGet(global),
+            Instr::I32Add => RegConstInstr::I32Add,
+            Instr::I32Sub => RegConstInstr::I32Sub,
+            Instr::I32Mul => RegConstInstr::I32Mul,
+            Instr::I64Add => RegConstInstr::I64Add,
+            Instr::I64Sub => RegConstInstr::I64Sub,
+            Instr::I64Mul => RegConstInstr::I64Mul,
+            Instr::End => break,
+            ref other => {
+                return Err(LowerError {
+                    offset: decoded.offset,
+                    function: None,
+                    kind: LowerErrorKind::UnsupportedInstr {
+                        op: instr_name(other),
+                    },
+                });
+            }
+        };
+        lowered.push(const_instr);
+    }
+    Ok(lowered)
 }
 
 /// Resolve the `FuncType` for every function in the index space (imported
@@ -870,12 +1150,33 @@ fn func_type_table<'a, 'm>(module: &'a Module<'m>) -> Vec<&'a FuncType> {
     table
 }
 
+/// Resolve the value type of every global in the index space (imported
+/// first, then defined), so `global.get`/`global.set` lowering can type
+/// its operands.
+fn global_type_table(module: &Module<'_>) -> Vec<ValType> {
+    module
+        .imports()
+        .iter()
+        .filter_map(|import| match import.desc {
+            ImportDesc::Global(global) => Some(global.val_type),
+            _ => None,
+        })
+        .chain(
+            module
+                .globals()
+                .iter()
+                .map(|global| global.global_type.val_type),
+        )
+        .collect()
+}
+
 fn lower_function(
     func_idx: FuncIdx,
     type_idx: TypeIdx,
     ty: &FuncType,
     code: &CodeBody<'_>,
     func_types: &[&FuncType],
+    global_types: &[ValType],
 ) -> Result<RegFunc, LowerError> {
     let instrs = code
         .instructions_with_offsets()
@@ -889,7 +1190,7 @@ fn lower_function(
         })?;
 
     let locals = local_types(ty, code.locals.as_slice());
-    let mut builder = FuncBuilder::new(func_idx, type_idx, ty, locals, func_types);
+    let mut builder = FuncBuilder::new(func_idx, type_idx, ty, locals, func_types, global_types);
 
     for decoded in instrs {
         if builder.lower_instr(decoded)? {
@@ -932,6 +1233,9 @@ struct FuncBuilder<'b> {
     /// Function types for the whole index space (imported first), used to
     /// type direct calls.
     func_types: &'b [&'b FuncType],
+    /// Global value types for the whole index space (imported first), used
+    /// to type `global.get`/`global.set`.
+    global_types: &'b [ValType],
     /// Stack of active block/loop/if frames. Each entry records the label of
     /// the block that should follow the `end` of this control structure.
     label_stack: Vec<LabelFrame>,
@@ -998,6 +1302,7 @@ impl<'b> FuncBuilder<'b> {
         ty: &FuncType,
         locals: Vec<ValType>,
         func_types: &'b [&'b FuncType],
+        global_types: &'b [ValType],
     ) -> Self {
         // The function body itself is label 0, targeting a block that will
         // receive function-end returns (created on demand).
@@ -1021,6 +1326,7 @@ impl<'b> FuncBuilder<'b> {
             }],
             pending_branches: Vec::new(),
             func_types,
+            global_types,
         }
     }
 
@@ -1531,11 +1837,52 @@ impl<'b> FuncBuilder<'b> {
                     },
                 );
             }
+            Instr::GlobalGet(global) => {
+                let ty = self.global_type(offset, global)?;
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(offset, RegOp::GlobalGet { dst, global });
+            }
+            Instr::GlobalSet(global) => {
+                let ty = self.global_type(offset, global)?;
+                let value = self.pop_expect(offset, "global.set", ty)?;
+                self.emit(
+                    offset,
+                    RegOp::GlobalSet {
+                        global,
+                        value: value.reg,
+                    },
+                );
+            }
+            Instr::MemorySize(memory) => {
+                let ty = ValType::Num(NumType::I32);
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(offset, RegOp::MemorySize { dst, memory });
+            }
+            Instr::MemoryGrow(memory) => {
+                let delta = self.pop_expect(offset, "memory.grow", ValType::Num(NumType::I32))?;
+                let ty = ValType::Num(NumType::I32);
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(
+                    offset,
+                    RegOp::MemoryGrow {
+                        dst,
+                        memory,
+                        delta: delta.reg,
+                    },
+                );
+            }
             instr => {
                 if let Some(op) = unary_op(&instr) {
                     self.lower_unary_op(offset, op)?;
                 } else if let Some(op) = binary_op(&instr) {
                     self.lower_binary_op(offset, op)?;
+                } else if let Some((op, memarg)) = load_op(&instr) {
+                    self.lower_load(offset, op, memarg)?;
+                } else if let Some((op, memarg)) = store_op(&instr) {
+                    self.lower_store(offset, op, memarg)?;
                 } else {
                     return Err(LowerError {
                         offset,
@@ -1658,6 +2005,59 @@ impl<'b> FuncBuilder<'b> {
         Ok(())
     }
 
+    fn global_type(&self, offset: ByteOffset, global: GlobalIdx) -> Result<ValType, LowerError> {
+        self.global_types
+            .get(global.0 as usize)
+            .copied()
+            .ok_or(LowerError {
+                offset,
+                function: Some(self.func_idx),
+                kind: LowerErrorKind::InvalidGlobal { global: global.0 },
+            })
+    }
+
+    fn lower_load(
+        &mut self,
+        offset: ByteOffset,
+        op: LoadOp,
+        memarg: MemArg,
+    ) -> Result<(), LowerError> {
+        let addr = self.pop_expect(offset, "load", ValType::Num(NumType::I32))?;
+        let ty = op.result_type();
+        let dst = self.alloc_reg(ty);
+        self.stack.push(RegValue { reg: dst, ty });
+        self.emit(
+            offset,
+            RegOp::Load {
+                op,
+                dst,
+                addr: addr.reg,
+                memarg,
+            },
+        );
+        Ok(())
+    }
+
+    fn lower_store(
+        &mut self,
+        offset: ByteOffset,
+        op: StoreOp,
+        memarg: MemArg,
+    ) -> Result<(), LowerError> {
+        let value = self.pop_expect(offset, "store", op.value_type())?;
+        let addr = self.pop_expect(offset, "store", ValType::Num(NumType::I32))?;
+        self.emit(
+            offset,
+            RegOp::Store {
+                op,
+                addr: addr.reg,
+                value: value.reg,
+                memarg,
+            },
+        );
+        Ok(())
+    }
+
     fn lower_unary_op(&mut self, offset: ByteOffset, op: UnaryOp) -> Result<(), LowerError> {
         let input = op.input_type();
         let output = op.result_type();
@@ -1725,6 +2125,43 @@ impl<'b> FuncBuilder<'b> {
         values.reverse();
         Ok(values)
     }
+}
+
+fn load_op(instr: &Instr) -> Option<(LoadOp, MemArg)> {
+    let (op, memarg) = match *instr {
+        Instr::I32Load(memarg) => (LoadOp::I32, memarg),
+        Instr::I64Load(memarg) => (LoadOp::I64, memarg),
+        Instr::F32Load(memarg) => (LoadOp::F32, memarg),
+        Instr::F64Load(memarg) => (LoadOp::F64, memarg),
+        Instr::I32Load8S(memarg) => (LoadOp::I32Load8S, memarg),
+        Instr::I32Load8U(memarg) => (LoadOp::I32Load8U, memarg),
+        Instr::I32Load16S(memarg) => (LoadOp::I32Load16S, memarg),
+        Instr::I32Load16U(memarg) => (LoadOp::I32Load16U, memarg),
+        Instr::I64Load8S(memarg) => (LoadOp::I64Load8S, memarg),
+        Instr::I64Load8U(memarg) => (LoadOp::I64Load8U, memarg),
+        Instr::I64Load16S(memarg) => (LoadOp::I64Load16S, memarg),
+        Instr::I64Load16U(memarg) => (LoadOp::I64Load16U, memarg),
+        Instr::I64Load32S(memarg) => (LoadOp::I64Load32S, memarg),
+        Instr::I64Load32U(memarg) => (LoadOp::I64Load32U, memarg),
+        _ => return None,
+    };
+    Some((op, memarg))
+}
+
+fn store_op(instr: &Instr) -> Option<(StoreOp, MemArg)> {
+    let (op, memarg) = match *instr {
+        Instr::I32Store(memarg) => (StoreOp::I32, memarg),
+        Instr::I64Store(memarg) => (StoreOp::I64, memarg),
+        Instr::F32Store(memarg) => (StoreOp::F32, memarg),
+        Instr::F64Store(memarg) => (StoreOp::F64, memarg),
+        Instr::I32Store8(memarg) => (StoreOp::I32Store8, memarg),
+        Instr::I32Store16(memarg) => (StoreOp::I32Store16, memarg),
+        Instr::I64Store8(memarg) => (StoreOp::I64Store8, memarg),
+        Instr::I64Store16(memarg) => (StoreOp::I64Store16, memarg),
+        Instr::I64Store32(memarg) => (StoreOp::I64Store32, memarg),
+        _ => return None,
+    };
+    Some((op, memarg))
 }
 
 fn unary_op(instr: &Instr) -> Option<UnaryOp> {
@@ -2589,7 +3026,8 @@ mod tests {
         args: &[crate::runtime::Value],
     ) -> Result<Vec<crate::runtime::Value>, crate::runtime::RuntimeError> {
         let reg_module = lower_wat(source);
-        crate::runtime::execute_export(&reg_module, name, args)
+        let mut store = crate::runtime::Store::instantiate(&reg_module).unwrap();
+        crate::runtime::execute_export(&reg_module, &mut store, name, args)
     }
 
     #[test]
@@ -2801,6 +3239,102 @@ mod tests {
         assert_eq!(
             run_wat(source, &[crate::runtime::Value::I32(-1)]),
             vec![crate::runtime::Value::I32(0)]
+        );
+    }
+
+    #[test]
+    fn lower_load_store_shape() {
+        let reg_module = lower_wat(
+            "(module
+               (memory 1)
+               (func (export \"f\") (param i32) (result i32)
+                 local.get 0
+                 local.get 0
+                 i32.load offset=4
+                 i32.store
+                 i32.const 0))",
+        );
+        let func = &reg_module.funcs[0];
+        let ops: Vec<&RegOp> = func.blocks[0]
+            .instrs
+            .iter()
+            .map(|instr| &instr.op)
+            .collect();
+        assert!(matches!(
+            ops[2],
+            RegOp::Load {
+                op: LoadOp::I32,
+                memarg: MemArg { offset: 4, .. },
+                ..
+            }
+        ));
+        assert!(matches!(
+            ops[3],
+            RegOp::Store {
+                op: StoreOp::I32,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn execute_memory_roundtrip_and_oob_trap() {
+        let source = "(module
+            (memory 1)
+            (func (export \"roundtrip\") (param i32 i32) (result i32)
+              local.get 0
+              local.get 1
+              i32.store
+              local.get 0
+              i32.load)
+            (func (export \"load\") (param i32) (result i32)
+              local.get 0
+              i32.load))";
+        assert_eq!(
+            run_wat_export(
+                source,
+                "roundtrip",
+                &[
+                    crate::runtime::Value::I32(8),
+                    crate::runtime::Value::I32(-3)
+                ],
+            ),
+            Ok(vec![crate::runtime::Value::I32(-3)])
+        );
+        // One page: address 65533 + 4-byte load is out of bounds.
+        let error = run_wat_export(source, "load", &[crate::runtime::Value::I32(65533)])
+            .expect_err("expected OOB trap");
+        assert_eq!(
+            error.kind,
+            crate::runtime::RuntimeErrorKind::Trap(
+                crate::runtime::RuntimeTrap::OutOfBoundsMemoryAccess
+            )
+        );
+    }
+
+    #[test]
+    fn execute_globals_and_data_segments() {
+        let source = "(module
+            (memory 1)
+            (global $g (mut i32) (i32.const 10))
+            (data (i32.const 4) \"\\2a\\00\\00\\00\")
+            (func (export \"bump\") (result i32)
+              global.get $g
+              i32.const 1
+              i32.add
+              global.set $g
+              global.get $g)
+            (func (export \"load4\") (result i32)
+              i32.const 4
+              i32.load))";
+        // Data segment wrote 42 at address 4 during instantiation.
+        assert_eq!(
+            run_wat_export(source, "load4", &[]),
+            Ok(vec![crate::runtime::Value::I32(42)])
+        );
+        assert_eq!(
+            run_wat_export(source, "bump", &[]),
+            Ok(vec![crate::runtime::Value::I32(11)])
         );
     }
 
