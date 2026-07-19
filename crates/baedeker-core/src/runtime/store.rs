@@ -4,6 +4,7 @@
 use alloc::vec::Vec;
 
 use crate::lower::{RegConstInstr, RegElemValue, RegElementMode, RegModule};
+use crate::runtime::gpu::GpuBackend;
 use crate::runtime::{RuntimeError, RuntimeErrorKind, RuntimeTrap, Value, trap};
 use crate::types::{MemType, TableType};
 
@@ -24,6 +25,8 @@ pub struct Store {
     /// Element segment storage; `None` after the segment is dropped (or was
     /// active/declarative at instantiation).
     elements: Vec<Option<Vec<Value>>>,
+    /// Optional GPU backend for bulk SIMD offload (Borsalino Level 1).
+    gpu: Option<alloc::boxed::Box<dyn GpuBackend>>,
     imported_memory_count: u32,
     imported_global_count: u32,
     imported_table_count: u32,
@@ -64,6 +67,7 @@ impl Store {
             tables,
             table_types,
             elements: alloc::vec![None; module.elements.len()],
+            gpu: None,
             imported_memory_count: module.imported_memory_count,
             imported_global_count: module.imported_global_count,
             imported_table_count: module.imported_table_count,
@@ -213,6 +217,29 @@ impl Store {
     pub fn get_memory(&self, idx: u32) -> Option<&[u8]> {
         let defined = idx.checked_sub(self.imported_memory_count)? as usize;
         self.memories.get(defined).map(Vec::as_slice)
+    }
+
+    /// Install a GPU backend for bulk SIMD offload.
+    pub fn set_gpu(&mut self, backend: alloc::boxed::Box<dyn GpuBackend>) {
+        self.gpu = Some(backend);
+    }
+
+    /// Remove the installed GPU backend, if any.
+    pub fn clear_gpu(&mut self) {
+        self.gpu = None;
+    }
+
+    /// The installed GPU backend, if any.
+    pub fn gpu(&self) -> Option<&dyn GpuBackend> {
+        self.gpu.as_deref()
+    }
+
+    /// Mutable access to the installed GPU backend, if any.
+    pub fn gpu_mut(&mut self) -> Option<&mut (dyn GpuBackend + '_)> {
+        match self.gpu.as_mut() {
+            Some(backend) => Some(&mut **backend),
+            None => None,
+        }
     }
 }
 
