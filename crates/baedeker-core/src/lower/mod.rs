@@ -1440,6 +1440,9 @@ struct FuncBuilder<'b> {
     label_stack: Vec<LabelFrame>,
     /// Branches whose target block index needs back-patching.
     pending_branches: Vec<PendingBranch>,
+    /// Back-edge trampolines for conditional branches to loops with
+    /// parameters, created at `finish`.
+    pending_trampolines: Vec<TrampolineReq>,
 }
 
 /// A branch whose target block index needs back-patching once the target
@@ -1455,7 +1458,35 @@ struct PendingBranch {
     slot: BranchSlot,
 }
 
+/// A loop back-edge target: the header block and the canonical parameter
+/// registers branch values must be copied into.
+struct LoopTarget {
+    header: u32,
+    param_regs: Vec<Reg>,
+}
+
+/// A request for a back-edge trampoline block: a conditional branch to a
+/// loop with parameters cannot copy values into the loop's parameter
+/// registers in its own block (the copies would clobber the registers on
+/// the not-taken path), so the branch targets a trampoline that runs the
+/// copies and then branches unconditionally.
+struct TrampolineReq {
+    /// The block containing the conditional branch terminator.
+    block: usize,
+    /// Which terminator slot jumps to the trampoline.
+    slot: BranchSlot,
+    /// Copy destinations (the loop's parameter registers).
+    param_regs: Vec<Reg>,
+    /// Copy sources (the branch's values).
+    values: Vec<Reg>,
+    /// The loop header block the trampoline branches to.
+    header: u32,
+    /// Byte offset of the originating branch instruction.
+    offset: ByteOffset,
+}
+
 /// Which target slot of a branch terminator a pending branch patches.
+#[derive(Debug, Clone, Copy)]
 enum BranchSlot {
     /// The single target of `br` / `br_if` / an if-then exit.
     Single,
@@ -1476,6 +1507,10 @@ struct LabelFrame {
     /// Branches to a `loop` label carry parameters (to the loop header);
     /// branches to any other label carry results (to the continuation).
     param_types: Vec<ValType>,
+    /// The canonical registers holding the frame's parameters: the
+    /// registers the body reads when it consumes params from the stack.
+    /// Loop back-edges must deliver branch values into these registers.
+    param_regs: Vec<Reg>,
     /// Operand stack height at frame entry (after consuming parameters).
     height: usize,
     /// Whether the code currently being lowered in this frame is
@@ -1529,10 +1564,12 @@ impl<'b> FuncBuilder<'b> {
                 kind: FrameKind::Block,
                 result_types: ty.results.clone(),
                 param_types: Vec::new(),
+                param_regs: Vec::new(),
                 height: 0,
                 unreachable: false,
             }],
             pending_branches: Vec::new(),
+            pending_trampolines: Vec::new(),
             tables,
         }
     }
@@ -1551,6 +1588,54 @@ impl<'b> FuncBuilder<'b> {
         // If there are pending instructions without a terminator, add Fallthrough
         if !self.current_instrs.is_empty() || self.blocks.is_empty() {
             self.finish_block(RegTerm::Fallthrough);
+        }
+        // Create back-edge trampolines for conditional branches to loops
+        // with parameters: each runs the parameter copies, then branches
+        // unconditionally to the header. Trampolines sit at the end of the
+        // block list so no fallthrough can reach them.
+        for req in core::mem::take(&mut self.pending_trampolines) {
+            let trampoline_idx = self.blocks.len() as u32;
+            let instrs = req
+                .param_regs
+                .iter()
+                .zip(req.values.iter())
+                .filter(|(dst, src)| dst != src)
+                .map(|(dst, src)| RegInstr {
+                    offset: req.offset,
+                    op: RegOp::Copy {
+                        dst: *dst,
+                        src: *src,
+                    },
+                })
+                .collect();
+            self.blocks.push(RegBlock::new(
+                LabelIdx(trampoline_idx),
+                instrs,
+                RegTerm::Br {
+                    target_block: req.header,
+                    values: Vec::new(),
+                },
+            ));
+            match (req.slot, &mut self.blocks[req.block].term) {
+                (BranchSlot::Single, RegTerm::BrIf { target_block, .. }) => {
+                    *target_block = trampoline_idx;
+                }
+                (
+                    BranchSlot::Table(slot),
+                    RegTerm::BrTable {
+                        targets, default, ..
+                    },
+                ) => {
+                    if slot < targets.len() {
+                        targets[slot] = trampoline_idx;
+                    } else {
+                        *default = trampoline_idx;
+                    }
+                }
+                (slot, term) => {
+                    unreachable!("trampoline slot {slot:?} on non-branch terminator {term:?}")
+                }
+            }
         }
         RegFunc {
             idx: self.func_idx,
@@ -1686,14 +1771,7 @@ impl<'b> FuncBuilder<'b> {
             Instr::Nop => {}
             Instr::Block(block_type) => {
                 self.finish_block(RegTerm::Fallthrough);
-                self.label_stack.push(LabelFrame {
-                    label: LabelIdx(self.label_stack.len() as u32),
-                    kind: FrameKind::Block,
-                    result_types: block_type_to_vec(block_type),
-                    param_types: Vec::new(),
-                    height: self.stack.len(),
-                    unreachable: false,
-                });
+                self.enter_frame(offset, "block", FrameKind::Block, block_type)?;
             }
             Instr::Loop(block_type) => {
                 self.finish_block(RegTerm::Fallthrough);
@@ -1701,14 +1779,7 @@ impl<'b> FuncBuilder<'b> {
                 // label jump back to it (back-edge), so its index is known
                 // immediately and needs no back-patching.
                 let header_block = self.blocks.len() as u32;
-                self.label_stack.push(LabelFrame {
-                    label: LabelIdx(self.label_stack.len() as u32),
-                    kind: FrameKind::Loop { header_block },
-                    result_types: block_type_to_vec(block_type),
-                    param_types: Vec::new(),
-                    height: self.stack.len(),
-                    unreachable: false,
-                });
+                self.enter_frame(offset, "loop", FrameKind::Loop { header_block }, block_type)?;
             }
             Instr::If(block_type) => {
                 let cond = self.pop_expect(offset, "if", ValType::Num(NumType::I32))?;
@@ -1720,17 +1791,15 @@ impl<'b> FuncBuilder<'b> {
                     // (no else: the continuation).
                     else_block: 0,
                 });
-                self.label_stack.push(LabelFrame {
-                    label: LabelIdx(self.label_stack.len() as u32),
-                    kind: FrameKind::If {
+                self.enter_frame(
+                    offset,
+                    "if",
+                    FrameKind::If {
                         cond_block,
                         else_seen: false,
                     },
-                    result_types: block_type_to_vec(block_type),
-                    param_types: Vec::new(),
-                    height: self.stack.len(),
-                    unreachable: false,
-                });
+                    block_type,
+                )?;
             }
             Instr::Else => {
                 let frame_pos = self.label_stack.len() - 1;
@@ -1778,8 +1847,16 @@ impl<'b> FuncBuilder<'b> {
                 if let RegTerm::IfFork { else_block, .. } = &mut self.blocks[cond_block].term {
                     *else_block = else_start;
                 }
-                // Reset to the frame entry state for the else-body.
+                // Reset to the frame entry state for the else-body: the
+                // else path starts with the frame's parameters again.
                 self.stack.truncate(frame_height);
+                let (param_regs, param_types) = {
+                    let frame = self.label_stack.last().expect("if frame checked above");
+                    (frame.param_regs.clone(), frame.param_types.clone())
+                };
+                for (&reg, &ty) in param_regs.iter().zip(param_types.iter()) {
+                    self.stack.push(RegValue { reg, ty });
+                }
                 let frame = self.label_stack.last_mut().expect("if frame checked above");
                 frame.unreachable = false;
                 if let FrameKind::If { else_seen, .. } = &mut frame.kind {
@@ -1909,10 +1986,12 @@ impl<'b> FuncBuilder<'b> {
                     values.push(found.reg);
                 }
                 values.reverse();
-                if let Some(header_block) = loop_header {
-                    // Back-edge: target known immediately, no back-patching.
+                if let Some(loop_target) = loop_header {
+                    // Unconditional back-edge: deliver values into the
+                    // loop's parameter registers inline (always taken).
+                    self.emit_copies(offset, &loop_target.param_regs, &values);
                     self.finish_block(RegTerm::Br {
-                        target_block: header_block,
+                        target_block: loop_target.header,
                         values,
                     });
                 } else {
@@ -1944,10 +2023,22 @@ impl<'b> FuncBuilder<'b> {
                 for (&reg, &ty) in values.iter().zip(branch_types.iter()) {
                     self.stack.push(RegValue { reg, ty });
                 }
-                if let Some(header_block) = loop_header {
+                if let Some(loop_target) = loop_header {
+                    // Conditional back-edge: a trampoline runs the parameter
+                    // copies so the not-taken path keeps the loop's live
+                    // parameter registers intact.
+                    let br_block_idx = self.blocks.len();
+                    self.pending_trampolines.push(TrampolineReq {
+                        block: br_block_idx,
+                        slot: BranchSlot::Single,
+                        param_regs: loop_target.param_regs,
+                        values: values.clone(),
+                        header: loop_target.header,
+                        offset,
+                    });
                     self.finish_block(RegTerm::BrIf {
                         cond: cond.reg,
-                        target_block: header_block,
+                        target_block: 0,
                         values,
                     });
                 } else {
@@ -1986,7 +2077,17 @@ impl<'b> FuncBuilder<'b> {
                     let frame_pos = self.label_position(offset, *target)?;
                     let (_, loop_header) = self.branch_types_at(frame_pos);
                     match loop_header {
-                        Some(header_block) => target_blocks.push(header_block),
+                        Some(loop_target) => {
+                            target_blocks.push(0);
+                            self.pending_trampolines.push(TrampolineReq {
+                                block: br_block_idx,
+                                slot: BranchSlot::Table(slot),
+                                param_regs: loop_target.param_regs,
+                                values: values.clone(),
+                                header: loop_target.header,
+                                offset,
+                            });
+                        }
                         None => {
                             target_blocks.push(0);
                             self.pending_branches.push(PendingBranch {
@@ -2336,13 +2437,82 @@ impl<'b> FuncBuilder<'b> {
         Ok(self.label_stack.len() - 1 - label_idx)
     }
 
+    /// Enter a new control frame: consume the block type's parameters from
+    /// the operand stack (recording their canonical registers), push the
+    /// frame with its base height below the params, then push the params
+    /// back as the frame's initial working stack.
+    fn enter_frame(
+        &mut self,
+        offset: ByteOffset,
+        op: &'static str,
+        kind: FrameKind,
+        block_type: BlockType,
+    ) -> Result<(), LowerError> {
+        let (param_types, result_types) = self.block_type_sig(offset, block_type)?;
+        let mut param_regs = Vec::with_capacity(param_types.len());
+        for &expected in param_types.iter().rev() {
+            let found = self.pop_expect(offset, op, expected)?;
+            param_regs.push(found.reg);
+        }
+        param_regs.reverse();
+        let height = self.stack.len();
+        for (&reg, &ty) in param_regs.iter().zip(param_types.iter()) {
+            self.stack.push(RegValue { reg, ty });
+        }
+        self.label_stack.push(LabelFrame {
+            label: LabelIdx(self.label_stack.len() as u32),
+            kind,
+            result_types,
+            param_types,
+            param_regs,
+            height,
+            unreachable: false,
+        });
+        Ok(())
+    }
+
+    /// Resolve a block type to its (params, results) signature.
+    fn block_type_sig(
+        &self,
+        offset: ByteOffset,
+        block_type: BlockType,
+    ) -> Result<(Vec<ValType>, Vec<ValType>), LowerError> {
+        match block_type {
+            BlockType::Empty => Ok((Vec::new(), Vec::new())),
+            BlockType::Val(ty) => Ok((Vec::new(), alloc::vec![ty])),
+            BlockType::TypeIdx(idx) => {
+                let ty = self.tables.types.get(idx as usize).ok_or(LowerError {
+                    offset,
+                    function: Some(self.func_idx),
+                    kind: LowerErrorKind::InvalidType { type_idx: idx },
+                })?;
+                Ok((ty.params.clone(), ty.results.clone()))
+            }
+        }
+    }
+
+    /// Emit copy instructions delivering `srcs` into `dsts` (used for
+    /// unconditional loop back-edges; conditional branches use trampolines).
+    fn emit_copies(&mut self, offset: ByteOffset, dsts: &[Reg], srcs: &[Reg]) {
+        for (&dst, &src) in dsts.iter().zip(srcs.iter()) {
+            if dst != src {
+                self.emit(offset, RegOp::Copy { dst, src });
+            }
+        }
+    }
+
     /// The value types a branch to the frame at `frame_pos` must carry, and
-    /// the loop header block when the target is a loop (immediate target,
-    /// no back-patching needed).
-    fn branch_types_at(&self, frame_pos: usize) -> (Vec<ValType>, Option<u32>) {
+    /// the loop target details when the frame is a loop.
+    fn branch_types_at(&self, frame_pos: usize) -> (Vec<ValType>, Option<LoopTarget>) {
         let frame = &self.label_stack[frame_pos];
         match frame.kind {
-            FrameKind::Loop { header_block } => (frame.param_types.clone(), Some(header_block)),
+            FrameKind::Loop { header_block } => (
+                frame.param_types.clone(),
+                Some(LoopTarget {
+                    header: header_block,
+                    param_regs: frame.param_regs.clone(),
+                }),
+            ),
             _ => (frame.result_types.clone(), None),
         }
     }
@@ -2699,15 +2869,6 @@ fn binary_op(instr: &Instr) -> Option<BinaryOp> {
         Instr::F64Le => Some(BinaryOp::F64Le),
         Instr::F64Ge => Some(BinaryOp::F64Ge),
         _ => None,
-    }
-}
-
-fn block_type_to_vec(block_type: BlockType) -> Vec<ValType> {
-    match block_type {
-        BlockType::Empty => alloc::vec![],
-        BlockType::Val(ty) => alloc::vec![ty],
-        // BlockType::Func not yet supported
-        BlockType::TypeIdx(_) => alloc::vec![],
     }
 }
 
@@ -3834,6 +3995,85 @@ mod tests {
             ),
             Ok(vec![crate::runtime::Value::I32(9)])
         );
+    }
+
+    #[test]
+    fn lower_loop_with_params_consumes_them_into_frame() {
+        let reg_module = lower_wat(
+            "(module (func (param i32 i32) (result i32)
+               local.get 0
+               local.get 1
+               block (param i32 i32) (result i32)
+                 i32.add
+               end))",
+        );
+        let func = &reg_module.funcs[0];
+        // The block body must be able to pop both params (they live in the
+        // frame, not below it): i32.add lowers without underflow, and the
+        // function returns the sum.
+        assert_eq!(
+            crate::runtime::execute_func(
+                &func.clone(),
+                &[
+                    crate::runtime::Value::I32(30),
+                    crate::runtime::Value::I32(12)
+                ],
+            ),
+            Ok(vec![crate::runtime::Value::I32(42)])
+        );
+    }
+
+    #[test]
+    fn lower_br_if_to_loop_with_params_uses_trampoline() {
+        let reg_module = lower_wat(
+            "(module (func (param i32) (result i32)
+               (local $n i32)
+               i32.const 0
+               local.get 0
+               loop (param i32 i32) (result i32)
+                 local.set $n
+                 local.get $n
+                 i32.add
+                 local.get $n
+                 i32.const 1
+                 i32.sub
+                 local.tee $n
+                 local.get $n
+                 i32.const 1
+                 i32.ge_s
+                 br_if 0
+                 drop
+               end))",
+        );
+        let func = &reg_module.funcs[0];
+        // The conditional back-edge must target a trampoline (not the loop
+        // header directly); the trampoline carries the param copies.
+        let trampoline = func.blocks.iter().find(|block| {
+            block
+                .instrs
+                .iter()
+                .any(|instr| matches!(instr.op, RegOp::Copy { .. }))
+                && matches!(block.term, RegTerm::Br { .. })
+        });
+        assert!(
+            trampoline.is_some(),
+            "expected a trampoline block with param copies"
+        );
+        // The BrIf terminator must point at that trampoline.
+        let br_if = func
+            .blocks
+            .iter()
+            .find_map(|block| match &block.term {
+                RegTerm::BrIf { target_block, .. } => Some(*target_block),
+                _ => None,
+            })
+            .expect("expected a BrIf terminator");
+        let trampoline_idx = func
+            .blocks
+            .iter()
+            .position(|block| core::ptr::eq(block, trampoline.unwrap()))
+            .unwrap() as u32;
+        assert_eq!(br_if, trampoline_idx);
     }
 
     #[test]
