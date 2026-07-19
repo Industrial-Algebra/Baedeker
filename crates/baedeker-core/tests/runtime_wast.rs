@@ -236,7 +236,68 @@ fn result_matches(actual: &Value, expected: &WastRet<'_>) -> bool {
             (Value::F64(actual), wast::core::NanPattern::ArithmeticNan) => actual.is_nan(),
             _ => false,
         },
+        WastRet::Core(WastRetCore::V128(pattern)) => {
+            let Value::V128(actual) = actual else {
+                return false;
+            };
+            v128_pattern_matches(actual, pattern)
+        }
         _ => false,
+    }
+}
+
+/// Whether a v128 result matches an expected lane pattern (exact lanes for
+/// integers, NaN-aware matching for floats).
+fn v128_pattern_matches(actual: &[u8; 16], pattern: &wast::core::V128Pattern) -> bool {
+    match pattern {
+        wast::core::V128Pattern::I8x16(lanes) => actual
+            .iter()
+            .zip(lanes.iter())
+            .all(|(actual, expected)| *actual == *expected as u8),
+        wast::core::V128Pattern::I16x8(lanes) => lanes
+            .iter()
+            .enumerate()
+            .all(|(i, expected)| actual[i * 2..i * 2 + 2] == expected.to_le_bytes()),
+        wast::core::V128Pattern::I32x4(lanes) => lanes
+            .iter()
+            .enumerate()
+            .all(|(i, expected)| actual[i * 4..i * 4 + 4] == expected.to_le_bytes()),
+        wast::core::V128Pattern::I64x2(lanes) => lanes
+            .iter()
+            .enumerate()
+            .all(|(i, expected)| actual[i * 8..i * 8 + 8] == expected.to_le_bytes()),
+        wast::core::V128Pattern::F32x4(lanes) => lanes.iter().enumerate().all(|(i, pattern)| {
+            let bits = u32::from_le_bytes(actual[i * 4..i * 4 + 4].try_into().expect("lane width"));
+            nan_pattern_matches_f32(f32::from_bits(bits), pattern)
+        }),
+        wast::core::V128Pattern::F64x2(lanes) => lanes.iter().enumerate().all(|(i, pattern)| {
+            let bits = u64::from_le_bytes(actual[i * 8..i * 8 + 8].try_into().expect("lane width"));
+            nan_pattern_matches_f64(f64::from_bits(bits), pattern)
+        }),
+    }
+}
+
+fn nan_pattern_matches_f32(
+    actual: f32,
+    pattern: &wast::core::NanPattern<wast::token::F32>,
+) -> bool {
+    match pattern {
+        wast::core::NanPattern::Value(expected) => actual == f32::from_bits(expected.bits),
+        wast::core::NanPattern::CanonicalNan => actual.to_bits() & 0x7fff_ffff == 0x7fc0_0000,
+        wast::core::NanPattern::ArithmeticNan => actual.is_nan(),
+    }
+}
+
+fn nan_pattern_matches_f64(
+    actual: f64,
+    pattern: &wast::core::NanPattern<wast::token::F64>,
+) -> bool {
+    match pattern {
+        wast::core::NanPattern::Value(expected) => actual == f64::from_bits(expected.bits),
+        wast::core::NanPattern::CanonicalNan => {
+            actual.to_bits() & 0x7fff_ffff_ffff_ffff == 0x7ff8_0000_0000_0000
+        }
+        wast::core::NanPattern::ArithmeticNan => actual.is_nan(),
     }
 }
 

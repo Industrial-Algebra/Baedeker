@@ -277,6 +277,45 @@ pub enum RegOp {
         addr: Reg,
         memarg: MemArg,
     },
+    /// v128 constant.
+    V128Const {
+        dst: Reg,
+        value: [u8; 16],
+    },
+    /// Broadcast a scalar into every lane.
+    V128Splat {
+        dst: Reg,
+        shape: LaneShape,
+        src: Reg,
+    },
+    /// Extract one lane as a scalar.
+    V128ExtractLane {
+        dst: Reg,
+        shape: LaneShape,
+        src: Reg,
+        lane: u8,
+    },
+    /// Replace one lane of a vector with a scalar.
+    V128ReplaceLane {
+        dst: Reg,
+        shape: LaneShape,
+        vec: Reg,
+        scalar: Reg,
+        lane: u8,
+    },
+    /// Lane-wise binary operation (add/sub/mul/div and bitwise and/or/xor).
+    V128Binary {
+        shape: LaneShape,
+        kind: V128BinaryKind,
+        dst: Reg,
+        lhs: Reg,
+        rhs: Reg,
+    },
+    /// Bitwise not over all 128 bits.
+    V128Not {
+        dst: Reg,
+        src: Reg,
+    },
     /// Linear-memory store: mem[effective(addr)..+width] = value per `op`.
     Store {
         op: StoreOp,
@@ -382,6 +421,51 @@ pub enum RegOp {
     },
 }
 
+/// SIMD lane shapes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaneShape {
+    I8x16,
+    I16x8,
+    I32x4,
+    I64x2,
+    F32x4,
+    F64x2,
+}
+
+impl LaneShape {
+    /// Bytes per lane.
+    pub fn lane_width(self) -> usize {
+        match self {
+            LaneShape::I8x16 => 1,
+            LaneShape::I16x8 => 2,
+            LaneShape::I32x4 | LaneShape::F32x4 => 4,
+            LaneShape::I64x2 | LaneShape::F64x2 => 8,
+        }
+    }
+
+    /// Scalar type of one lane.
+    pub fn scalar_type(self) -> ValType {
+        match self {
+            LaneShape::I8x16 | LaneShape::I16x8 | LaneShape::I32x4 => ValType::Num(NumType::I32),
+            LaneShape::I64x2 => ValType::Num(NumType::I64),
+            LaneShape::F32x4 => ValType::Num(NumType::F32),
+            LaneShape::F64x2 => ValType::Num(NumType::F64),
+        }
+    }
+}
+
+/// Lane-wise binary operation kinds. Bitwise kinds ignore lane shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum V128BinaryKind {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    And,
+    Or,
+    Xor,
+}
+
 /// Linear-memory load operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoadOp {
@@ -399,12 +483,14 @@ pub enum LoadOp {
     I64Load16U,
     I64Load32S,
     I64Load32U,
+    V128,
 }
 
 impl LoadOp {
     /// Bytes read from memory.
     pub fn byte_width(self) -> usize {
         match self {
+            LoadOp::V128 => 16,
             LoadOp::I32 | LoadOp::F32 | LoadOp::I64Load32S | LoadOp::I64Load32U => 4,
             LoadOp::I64 | LoadOp::F64 => 8,
             LoadOp::I32Load8S | LoadOp::I32Load8U | LoadOp::I64Load8S | LoadOp::I64Load8U => 1,
@@ -415,6 +501,7 @@ impl LoadOp {
     /// Value type produced by the load.
     pub fn result_type(self) -> ValType {
         match self {
+            LoadOp::V128 => ValType::Vec(crate::types::VecType::V128),
             LoadOp::I32
             | LoadOp::I32Load8S
             | LoadOp::I32Load8U
@@ -457,12 +544,14 @@ pub enum StoreOp {
     I64Store8,
     I64Store16,
     I64Store32,
+    V128,
 }
 
 impl StoreOp {
     /// Bytes written to memory.
     pub fn byte_width(self) -> usize {
         match self {
+            StoreOp::V128 => 16,
             StoreOp::I32 | StoreOp::F32 | StoreOp::I64Store32 => 4,
             StoreOp::I64 | StoreOp::F64 => 8,
             StoreOp::I32Store8 | StoreOp::I64Store8 => 1,
@@ -473,6 +562,7 @@ impl StoreOp {
     /// Value type consumed by the store.
     pub fn value_type(self) -> ValType {
         match self {
+            StoreOp::V128 => ValType::Vec(crate::types::VecType::V128),
             StoreOp::I32 | StoreOp::I32Store8 | StoreOp::I32Store16 => ValType::Num(NumType::I32),
             StoreOp::I64 | StoreOp::I64Store8 | StoreOp::I64Store16 | StoreOp::I64Store32 => {
                 ValType::Num(NumType::I64)
@@ -2350,6 +2440,101 @@ impl<'b> FuncBuilder<'b> {
                     },
                 );
             }
+            Instr::V128Const(value) => {
+                let ty = ValType::Vec(crate::types::VecType::V128);
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(offset, RegOp::V128Const { dst, value });
+            }
+            Instr::I8x16Splat => self.lower_splat(offset, LaneShape::I8x16)?,
+            Instr::I16x8Splat => self.lower_splat(offset, LaneShape::I16x8)?,
+            Instr::I32x4Splat => self.lower_splat(offset, LaneShape::I32x4)?,
+            Instr::I64x2Splat => self.lower_splat(offset, LaneShape::I64x2)?,
+            Instr::F32x4Splat => self.lower_splat(offset, LaneShape::F32x4)?,
+            Instr::F64x2Splat => self.lower_splat(offset, LaneShape::F64x2)?,
+            Instr::I32x4ExtractLane(lane) => {
+                self.lower_extract_lane(offset, LaneShape::I32x4, lane)?
+            }
+            Instr::F32x4ExtractLane(lane) => {
+                self.lower_extract_lane(offset, LaneShape::F32x4, lane)?
+            }
+            Instr::I32x4ReplaceLane(lane) => {
+                self.lower_replace_lane(offset, LaneShape::I32x4, lane)?
+            }
+            Instr::F32x4ReplaceLane(lane) => {
+                self.lower_replace_lane(offset, LaneShape::F32x4, lane)?
+            }
+            Instr::V128Not => {
+                let src = self.pop_expect(
+                    offset,
+                    "v128.not",
+                    ValType::Vec(crate::types::VecType::V128),
+                )?;
+                let ty = ValType::Vec(crate::types::VecType::V128);
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(offset, RegOp::V128Not { dst, src: src.reg });
+            }
+            Instr::V128And => {
+                self.lower_v128_binary(offset, LaneShape::I8x16, V128BinaryKind::And)?
+            }
+            Instr::V128Or => {
+                self.lower_v128_binary(offset, LaneShape::I8x16, V128BinaryKind::Or)?
+            }
+            Instr::V128Xor => {
+                self.lower_v128_binary(offset, LaneShape::I8x16, V128BinaryKind::Xor)?
+            }
+            Instr::I8x16Add => {
+                self.lower_v128_binary(offset, LaneShape::I8x16, V128BinaryKind::Add)?
+            }
+            Instr::I8x16Sub => {
+                self.lower_v128_binary(offset, LaneShape::I8x16, V128BinaryKind::Sub)?
+            }
+            Instr::I16x8Add => {
+                self.lower_v128_binary(offset, LaneShape::I16x8, V128BinaryKind::Add)?
+            }
+            Instr::I16x8Sub => {
+                self.lower_v128_binary(offset, LaneShape::I16x8, V128BinaryKind::Sub)?
+            }
+            Instr::I32x4Add => {
+                self.lower_v128_binary(offset, LaneShape::I32x4, V128BinaryKind::Add)?
+            }
+            Instr::I32x4Sub => {
+                self.lower_v128_binary(offset, LaneShape::I32x4, V128BinaryKind::Sub)?
+            }
+            Instr::I32x4Mul => {
+                self.lower_v128_binary(offset, LaneShape::I32x4, V128BinaryKind::Mul)?
+            }
+            Instr::I64x2Add => {
+                self.lower_v128_binary(offset, LaneShape::I64x2, V128BinaryKind::Add)?
+            }
+            Instr::I64x2Sub => {
+                self.lower_v128_binary(offset, LaneShape::I64x2, V128BinaryKind::Sub)?
+            }
+            Instr::F32x4Add => {
+                self.lower_v128_binary(offset, LaneShape::F32x4, V128BinaryKind::Add)?
+            }
+            Instr::F32x4Sub => {
+                self.lower_v128_binary(offset, LaneShape::F32x4, V128BinaryKind::Sub)?
+            }
+            Instr::F32x4Mul => {
+                self.lower_v128_binary(offset, LaneShape::F32x4, V128BinaryKind::Mul)?
+            }
+            Instr::F32x4Div => {
+                self.lower_v128_binary(offset, LaneShape::F32x4, V128BinaryKind::Div)?
+            }
+            Instr::F64x2Add => {
+                self.lower_v128_binary(offset, LaneShape::F64x2, V128BinaryKind::Add)?
+            }
+            Instr::F64x2Sub => {
+                self.lower_v128_binary(offset, LaneShape::F64x2, V128BinaryKind::Sub)?
+            }
+            Instr::F64x2Mul => {
+                self.lower_v128_binary(offset, LaneShape::F64x2, V128BinaryKind::Mul)?
+            }
+            Instr::F64x2Div => {
+                self.lower_v128_binary(offset, LaneShape::F64x2, V128BinaryKind::Div)?
+            }
             instr => {
                 if let Some(op) = unary_op(&instr) {
                     self.lower_unary_op(offset, op)?;
@@ -2550,6 +2735,100 @@ impl<'b> FuncBuilder<'b> {
         Ok(())
     }
 
+    fn lower_splat(&mut self, offset: ByteOffset, shape: LaneShape) -> Result<(), LowerError> {
+        let src = self.pop_expect(offset, "splat", shape.scalar_type())?;
+        let ty = ValType::Vec(crate::types::VecType::V128);
+        let dst = self.alloc_reg(ty);
+        self.stack.push(RegValue { reg: dst, ty });
+        self.emit(
+            offset,
+            RegOp::V128Splat {
+                dst,
+                shape,
+                src: src.reg,
+            },
+        );
+        Ok(())
+    }
+
+    fn lower_extract_lane(
+        &mut self,
+        offset: ByteOffset,
+        shape: LaneShape,
+        lane: u8,
+    ) -> Result<(), LowerError> {
+        let src = self.pop_expect(
+            offset,
+            "extract_lane",
+            ValType::Vec(crate::types::VecType::V128),
+        )?;
+        let ty = shape.scalar_type();
+        let dst = self.alloc_reg(ty);
+        self.stack.push(RegValue { reg: dst, ty });
+        self.emit(
+            offset,
+            RegOp::V128ExtractLane {
+                dst,
+                shape,
+                src: src.reg,
+                lane,
+            },
+        );
+        Ok(())
+    }
+
+    fn lower_replace_lane(
+        &mut self,
+        offset: ByteOffset,
+        shape: LaneShape,
+        lane: u8,
+    ) -> Result<(), LowerError> {
+        let scalar = self.pop_expect(offset, "replace_lane", shape.scalar_type())?;
+        let vec = self.pop_expect(
+            offset,
+            "replace_lane",
+            ValType::Vec(crate::types::VecType::V128),
+        )?;
+        let ty = ValType::Vec(crate::types::VecType::V128);
+        let dst = self.alloc_reg(ty);
+        self.stack.push(RegValue { reg: dst, ty });
+        self.emit(
+            offset,
+            RegOp::V128ReplaceLane {
+                dst,
+                shape,
+                vec: vec.reg,
+                scalar: scalar.reg,
+                lane,
+            },
+        );
+        Ok(())
+    }
+
+    fn lower_v128_binary(
+        &mut self,
+        offset: ByteOffset,
+        shape: LaneShape,
+        kind: V128BinaryKind,
+    ) -> Result<(), LowerError> {
+        let v128 = ValType::Vec(crate::types::VecType::V128);
+        let rhs = self.pop_expect(offset, "simd.binary", v128)?;
+        let lhs = self.pop_expect(offset, "simd.binary", v128)?;
+        let dst = self.alloc_reg(v128);
+        self.stack.push(RegValue { reg: dst, ty: v128 });
+        self.emit(
+            offset,
+            RegOp::V128Binary {
+                shape,
+                kind,
+                dst,
+                lhs: lhs.reg,
+                rhs: rhs.reg,
+            },
+        );
+        Ok(())
+    }
+
     fn global_type(&self, offset: ByteOffset, global: GlobalIdx) -> Result<ValType, LowerError> {
         self.tables
             .global_types
@@ -2705,6 +2984,7 @@ fn load_op(instr: &Instr) -> Option<(LoadOp, MemArg)> {
         Instr::I64Load16U(memarg) => (LoadOp::I64Load16U, memarg),
         Instr::I64Load32S(memarg) => (LoadOp::I64Load32S, memarg),
         Instr::I64Load32U(memarg) => (LoadOp::I64Load32U, memarg),
+        Instr::V128Load(memarg) => (LoadOp::V128, memarg),
         _ => return None,
     };
     Some((op, memarg))
@@ -2721,6 +3001,7 @@ fn store_op(instr: &Instr) -> Option<(StoreOp, MemArg)> {
         Instr::I64Store8(memarg) => (StoreOp::I64Store8, memarg),
         Instr::I64Store16(memarg) => (StoreOp::I64Store16, memarg),
         Instr::I64Store32(memarg) => (StoreOp::I64Store32, memarg),
+        Instr::V128Store(memarg) => (StoreOp::V128, memarg),
         _ => return None,
     };
     Some((op, memarg))
@@ -4074,6 +4355,49 @@ mod tests {
             .position(|block| core::ptr::eq(block, trampoline.unwrap()))
             .unwrap() as u32;
         assert_eq!(br_if, trampoline_idx);
+    }
+
+    #[test]
+    fn lower_v128_binary_shape() {
+        let reg_module = lower_wat(
+            "(module (func (result v128)
+               v128.const i32x4 1 2 3 4
+               v128.const i32x4 5 6 7 8
+               i32x4.add))",
+        );
+        let func = &reg_module.funcs[0];
+        let op = func.blocks[0]
+            .instrs
+            .iter()
+            .find_map(|instr| match &instr.op {
+                RegOp::V128Binary {
+                    shape, kind, dst, ..
+                } => Some((shape, kind, dst)),
+                _ => None,
+            })
+            .expect("expected a V128Binary op");
+        assert_eq!(*op.0, LaneShape::I32x4);
+        assert_eq!(*op.1, V128BinaryKind::Add);
+        assert_eq!(*op.2, Reg(2));
+    }
+
+    #[test]
+    fn execute_v128_arithmetic_and_memory() {
+        let source = "(module
+            (memory 1)
+            (func (export \"add_store\") (param i32) (result i32)
+              local.get 0
+              v128.const i32x4 1 2 3 4
+              v128.const i32x4 10 20 30 40
+              i32x4.add
+              v128.store
+              local.get 0
+              i32.load))";
+        // First lane of (1+10) stored to memory and read back as a scalar.
+        assert_eq!(
+            run_wat_export(source, "add_store", &[crate::runtime::Value::I32(16)]),
+            Ok(vec![crate::runtime::Value::I32(11)])
+        );
     }
 
     #[test]

@@ -1899,6 +1899,148 @@ fn validate_instr(
         Instr::V128Const(_) => state
             .operands
             .push(ValType::Vec(crate::types::VecType::V128)),
+        Instr::I8x16Splat => validate_numeric_unary(
+            function,
+            state,
+            offset,
+            "i8x16.splat",
+            ValType::Num(crate::types::NumType::I32),
+            ValType::Vec(crate::types::VecType::V128),
+        )?,
+        Instr::I16x8Splat => validate_numeric_unary(
+            function,
+            state,
+            offset,
+            "i16x8.splat",
+            ValType::Num(crate::types::NumType::I32),
+            ValType::Vec(crate::types::VecType::V128),
+        )?,
+        Instr::I32x4Splat => validate_numeric_unary(
+            function,
+            state,
+            offset,
+            "i32x4.splat",
+            ValType::Num(crate::types::NumType::I32),
+            ValType::Vec(crate::types::VecType::V128),
+        )?,
+        Instr::I64x2Splat => validate_numeric_unary(
+            function,
+            state,
+            offset,
+            "i64x2.splat",
+            ValType::Num(crate::types::NumType::I64),
+            ValType::Vec(crate::types::VecType::V128),
+        )?,
+        Instr::F32x4Splat => validate_numeric_unary(
+            function,
+            state,
+            offset,
+            "f32x4.splat",
+            ValType::Num(crate::types::NumType::F32),
+            ValType::Vec(crate::types::VecType::V128),
+        )?,
+        Instr::F64x2Splat => validate_numeric_unary(
+            function,
+            state,
+            offset,
+            "f64x2.splat",
+            ValType::Num(crate::types::NumType::F64),
+            ValType::Vec(crate::types::VecType::V128),
+        )?,
+        Instr::I32x4ExtractLane(_) => validate_numeric_unary(
+            function,
+            state,
+            offset,
+            "i32x4.extract_lane",
+            ValType::Vec(crate::types::VecType::V128),
+            ValType::Num(crate::types::NumType::I32),
+        )?,
+        Instr::F32x4ExtractLane(_) => validate_numeric_unary(
+            function,
+            state,
+            offset,
+            "f32x4.extract_lane",
+            ValType::Vec(crate::types::VecType::V128),
+            ValType::Num(crate::types::NumType::F32),
+        )?,
+        Instr::I32x4ReplaceLane(_) => {
+            pop_expect(
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I32),
+                offset,
+                "i32x4.replace_lane",
+            )?;
+            pop_expect(
+                function,
+                state,
+                ValType::Vec(crate::types::VecType::V128),
+                offset,
+                "i32x4.replace_lane",
+            )?;
+            state
+                .operands
+                .push(ValType::Vec(crate::types::VecType::V128));
+        }
+        Instr::F32x4ReplaceLane(_) => {
+            pop_expect(
+                function,
+                state,
+                ValType::Num(crate::types::NumType::F32),
+                offset,
+                "f32x4.replace_lane",
+            )?;
+            pop_expect(
+                function,
+                state,
+                ValType::Vec(crate::types::VecType::V128),
+                offset,
+                "f32x4.replace_lane",
+            )?;
+            state
+                .operands
+                .push(ValType::Vec(crate::types::VecType::V128));
+        }
+        Instr::V128Not => validate_numeric_unary(
+            function,
+            state,
+            offset,
+            "v128.not",
+            ValType::Vec(crate::types::VecType::V128),
+            ValType::Vec(crate::types::VecType::V128),
+        )?,
+        Instr::V128And | Instr::V128Or | Instr::V128Xor => validate_numeric_binary(
+            function,
+            state,
+            offset,
+            "v128.bitwise",
+            ValType::Vec(crate::types::VecType::V128),
+            ValType::Vec(crate::types::VecType::V128),
+        )?,
+        Instr::I8x16Add
+        | Instr::I8x16Sub
+        | Instr::I16x8Add
+        | Instr::I16x8Sub
+        | Instr::I32x4Add
+        | Instr::I32x4Sub
+        | Instr::I32x4Mul
+        | Instr::I64x2Add
+        | Instr::I64x2Sub
+        | Instr::F32x4Add
+        | Instr::F32x4Sub
+        | Instr::F32x4Mul
+        | Instr::F32x4Div
+        | Instr::F64x2Add
+        | Instr::F64x2Sub
+        | Instr::F64x2Mul
+        | Instr::F64x2Div => validate_numeric_binary(
+            function,
+            state,
+            offset,
+            "simd.arithmetic",
+            ValType::Vec(crate::types::VecType::V128),
+            ValType::Vec(crate::types::VecType::V128),
+        )?,
         Instr::I32Eqz => validate_numeric_unary(
             function,
             state,
