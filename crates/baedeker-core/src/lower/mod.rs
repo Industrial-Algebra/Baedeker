@@ -4077,6 +4077,28 @@ mod tests {
     }
 
     #[test]
+    fn execute_saturating_truncation_edges() {
+        let source = "(module (func (export \"sat\") (param f32) (result i32)
+            local.get 0
+            i32.trunc_sat_f32_s))";
+        // NaN -> 0.
+        assert_eq!(
+            run_wat_export(source, "sat", &[crate::runtime::Value::F32(f32::NAN)]),
+            Ok(vec![crate::runtime::Value::I32(0)])
+        );
+        // Above range -> i32::MAX.
+        assert_eq!(
+            run_wat_export(source, "sat", &[crate::runtime::Value::F32(3e9)]),
+            Ok(vec![crate::runtime::Value::I32(i32::MAX)])
+        );
+        // In range -> plain truncation.
+        assert_eq!(
+            run_wat_export(source, "sat", &[crate::runtime::Value::F32(-2.9)]),
+            Ok(vec![crate::runtime::Value::I32(-2)])
+        );
+    }
+
+    #[test]
     fn lower_else_without_if_is_an_error() {
         // (func i32.const 1 else end) — else outside an if frame.
         let bytes = [
