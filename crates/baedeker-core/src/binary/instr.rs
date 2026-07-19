@@ -165,6 +165,37 @@ pub enum Instr {
     RefFunc(FuncIdx),
     RefAsNonNull,
     V128Const([u8; 16]),
+    I8x16Splat,
+    I16x8Splat,
+    I32x4Splat,
+    I64x2Splat,
+    F32x4Splat,
+    F64x2Splat,
+    I32x4ExtractLane(u8),
+    I32x4ReplaceLane(u8),
+    F32x4ExtractLane(u8),
+    F32x4ReplaceLane(u8),
+    V128Not,
+    V128And,
+    V128Or,
+    V128Xor,
+    I8x16Add,
+    I8x16Sub,
+    I16x8Add,
+    I16x8Sub,
+    I32x4Add,
+    I32x4Sub,
+    I32x4Mul,
+    I64x2Add,
+    I64x2Sub,
+    F32x4Add,
+    F32x4Sub,
+    F32x4Mul,
+    F32x4Div,
+    F64x2Add,
+    F64x2Sub,
+    F64x2Mul,
+    F64x2Div,
     I32Eqz,
     I32Eq,
     I32Ne,
@@ -665,6 +696,49 @@ fn decode_simd_instr(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Inst
         10 => Ok(Instr::V128Load64Splat(parse_memarg(cursor, base_offset)?)),
         11 => Ok(Instr::V128Store(parse_memarg(cursor, base_offset)?)),
         12 => Ok(Instr::V128Const(parse_v128_const(cursor, base_offset)?)),
+        15 => Ok(Instr::I8x16Splat),
+        16 => Ok(Instr::I16x8Splat),
+        17 => Ok(Instr::I32x4Splat),
+        18 => Ok(Instr::I64x2Splat),
+        19 => Ok(Instr::F32x4Splat),
+        20 => Ok(Instr::F64x2Splat),
+        27 => Ok(Instr::I32x4ExtractLane(parse_lane_idx(
+            cursor,
+            base_offset,
+        )?)),
+        28 => Ok(Instr::I32x4ReplaceLane(parse_lane_idx(
+            cursor,
+            base_offset,
+        )?)),
+        31 => Ok(Instr::F32x4ExtractLane(parse_lane_idx(
+            cursor,
+            base_offset,
+        )?)),
+        32 => Ok(Instr::F32x4ReplaceLane(parse_lane_idx(
+            cursor,
+            base_offset,
+        )?)),
+        77 => Ok(Instr::V128Not),
+        78 => Ok(Instr::V128And),
+        80 => Ok(Instr::V128Or),
+        81 => Ok(Instr::V128Xor),
+        110 => Ok(Instr::I8x16Add),
+        113 => Ok(Instr::I8x16Sub),
+        142 => Ok(Instr::I16x8Add),
+        145 => Ok(Instr::I16x8Sub),
+        174 => Ok(Instr::I32x4Add),
+        177 => Ok(Instr::I32x4Sub),
+        181 => Ok(Instr::I32x4Mul),
+        206 => Ok(Instr::I64x2Add),
+        209 => Ok(Instr::I64x2Sub),
+        228 => Ok(Instr::F32x4Add),
+        229 => Ok(Instr::F32x4Sub),
+        230 => Ok(Instr::F32x4Mul),
+        231 => Ok(Instr::F32x4Div),
+        240 => Ok(Instr::F64x2Add),
+        241 => Ok(Instr::F64x2Sub),
+        242 => Ok(Instr::F64x2Mul),
+        243 => Ok(Instr::F64x2Div),
         84 => {
             let (memarg, lane) = parse_memarg_lane(cursor, base_offset)?;
             Ok(Instr::V128Load8Lane { memarg, lane })
@@ -734,6 +808,15 @@ fn parse_memarg_lane(
         kind: DecodeErrorKind::UnexpectedEof,
     })?;
     Ok((memarg, lane))
+}
+
+fn parse_lane_idx(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<u8, DecodeError> {
+    let pos = cursor.position();
+    cursor.read_byte().map_err(|_| DecodeError {
+        offset: ByteOffset(base_offset + pos),
+        context: DecodeContext::CodeSection,
+        kind: DecodeErrorKind::UnexpectedEof,
+    })
 }
 
 fn parse_v128_const(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<[u8; 16], DecodeError> {

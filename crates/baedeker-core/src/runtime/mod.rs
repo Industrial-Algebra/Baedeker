@@ -10,7 +10,9 @@ mod store;
 
 pub use store::{PAGE_SIZE, Store};
 
-use crate::lower::{BinaryOp, Reg, RegFunc, RegInstr, RegModule, RegOp, RegTerm, UnaryOp};
+use crate::lower::{
+    BinaryOp, LaneShape, Reg, RegFunc, RegInstr, RegModule, RegOp, RegTerm, UnaryOp, V128BinaryKind,
+};
 use crate::types::{FuncIdx, MemArg, NumType, RefType, TableIdx, ValType};
 
 /// A runtime WebAssembly value.
@@ -24,6 +26,9 @@ pub enum Value {
     /// support lands, null also represents every `externref` value (the
     /// runtime cannot produce non-null externrefs yet).
     FuncRef(Option<u32>),
+    /// A 128-bit vector, stored as raw little-endian bytes; lane
+    /// interpretation happens per operation.
+    V128([u8; 16]),
 }
 
 impl Value {
@@ -34,6 +39,7 @@ impl Value {
             Value::F32(_) => ValType::Num(NumType::F32),
             Value::F64(_) => ValType::Num(NumType::F64),
             Value::FuncRef(_) => ValType::Ref(RefType::FuncRef),
+            Value::V128(_) => ValType::Vec(crate::types::VecType::V128),
         }
     }
 }
@@ -66,6 +72,7 @@ pub enum RuntimeErrorKind {
     ImportedGlobalAccessUnsupported { global: u32 },
     ImportedTableAccessUnsupported { table: u32 },
     InvalidConstExpr,
+    InvalidLaneIndex { lane: u8 },
     MissingStore,
     MissingReturn,
 }
@@ -290,6 +297,7 @@ fn execute_func_in(
                 ValType::Num(NumType::F32) => Some(Value::F32(0.0)),
                 ValType::Num(NumType::F64) => Some(Value::F64(0.0)),
                 ValType::Ref(ref_type) if ref_nullable(&ref_type) => Some(Value::FuncRef(None)),
+                ValType::Vec(_) => Some(Value::V128([0; 16])),
                 _ => None,
             };
         }
@@ -549,6 +557,7 @@ fn execute_reg_op(
                 crate::lower::LoadOp::I64Load32U => {
                     Value::I64(u32::from_le_bytes(bytes.try_into().expect("width checked")) as i64)
                 }
+                crate::lower::LoadOp::V128 => Value::V128(bytes.try_into().expect("width checked")),
             };
             set_reg(registers, *dst, value)?;
         }
@@ -588,6 +597,9 @@ fn execute_reg_op(
                 }
                 (crate::lower::StoreOp::I64Store32, Value::I64(v)) => {
                     bytes.copy_from_slice(&(v as u32).to_le_bytes());
+                }
+                (crate::lower::StoreOp::V128, Value::V128(v)) => {
+                    bytes.copy_from_slice(&v);
                 }
                 (op, value) => {
                     return Err(RuntimeError {
@@ -801,6 +813,91 @@ fn execute_reg_op(
             let is_null = matches!(value, Value::FuncRef(None));
             set_reg(registers, *dst, Value::I32(is_null as i32))?;
         }
+        RegOp::V128Const { dst, value } => {
+            set_reg(registers, *dst, Value::V128(*value))?;
+        }
+        RegOp::V128Splat { dst, shape, src } => {
+            let scalar = get_reg(registers, *src)?;
+            let bytes = splat_bytes(*shape, scalar)?;
+            set_reg(registers, *dst, Value::V128(bytes))?;
+        }
+        RegOp::V128ExtractLane {
+            dst,
+            shape,
+            src,
+            lane,
+        } => {
+            let Value::V128(bytes) = get_reg(registers, *src)? else {
+                return Err(RuntimeError {
+                    kind: RuntimeErrorKind::TypeMismatch {
+                        expected: ValType::Vec(crate::types::VecType::V128),
+                        found: get_reg(registers, *src)?.val_type(),
+                    },
+                });
+            };
+            let value = extract_lane(*shape, &bytes, *lane)?;
+            set_reg(registers, *dst, value)?;
+        }
+        RegOp::V128ReplaceLane {
+            dst,
+            shape,
+            vec,
+            scalar,
+            lane,
+        } => {
+            let Value::V128(mut bytes) = get_reg(registers, *vec)? else {
+                return Err(RuntimeError {
+                    kind: RuntimeErrorKind::TypeMismatch {
+                        expected: ValType::Vec(crate::types::VecType::V128),
+                        found: get_reg(registers, *vec)?.val_type(),
+                    },
+                });
+            };
+            let scalar = get_reg(registers, *scalar)?;
+            replace_lane(*shape, &mut bytes, *lane, scalar)?;
+            set_reg(registers, *dst, Value::V128(bytes))?;
+        }
+        RegOp::V128Binary {
+            shape,
+            kind,
+            dst,
+            lhs,
+            rhs,
+        } => {
+            let Value::V128(lhs_bytes) = get_reg(registers, *lhs)? else {
+                return Err(RuntimeError {
+                    kind: RuntimeErrorKind::TypeMismatch {
+                        expected: ValType::Vec(crate::types::VecType::V128),
+                        found: get_reg(registers, *lhs)?.val_type(),
+                    },
+                });
+            };
+            let Value::V128(rhs_bytes) = get_reg(registers, *rhs)? else {
+                return Err(RuntimeError {
+                    kind: RuntimeErrorKind::TypeMismatch {
+                        expected: ValType::Vec(crate::types::VecType::V128),
+                        found: get_reg(registers, *rhs)?.val_type(),
+                    },
+                });
+            };
+            let bytes = v128_binary(*shape, *kind, &lhs_bytes, &rhs_bytes);
+            set_reg(registers, *dst, Value::V128(bytes))?;
+        }
+        RegOp::V128Not { dst, src } => {
+            let Value::V128(bytes) = get_reg(registers, *src)? else {
+                return Err(RuntimeError {
+                    kind: RuntimeErrorKind::TypeMismatch {
+                        expected: ValType::Vec(crate::types::VecType::V128),
+                        found: get_reg(registers, *src)?.val_type(),
+                    },
+                });
+            };
+            let mut out = [0u8; 16];
+            for (dst_byte, src_byte) in out.iter_mut().zip(bytes.iter()) {
+                *dst_byte = !src_byte;
+            }
+            set_reg(registers, *dst, Value::V128(out))?;
+        }
     }
     Ok(())
 }
@@ -898,6 +995,192 @@ fn ref_nullable(ref_type: &RefType) -> bool {
     match ref_type {
         RefType::FuncRef | RefType::ExternRef => true,
         RefType::Typed { nullable, .. } => *nullable,
+    }
+}
+
+/// Lane-wise integer arithmetic (wrapping, per spec).
+macro_rules! lane_int_op {
+    ($kind:expr, $a:expr, $b:expr, $ty:ty) => {{
+        let (a, b) = ($a as $ty, $b as $ty);
+        match $kind {
+            V128BinaryKind::Add => a.wrapping_add(b),
+            V128BinaryKind::Sub => a.wrapping_sub(b),
+            V128BinaryKind::Mul => a.wrapping_mul(b),
+            V128BinaryKind::Div => a.wrapping_div(b),
+            _ => unreachable!("bitwise kinds handled separately"),
+        }
+    }};
+}
+
+/// Lane-wise float arithmetic.
+macro_rules! lane_float_op {
+    ($kind:expr, $a:expr, $b:expr, $ty:ty) => {{
+        let (a, b) = ($a as $ty, $b as $ty);
+        match $kind {
+            V128BinaryKind::Add => a + b,
+            V128BinaryKind::Sub => a - b,
+            V128BinaryKind::Mul => a * b,
+            V128BinaryKind::Div => a / b,
+            _ => unreachable!("bitwise kinds handled separately"),
+        }
+    }};
+}
+
+/// The little-endian bytes of a scalar at a shape's lane width (int lanes
+/// truncate from i32, like splat).
+fn scalar_lane_bytes(shape: LaneShape, scalar: Value) -> Result<[u8; 8], RuntimeError> {
+    let mut buf = [0u8; 8];
+    match (shape, scalar) {
+        (LaneShape::I8x16, Value::I32(v)) => buf[0] = v as u8,
+        (LaneShape::I16x8, Value::I32(v)) => buf[..2].copy_from_slice(&(v as u16).to_le_bytes()),
+        (LaneShape::I32x4, Value::I32(v)) => buf[..4].copy_from_slice(&v.to_le_bytes()),
+        (LaneShape::I64x2, Value::I64(v)) => buf.copy_from_slice(&v.to_le_bytes()),
+        (LaneShape::F32x4, Value::F32(v)) => {
+            buf[..4].copy_from_slice(&v.to_bits().to_le_bytes());
+        }
+        (LaneShape::F64x2, Value::F64(v)) => buf.copy_from_slice(&v.to_bits().to_le_bytes()),
+        (shape, value) => {
+            return Err(RuntimeError {
+                kind: RuntimeErrorKind::TypeMismatch {
+                    expected: shape.scalar_type(),
+                    found: value.val_type(),
+                },
+            });
+        }
+    }
+    Ok(buf)
+}
+
+/// Broadcast a scalar into all 16 bytes per shape.
+fn splat_bytes(shape: LaneShape, scalar: Value) -> Result<[u8; 16], RuntimeError> {
+    let lane = scalar_lane_bytes(shape, scalar)?;
+    let width = shape.lane_width();
+    let mut out = [0u8; 16];
+    for chunk in out.chunks_exact_mut(width) {
+        chunk.copy_from_slice(&lane[..width]);
+    }
+    Ok(out)
+}
+
+/// Read one lane as a scalar Value.
+fn extract_lane(shape: LaneShape, bytes: &[u8; 16], lane: u8) -> Result<Value, RuntimeError> {
+    let width = shape.lane_width();
+    let start = lane as usize * width;
+    if start + width > 16 {
+        return Err(RuntimeError {
+            kind: RuntimeErrorKind::InvalidLaneIndex { lane },
+        });
+    }
+    let lane_bytes = &bytes[start..start + width];
+    Ok(match shape {
+        LaneShape::I8x16 => Value::I32(lane_bytes[0] as i8 as i32),
+        LaneShape::I16x8 => {
+            Value::I32(i16::from_le_bytes(lane_bytes.try_into().expect("width")) as i32)
+        }
+        LaneShape::I32x4 => Value::I32(i32::from_le_bytes(lane_bytes.try_into().expect("width"))),
+        LaneShape::I64x2 => Value::I64(i64::from_le_bytes(lane_bytes.try_into().expect("width"))),
+        LaneShape::F32x4 => Value::F32(f32::from_bits(u32::from_le_bytes(
+            lane_bytes.try_into().expect("width"),
+        ))),
+        LaneShape::F64x2 => Value::F64(f64::from_bits(u64::from_le_bytes(
+            lane_bytes.try_into().expect("width"),
+        ))),
+    })
+}
+
+/// Write a scalar into one lane in place.
+fn replace_lane(
+    shape: LaneShape,
+    bytes: &mut [u8; 16],
+    lane: u8,
+    scalar: Value,
+) -> Result<(), RuntimeError> {
+    let width = shape.lane_width();
+    let start = lane as usize * width;
+    if start + width > 16 {
+        return Err(RuntimeError {
+            kind: RuntimeErrorKind::InvalidLaneIndex { lane },
+        });
+    }
+    let lane_bytes = scalar_lane_bytes(shape, scalar)?;
+    bytes[start..start + width].copy_from_slice(&lane_bytes[..width]);
+    Ok(())
+}
+
+/// Lane-wise (or bitwise) binary execution over 16-byte vectors.
+fn v128_binary(shape: LaneShape, kind: V128BinaryKind, lhs: &[u8; 16], rhs: &[u8; 16]) -> [u8; 16] {
+    let mut out = [0u8; 16];
+    match kind {
+        V128BinaryKind::And => {
+            for i in 0..16 {
+                out[i] = lhs[i] & rhs[i];
+            }
+        }
+        V128BinaryKind::Or => {
+            for i in 0..16 {
+                out[i] = lhs[i] | rhs[i];
+            }
+        }
+        V128BinaryKind::Xor => {
+            for i in 0..16 {
+                out[i] = lhs[i] ^ rhs[i];
+            }
+        }
+        _ => {
+            let width = shape.lane_width();
+            for ((dst_lane, lhs_lane), rhs_lane) in out
+                .chunks_exact_mut(width)
+                .zip(lhs.chunks_exact(width))
+                .zip(rhs.chunks_exact(width))
+            {
+                apply_lane_binary(shape, kind, dst_lane, lhs_lane, rhs_lane);
+            }
+        }
+    }
+    out
+}
+
+fn apply_lane_binary(
+    shape: LaneShape,
+    kind: V128BinaryKind,
+    dst: &mut [u8],
+    lhs: &[u8],
+    rhs: &[u8],
+) {
+    match shape {
+        LaneShape::I8x16 => {
+            dst[0] = lane_int_op!(kind, lhs[0], rhs[0], i8) as u8;
+        }
+        LaneShape::I16x8 => {
+            let a = i16::from_le_bytes(lhs.try_into().expect("width"));
+            let b = i16::from_le_bytes(rhs.try_into().expect("width"));
+            let result = lane_int_op!(kind, a, b, i16);
+            dst.copy_from_slice(&result.to_le_bytes());
+        }
+        LaneShape::I32x4 => {
+            let a = i32::from_le_bytes(lhs.try_into().expect("width"));
+            let b = i32::from_le_bytes(rhs.try_into().expect("width"));
+            let result = lane_int_op!(kind, a, b, i32);
+            dst.copy_from_slice(&result.to_le_bytes());
+        }
+        LaneShape::I64x2 => {
+            let a = i64::from_le_bytes(lhs.try_into().expect("width"));
+            let b = i64::from_le_bytes(rhs.try_into().expect("width"));
+            let result = lane_int_op!(kind, a, b, i64);
+            dst.copy_from_slice(&result.to_le_bytes());
+        }
+        LaneShape::F32x4 => {
+            let a = f32::from_bits(u32::from_le_bytes(lhs.try_into().expect("width")));
+            let b = f32::from_bits(u32::from_le_bytes(rhs.try_into().expect("width")));
+            let result = lane_float_op!(kind, a, b, f32);
+            dst.copy_from_slice(&result.to_bits().to_le_bytes());
+        }
+        LaneShape::F64x2 => {
+            let a = f64::from_bits(u64::from_le_bytes(lhs.try_into().expect("width")));
+            let b = f64::from_bits(u64::from_le_bytes(rhs.try_into().expect("width")));
+            let result = lane_float_op!(kind, a, b, f64);
+            dst.copy_from_slice(&result.to_bits().to_le_bytes());
+        }
     }
 }
 
