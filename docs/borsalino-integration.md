@@ -21,12 +21,14 @@ parts, with no per-vendor code in Baedeker.
 The performance picture differs by memory architecture, and it matters for the offload
 thresholds in Level 1-2:
 
-- **Unified memory (Apple silicon, integrated GPUs):** CPU and GPU share physical RAM.
-  Borsalino's `HOST_VISIBLE | HOST_COHERENT` memory strategy (debugged on M3/M3 Pro)
-  means zero-copy between Baedeker's WASM linear memory and GPU buffers.
-- **Discrete GPUs:** buffer uploads/downloads cross the PCIe bus. The same API works,
-  but the CPU↔GPU crossover point moves to larger N — the per-platform benchmarks in
-  the Implementation Strategy are how we set thresholds.
+- **Unified memory (Apple silicon; Nvidia Grace Blackwell such as DGX Spark GB10):**
+  CPU and GPU share physical RAM. Borsalino's `HOST_VISIBLE | HOST_COHERENT` memory
+  strategy (debugged on M3/M3 Pro and tuned further on GB10, where dispatch shows
+  considerable compute gains) means zero-copy between Baedeker's WASM linear memory
+  and GPU buffers. These are the first-class offload targets.
+- **Discrete GPUs (PCIe-attached):** buffer uploads/downloads cross the PCIe bus. The
+  same API works, but the CPU↔GPU crossover point moves to larger N — the per-platform
+  benchmarks in the Implementation Strategy are how we set thresholds.
 
 ```rust
 // Baedeker holds WASM linear memory as a Rust Vec<u8>
@@ -170,8 +172,8 @@ code.
 ### Phase 3: Benchmark and Tune
 
 Use `examples/dispatch_profile.rs` and `examples/bench.rs` from Borsalino to establish
-baselines on both unified-memory (Apple silicon) and discrete-GPU (Nvidia/AMD) hardware.
-Key metrics:
+baselines across the memory-architecture spectrum: Apple silicon (M-class), Nvidia Grace
+Blackwell (DGX Spark GB10), and PCIe-discrete GPUs (RTX class). Key metrics:
 - Compile latency for SIMD kernels
 - Dispatch overhead per platform
 - Crossover point where GPU beats CPU for f32x4 operations (differs by memory architecture)

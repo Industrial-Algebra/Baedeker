@@ -24,8 +24,11 @@ Metal/Nvidia/AMD hardware, removing the only iOS-specific technical dependency. 
 is now a **general cross-platform WASM runtime**: Linux, macOS, iOS, Android, and anything
 else Rust targets. Embedding is via C-compatible FFI (Swift interop on Apple platforms);
 GPU offload is Vulkan-based everywhere. PR 33 proceeds unchanged in shape, but the backend
-is Vulkan, not Metal — and offload thresholds are per-platform (unified-memory vs discrete
-GPU crossover differs). Phase 5 of the ROADMAP is now "Platform Integration Layers".
+is Vulkan, not Metal — and offload thresholds are per-platform. The first-class offload
+targets are unified-memory machines: Apple silicon AND Nvidia Grace Blackwell (DGX Spark
+GB10), where Borsalino dispatch is already tuned and shows considerable compute gains;
+PCIe-discrete GPUs shift the crossover to larger N. Phase 5 of the ROADMAP is now "Platform
+Integration Layers".
 
 ## Guardrails / explicit non-goals
 
