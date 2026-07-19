@@ -11,8 +11,9 @@ use crate::binary::instr::{DecodedInstr, Instr, decode_instr_sequence_with_offse
 use crate::binary::module::Module;
 use crate::error::{ByteOffset, DecodeContext, DecodeErrorKind};
 use crate::types::{
-    BlockType, CodeBody, DataMode, ExportDesc, FuncIdx, FuncType, GlobalIdx, ImportDesc, LabelIdx,
-    LocalDecl, LocalIdx, MemArg, MemIdx, MemType, Mutability, NumType, TypeIdx, ValType,
+    BlockType, CodeBody, DataMode, ElemIdx, ElementInit, ElementMode, ExportDesc, FuncIdx,
+    FuncType, GlobalIdx, ImportDesc, LabelIdx, LocalDecl, LocalIdx, MemArg, MemIdx, MemType,
+    Mutability, NumType, TableIdx, TableType, TypeIdx, ValType,
 };
 use crate::validate;
 use crate::validate::error::{ValidationError, ValidationErrorKind};
@@ -40,12 +41,51 @@ pub struct RegModule {
     pub memories: Vec<MemType>,
     /// Defined globals, initialized in declaration order at instantiation.
     pub globals: Vec<RegGlobal>,
+    /// Defined tables (instantiated as null-filled reference arrays).
+    pub tables: Vec<TableType>,
+    /// Element segments in index order; mode decides instantiation behavior.
+    pub elements: Vec<RegElement>,
+    /// All function types in the module's type section, for structural
+    /// `call_indirect` type checks.
+    pub types: Vec<FuncType>,
     /// Active data segments applied to memory at instantiation.
     pub data: Vec<RegDataSegment>,
     /// Number of imported memories (runtime access is not yet supported).
     pub imported_memory_count: u32,
     /// Number of imported globals (runtime access is not yet supported).
     pub imported_global_count: u32,
+    /// Number of imported tables (runtime access is not yet supported).
+    pub imported_table_count: u32,
+}
+
+/// An element segment in lowered register IR.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegElement {
+    pub mode: RegElementMode,
+    /// Element values (funcref indices or nulls), in order.
+    pub values: Vec<RegElemValue>,
+}
+
+/// Instantiation behavior of an element segment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegElementMode {
+    /// Written into the table at instantiation.
+    Active {
+        table: TableIdx,
+        offset: Vec<RegConstInstr>,
+    },
+    /// Retained for `table.init` until dropped.
+    Passive,
+    /// Declarative: only declares functions for `ref.func`; never usable
+    /// at runtime.
+    Dropped,
+}
+
+/// One element value in a segment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegElemValue {
+    FuncRef(FuncIdx),
+    Null,
 }
 
 /// A defined global in lowered register IR.
@@ -265,6 +305,80 @@ pub enum RegOp {
         dst: Reg,
         memory: MemIdx,
         delta: Reg,
+    },
+    /// Indirect call through a table (`call_indirect`).
+    CallIndirect {
+        type_idx: TypeIdx,
+        table: TableIdx,
+        index: Reg,
+        args: Vec<Reg>,
+        results: Vec<Reg>,
+    },
+    /// `table.get`: dst = table[index].
+    TableGet {
+        dst: Reg,
+        table: TableIdx,
+        index: Reg,
+    },
+    /// `table.set`: table[index] = value.
+    TableSet {
+        table: TableIdx,
+        index: Reg,
+        value: Reg,
+    },
+    /// `table.size`.
+    TableSize {
+        dst: Reg,
+        table: TableIdx,
+    },
+    /// `table.grow`: grow by delta, filling with `value`; dst = previous
+    /// size or -1 on failure.
+    TableGrow {
+        dst: Reg,
+        table: TableIdx,
+        value: Reg,
+        delta: Reg,
+    },
+    /// `table.fill`: table[dst..dst+count] = value.
+    TableFill {
+        table: TableIdx,
+        dst: Reg,
+        value: Reg,
+        count: Reg,
+    },
+    /// `table.copy`: dst_table[dst..] = src_table[src..] over count.
+    TableCopy {
+        dst_table: TableIdx,
+        src_table: TableIdx,
+        dst: Reg,
+        src: Reg,
+        count: Reg,
+    },
+    /// `table.init`: table[dst..] = elem[src..] over count.
+    TableInit {
+        table: TableIdx,
+        elem: ElemIdx,
+        dst: Reg,
+        src: Reg,
+        count: Reg,
+    },
+    /// `elem.drop`: drop the element segment's runtime storage.
+    ElemDrop {
+        elem: ElemIdx,
+    },
+    /// `ref.null`: produce a null reference.
+    RefNull {
+        dst: Reg,
+    },
+    /// `ref.func`: produce a function reference.
+    RefFunc {
+        dst: Reg,
+        func: FuncIdx,
+    },
+    /// `ref.is_null`: dst = 1 when the reference is null, else 0.
+    RefIsNull {
+        dst: Reg,
+        value: Reg,
     },
 }
 
@@ -986,6 +1100,12 @@ pub enum LowerErrorKind {
     InvalidGlobal {
         global: u32,
     },
+    InvalidTable {
+        table: u32,
+    },
+    InvalidType {
+        type_idx: u32,
+    },
     UnexpectedElse,
     MissingFunctionEnd,
 }
@@ -1014,20 +1134,28 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
     let imported_func_count = module.imported_function_count() as u32;
     let func_types = func_type_table(module);
     let global_types = global_type_table(module);
+    let table_elem_types: Vec<crate::types::RefType> = module
+        .imports()
+        .iter()
+        .filter_map(|import| match import.desc {
+            ImportDesc::Table(table) => Some(table.elem),
+            _ => None,
+        })
+        .chain(module.tables().iter().map(|table| table.elem))
+        .collect();
+    let tables = ModuleTables {
+        func_types: &func_types,
+        global_types: &global_types,
+        types: module.types(),
+        table_elem_types: &table_elem_types,
+    };
     let mut funcs = Vec::new();
 
     for (defined_idx, (type_idx, code)) in module.functions().iter().zip(module.codes()).enumerate()
     {
         let func_idx = FuncIdx(imported_func_count + defined_idx as u32);
         let ty = &module.types()[type_idx.0 as usize];
-        funcs.push(lower_function(
-            func_idx,
-            *type_idx,
-            ty,
-            code,
-            &func_types,
-            &global_types,
-        )?);
+        funcs.push(lower_function(func_idx, *type_idx, ty, code, &tables)?);
     }
 
     let imported_memory_count = module
@@ -1068,6 +1196,43 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
         }
     }
 
+    let imported_table_count = module
+        .imports()
+        .iter()
+        .filter(|import| matches!(import.desc, ImportDesc::Table(_)))
+        .count() as u32;
+
+    let tables = module.tables().to_vec();
+    let types = module.types().to_vec();
+
+    let mut elements = Vec::with_capacity(module.elements().len());
+    for segment in module.elements() {
+        let mut values = Vec::new();
+        match &segment.init {
+            ElementInit::FuncIndices(funcs) => {
+                values.extend(funcs.iter().map(|func| RegElemValue::FuncRef(*func)));
+            }
+            ElementInit::Expressions(exprs) => {
+                for expr in exprs {
+                    values.push(lower_element_expr(expr)?);
+                }
+            }
+        }
+        let mode = match &segment.mode {
+            ElementMode::Active {
+                table,
+                offset_expr,
+                offset_offset,
+            } => RegElementMode::Active {
+                table: *table,
+                offset: lower_const_expr(offset_expr, *offset_offset)?,
+            },
+            ElementMode::Passive => RegElementMode::Passive,
+            ElementMode::Declarative => RegElementMode::Dropped,
+        };
+        elements.push(RegElement { mode, values });
+    }
+
     let exports = module
         .exports()
         .iter()
@@ -1086,10 +1251,49 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
         imported_func_count,
         memories,
         globals,
+        tables,
+        elements,
+        types,
         data,
         imported_memory_count,
         imported_global_count,
+        imported_table_count,
     })
+}
+
+/// Lower one element-segment initializer expression to a funcref value.
+/// Only `ref.func`/`ref.null` are supported at runtime (other const
+/// expressions require host-provided imports).
+fn lower_element_expr(expr: &crate::types::ElementExpr<'_>) -> Result<RegElemValue, LowerError> {
+    let instrs =
+        decode_instr_sequence_with_offsets(expr.expr, expr.offset).map_err(|error| LowerError {
+            offset: error.offset,
+            function: None,
+            kind: LowerErrorKind::Decode {
+                context: error.context,
+                kind: error.kind,
+            },
+        })?;
+    match instrs.as_slice() {
+        [first, last] if matches!(last.instr, Instr::End) => match first.instr {
+            Instr::RefFunc(func) => Ok(RegElemValue::FuncRef(func)),
+            Instr::RefNull(_) => Ok(RegElemValue::Null),
+            ref other => Err(LowerError {
+                offset: first.offset,
+                function: None,
+                kind: LowerErrorKind::UnsupportedInstr {
+                    op: instr_name(other),
+                },
+            }),
+        },
+        _ => Err(LowerError {
+            offset: ByteOffset(expr.offset),
+            function: None,
+            kind: LowerErrorKind::UnsupportedInstr {
+                op: "multi-instruction element expression",
+            },
+        }),
+    }
 }
 
 /// Lower a constant expression (global initializer, data segment offset)
@@ -1175,8 +1379,7 @@ fn lower_function(
     type_idx: TypeIdx,
     ty: &FuncType,
     code: &CodeBody<'_>,
-    func_types: &[&FuncType],
-    global_types: &[ValType],
+    tables: &ModuleTables<'_>,
 ) -> Result<RegFunc, LowerError> {
     let instrs = code
         .instructions_with_offsets()
@@ -1190,7 +1393,7 @@ fn lower_function(
         })?;
 
     let locals = local_types(ty, code.locals.as_slice());
-    let mut builder = FuncBuilder::new(func_idx, type_idx, ty, locals, func_types, global_types);
+    let mut builder = FuncBuilder::new(func_idx, type_idx, ty, locals, tables);
 
     for decoded in instrs {
         if builder.lower_instr(decoded)? {
@@ -1230,12 +1433,8 @@ struct FuncBuilder<'b> {
     reg_types: Vec<ValType>,
     blocks: Vec<RegBlock>,
     current_instrs: Vec<RegInstr>,
-    /// Function types for the whole index space (imported first), used to
-    /// type direct calls.
-    func_types: &'b [&'b FuncType],
-    /// Global value types for the whole index space (imported first), used
-    /// to type `global.get`/`global.set`.
-    global_types: &'b [ValType],
+    /// Shared module-level tables used while lowering function bodies.
+    tables: &'b ModuleTables<'b>,
     /// Stack of active block/loop/if frames. Each entry records the label of
     /// the block that should follow the `end` of this control structure.
     label_stack: Vec<LabelFrame>,
@@ -1284,6 +1483,16 @@ struct LabelFrame {
     unreachable: bool,
 }
 
+/// Module-level index-space tables shared by every function lowering:
+/// function types, global types, the type section, and table element
+/// types (all imported-first where an index space applies).
+struct ModuleTables<'a> {
+    func_types: &'a [&'a FuncType],
+    global_types: &'a [ValType],
+    types: &'a [FuncType],
+    table_elem_types: &'a [crate::types::RefType],
+}
+
 /// The kind of control structure a label frame describes.
 enum FrameKind {
     /// `block` (or the implicit function body frame).
@@ -1301,8 +1510,7 @@ impl<'b> FuncBuilder<'b> {
         type_idx: TypeIdx,
         ty: &FuncType,
         locals: Vec<ValType>,
-        func_types: &'b [&'b FuncType],
-        global_types: &'b [ValType],
+        tables: &'b ModuleTables<'b>,
     ) -> Self {
         // The function body itself is label 0, targeting a block that will
         // receive function-end returns (created on demand).
@@ -1325,8 +1533,7 @@ impl<'b> FuncBuilder<'b> {
                 unreachable: false,
             }],
             pending_branches: Vec::new(),
-            func_types,
-            global_types,
+            tables,
         }
     }
 
@@ -1809,7 +2016,7 @@ impl<'b> FuncBuilder<'b> {
                 self.set_unreachable();
             }
             Instr::Call(func) => {
-                let Some(callee_ty) = self.func_types.get(func.0 as usize) else {
+                let Some(callee_ty) = self.tables.func_types.get(func.0 as usize) else {
                     return Err(LowerError {
                         offset,
                         function: Some(self.func_idx),
@@ -1871,6 +2078,174 @@ impl<'b> FuncBuilder<'b> {
                         dst,
                         memory,
                         delta: delta.reg,
+                    },
+                );
+            }
+            Instr::CallIndirect {
+                type_idx,
+                table_idx,
+            } => {
+                let Some(ty) = self.tables.types.get(type_idx.0 as usize) else {
+                    return Err(LowerError {
+                        offset,
+                        function: Some(self.func_idx),
+                        kind: LowerErrorKind::InvalidType {
+                            type_idx: type_idx.0,
+                        },
+                    });
+                };
+                let index = self.pop_expect(offset, "call_indirect", ValType::Num(NumType::I32))?;
+                let mut args = Vec::with_capacity(ty.params.len());
+                for &expected in ty.params.iter().rev() {
+                    let found = self.pop_expect(offset, "call_indirect", expected)?;
+                    args.push(found.reg);
+                }
+                args.reverse();
+                let mut results = Vec::with_capacity(ty.results.len());
+                for &result_ty in ty.results.iter() {
+                    let dst = self.alloc_reg(result_ty);
+                    self.stack.push(RegValue {
+                        reg: dst,
+                        ty: result_ty,
+                    });
+                    results.push(dst);
+                }
+                self.emit(
+                    offset,
+                    RegOp::CallIndirect {
+                        type_idx,
+                        table: table_idx,
+                        index: index.reg,
+                        args,
+                        results,
+                    },
+                );
+            }
+            Instr::TableGet(table) => {
+                let index = self.pop_expect(offset, "table.get", ValType::Num(NumType::I32))?;
+                let ty = ValType::Ref(self.table_elem_type(offset, table)?);
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(
+                    offset,
+                    RegOp::TableGet {
+                        dst,
+                        table,
+                        index: index.reg,
+                    },
+                );
+            }
+            Instr::TableSet(table) => {
+                let ty = ValType::Ref(self.table_elem_type(offset, table)?);
+                let value = self.pop_expect(offset, "table.set", ty)?;
+                let index = self.pop_expect(offset, "table.set", ValType::Num(NumType::I32))?;
+                self.emit(
+                    offset,
+                    RegOp::TableSet {
+                        table,
+                        index: index.reg,
+                        value: value.reg,
+                    },
+                );
+            }
+            Instr::TableSize(table) => {
+                let ty = ValType::Num(NumType::I32);
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(offset, RegOp::TableSize { dst, table });
+            }
+            Instr::TableGrow(table) => {
+                let delta = self.pop_expect(offset, "table.grow", ValType::Num(NumType::I32))?;
+                let elem_ty = ValType::Ref(self.table_elem_type(offset, table)?);
+                let value = self.pop_expect(offset, "table.grow", elem_ty)?;
+                let ty = ValType::Num(NumType::I32);
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(
+                    offset,
+                    RegOp::TableGrow {
+                        dst,
+                        table,
+                        value: value.reg,
+                        delta: delta.reg,
+                    },
+                );
+            }
+            Instr::TableFill(table) => {
+                let count = self.pop_expect(offset, "table.fill", ValType::Num(NumType::I32))?;
+                let elem_ty = ValType::Ref(self.table_elem_type(offset, table)?);
+                let value = self.pop_expect(offset, "table.fill", elem_ty)?;
+                let dst_idx = self.pop_expect(offset, "table.fill", ValType::Num(NumType::I32))?;
+                self.emit(
+                    offset,
+                    RegOp::TableFill {
+                        table,
+                        dst: dst_idx.reg,
+                        value: value.reg,
+                        count: count.reg,
+                    },
+                );
+            }
+            Instr::TableCopy { dst, src } => {
+                let count = self.pop_expect(offset, "table.copy", ValType::Num(NumType::I32))?;
+                let src_idx = self.pop_expect(offset, "table.copy", ValType::Num(NumType::I32))?;
+                let dst_idx = self.pop_expect(offset, "table.copy", ValType::Num(NumType::I32))?;
+                self.emit(
+                    offset,
+                    RegOp::TableCopy {
+                        dst_table: dst,
+                        src_table: src,
+                        dst: dst_idx.reg,
+                        src: src_idx.reg,
+                        count: count.reg,
+                    },
+                );
+            }
+            Instr::TableInit {
+                elem_idx,
+                table_idx,
+            } => {
+                let count = self.pop_expect(offset, "table.init", ValType::Num(NumType::I32))?;
+                let src = self.pop_expect(offset, "table.init", ValType::Num(NumType::I32))?;
+                let dst = self.pop_expect(offset, "table.init", ValType::Num(NumType::I32))?;
+                self.emit(
+                    offset,
+                    RegOp::TableInit {
+                        table: table_idx,
+                        elem: elem_idx,
+                        dst: dst.reg,
+                        src: src.reg,
+                        count: count.reg,
+                    },
+                );
+            }
+            Instr::ElemDrop(elem) => {
+                self.emit(offset, RegOp::ElemDrop { elem });
+            }
+            Instr::RefNull(ref_type) => {
+                let ty = ValType::Ref(ref_type);
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(offset, RegOp::RefNull { dst });
+            }
+            Instr::RefFunc(func) => {
+                // Lowered as the nullable funcref type; the validator has
+                // already proven the precise (non-null) type.
+                let ty = ValType::Ref(crate::types::RefType::FuncRef);
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(offset, RegOp::RefFunc { dst, func });
+            }
+            Instr::RefIsNull => {
+                let value = self.pop_any(offset, "ref.is_null")?;
+                let ty = ValType::Num(NumType::I32);
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(
+                    offset,
+                    RegOp::RefIsNull {
+                        dst,
+                        value: value.reg,
                     },
                 );
             }
@@ -2006,13 +2381,30 @@ impl<'b> FuncBuilder<'b> {
     }
 
     fn global_type(&self, offset: ByteOffset, global: GlobalIdx) -> Result<ValType, LowerError> {
-        self.global_types
+        self.tables
+            .global_types
             .get(global.0 as usize)
             .copied()
             .ok_or(LowerError {
                 offset,
                 function: Some(self.func_idx),
                 kind: LowerErrorKind::InvalidGlobal { global: global.0 },
+            })
+    }
+
+    fn table_elem_type(
+        &self,
+        offset: ByteOffset,
+        table: TableIdx,
+    ) -> Result<crate::types::RefType, LowerError> {
+        self.tables
+            .table_elem_types
+            .get(table.0 as usize)
+            .copied()
+            .ok_or(LowerError {
+                offset,
+                function: Some(self.func_idx),
+                kind: LowerErrorKind::InvalidTable { table: table.0 },
             })
     }
 
@@ -3335,6 +3727,112 @@ mod tests {
         assert_eq!(
             run_wat_export(source, "bump", &[]),
             Ok(vec![crate::runtime::Value::I32(11)])
+        );
+    }
+
+    #[test]
+    fn lower_call_indirect_shape() {
+        let reg_module = lower_wat(
+            "(module
+               (type $t (func (param i32) (result i32)))
+               (table 1 funcref)
+               (func (export \"apply\") (param i32 i32) (result i32)
+                 local.get 1
+                 local.get 0
+                 call_indirect (type $t)))",
+        );
+        let func = &reg_module.funcs[0];
+        let call = func.blocks[0]
+            .instrs
+            .iter()
+            .find_map(|instr| match &instr.op {
+                RegOp::CallIndirect {
+                    type_idx,
+                    table,
+                    args,
+                    results,
+                    ..
+                } => Some((type_idx, table, args, results)),
+                _ => None,
+            })
+            .expect("expected a CallIndirect op");
+        assert_eq!(*call.0, TypeIdx(0));
+        assert_eq!(*call.1, TableIdx(0));
+        assert_eq!(call.2.as_slice(), &[Reg(0)]);
+        assert_eq!(call.3.as_slice(), &[Reg(2)]);
+    }
+
+    #[test]
+    fn execute_call_indirect_and_traps() {
+        let source = "(module
+            (type $t (func (result i32)))
+            (table 2 funcref)
+            (func $f (type $t) i32.const 42)
+            (elem (i32.const 0) $f)
+            (func (export \"go\") (param i32) (result i32)
+              local.get 0
+              call_indirect (type $t)))";
+        assert_eq!(
+            run_wat_export(source, "go", &[crate::runtime::Value::I32(0)]),
+            Ok(vec![crate::runtime::Value::I32(42)])
+        );
+        // Null slot.
+        let error = run_wat_export(source, "go", &[crate::runtime::Value::I32(1)])
+            .expect_err("expected uninitialized element trap");
+        assert_eq!(
+            error.kind,
+            crate::runtime::RuntimeErrorKind::Trap(
+                crate::runtime::RuntimeTrap::UninitializedElement
+            )
+        );
+        // Out of bounds.
+        let error = run_wat_export(source, "go", &[crate::runtime::Value::I32(7)])
+            .expect_err("expected undefined element trap");
+        assert_eq!(
+            error.kind,
+            crate::runtime::RuntimeErrorKind::Trap(crate::runtime::RuntimeTrap::UndefinedElement)
+        );
+    }
+
+    #[test]
+    fn execute_table_grow_fill_copy() {
+        let source = "(module
+            (type $t (func (result i32)))
+            (table 1 funcref)
+            (func $f (type $t) i32.const 9)
+            (elem declare func $f)
+            (func (export \"go\") (param i32) (result i32)
+              local.get 0
+              call_indirect (type $t))
+            (func (export \"setup\") (result i32)
+              ref.func $f
+              i32.const 2
+              table.grow
+              drop
+              i32.const 1
+              ref.func $f
+              i32.const 2
+              table.fill
+              i32.const 1
+              i32.const 2
+              i32.const 1
+              table.copy
+              table.size))";
+        // After setup: [null, f, f] (grow 2, fill 2 from 1, copy [1..2] to 2).
+        let reg_module = lower_wat(source);
+        let mut store = crate::runtime::Store::instantiate(&reg_module).unwrap();
+        assert_eq!(
+            crate::runtime::execute_export(&reg_module, &mut store, "setup", &[]),
+            Ok(vec![crate::runtime::Value::I32(3)])
+        );
+        assert_eq!(
+            crate::runtime::execute_export(
+                &reg_module,
+                &mut store,
+                "go",
+                &[crate::runtime::Value::I32(2)],
+            ),
+            Ok(vec![crate::runtime::Value::I32(9)])
         );
     }
 
