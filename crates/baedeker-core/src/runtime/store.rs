@@ -3,9 +3,9 @@
 
 use alloc::vec::Vec;
 
-use crate::lower::{RegConstInstr, RegModule};
+use crate::lower::{RegConstInstr, RegElemValue, RegElementMode, RegModule};
 use crate::runtime::{RuntimeError, RuntimeErrorKind, RuntimeTrap, Value, trap};
-use crate::types::MemType;
+use crate::types::{MemType, TableType};
 
 /// Size of one WebAssembly memory page in bytes.
 pub const PAGE_SIZE: usize = 65536;
@@ -19,8 +19,14 @@ pub struct Store {
     memories: Vec<Vec<u8>>,
     memory_types: Vec<MemType>,
     globals: Vec<Value>,
+    tables: Vec<Vec<Value>>,
+    table_types: Vec<TableType>,
+    /// Element segment storage; `None` after the segment is dropped (or was
+    /// active/declarative at instantiation).
+    elements: Vec<Option<Vec<Value>>>,
     imported_memory_count: u32,
     imported_global_count: u32,
+    imported_table_count: u32,
 }
 
 impl Store {
@@ -44,13 +50,62 @@ impl Store {
             .collect();
         let memory_types = module.memories.clone();
 
+        let tables = module
+            .tables
+            .iter()
+            .map(|table| alloc::vec![Value::FuncRef(None); table.limits.min as usize])
+            .collect();
+        let table_types = module.tables.clone();
+
         let mut store = Self {
             memories,
             memory_types,
             globals,
+            tables,
+            table_types,
+            elements: alloc::vec![None; module.elements.len()],
             imported_memory_count: module.imported_memory_count,
             imported_global_count: module.imported_global_count,
+            imported_table_count: module.imported_table_count,
         };
+
+        // Element segments: active ones are written into their tables (and
+        // dropped); passive ones are retained for `table.init`.
+        for (idx, segment) in module.elements.iter().enumerate() {
+            let values: Vec<Value> = segment
+                .values
+                .iter()
+                .map(|value| match *value {
+                    RegElemValue::FuncRef(func) => Value::FuncRef(Some(func.0)),
+                    RegElemValue::Null => Value::FuncRef(None),
+                })
+                .collect();
+            match &segment.mode {
+                RegElementMode::Active { table, offset } => {
+                    let offset = eval_const(offset, &store.globals, store.imported_global_count)?;
+                    let Value::I32(offset) = offset else {
+                        return Err(RuntimeError {
+                            kind: RuntimeErrorKind::InvalidConstExpr,
+                        });
+                    };
+                    let target = store.table_mut(table.0).ok_or(RuntimeError {
+                        kind: RuntimeErrorKind::UnknownTable { table: table.0 },
+                    })?;
+                    let start = offset as usize;
+                    let Some(end) = start.checked_add(values.len()) else {
+                        return Err(trap(RuntimeTrap::OutOfBoundsTableAccess));
+                    };
+                    if end > target.len() {
+                        return Err(trap(RuntimeTrap::OutOfBoundsTableAccess));
+                    }
+                    target[start..end].copy_from_slice(&values);
+                }
+                RegElementMode::Passive => {
+                    store.elements[idx] = Some(values);
+                }
+                RegElementMode::Dropped => {}
+            }
+        }
 
         for segment in &module.data {
             let offset = eval_const(&segment.offset, &store.globals, store.imported_global_count)?;
@@ -112,6 +167,41 @@ impl Store {
     /// Whether an index-space global index refers to an imported global.
     pub(crate) fn is_imported_global(&self, idx: u32) -> bool {
         idx < self.imported_global_count
+    }
+
+    /// Shared access to a defined table by index-space index.
+    pub(crate) fn table(&self, idx: u32) -> Option<&Vec<Value>> {
+        let defined = idx.checked_sub(self.imported_table_count)? as usize;
+        self.tables.get(defined)
+    }
+
+    /// Mutable access to a defined table by index-space index.
+    pub(crate) fn table_mut(&mut self, idx: u32) -> Option<&mut Vec<Value>> {
+        let defined = idx.checked_sub(self.imported_table_count)? as usize;
+        self.tables.get_mut(defined)
+    }
+
+    /// The declared type of a defined table (for grow limits).
+    pub(crate) fn table_type(&self, idx: u32) -> Option<&TableType> {
+        let defined = idx.checked_sub(self.imported_table_count)? as usize;
+        self.table_types.get(defined)
+    }
+
+    /// Whether an index-space table index refers to an imported table.
+    pub(crate) fn is_imported_table(&self, idx: u32) -> bool {
+        idx < self.imported_table_count
+    }
+
+    /// Shared access to a retained element segment.
+    pub(crate) fn elem(&self, idx: u32) -> Option<&Option<Vec<Value>>> {
+        self.elements.get(idx as usize)
+    }
+
+    /// Drop an element segment's storage.
+    pub(crate) fn drop_elem(&mut self, idx: u32) -> Option<()> {
+        let slot = self.elements.get_mut(idx as usize)?;
+        *slot = None;
+        Some(())
     }
 
     /// Read a defined global's current value (embedding/debug access).

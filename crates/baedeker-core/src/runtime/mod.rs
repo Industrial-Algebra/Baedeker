@@ -11,7 +11,7 @@ mod store;
 pub use store::{PAGE_SIZE, Store};
 
 use crate::lower::{BinaryOp, Reg, RegFunc, RegInstr, RegModule, RegOp, RegTerm, UnaryOp};
-use crate::types::{FuncIdx, MemArg, NumType, ValType};
+use crate::types::{FuncIdx, MemArg, NumType, RefType, TableIdx, ValType};
 
 /// A runtime WebAssembly value.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -20,6 +20,10 @@ pub enum Value {
     I64(i64),
     F32(f32),
     F64(f64),
+    /// A reference value: either null or a function index. Until host
+    /// support lands, null also represents every `externref` value (the
+    /// runtime cannot produce non-null externrefs yet).
+    FuncRef(Option<u32>),
 }
 
 impl Value {
@@ -29,6 +33,7 @@ impl Value {
             Value::I64(_) => ValType::Num(NumType::I64),
             Value::F32(_) => ValType::Num(NumType::F32),
             Value::F64(_) => ValType::Num(NumType::F64),
+            Value::FuncRef(_) => ValType::Ref(RefType::FuncRef),
         }
     }
 }
@@ -54,8 +59,12 @@ pub enum RuntimeErrorKind {
     ImportedFunctionCallUnsupported { func: u32 },
     UnknownMemory { memory: u32 },
     UnknownGlobal { global: u32 },
+    UnknownTable { table: u32 },
+    UnknownElem { elem: u32 },
+    UnknownType { type_idx: u32 },
     ImportedMemoryAccessUnsupported { memory: u32 },
     ImportedGlobalAccessUnsupported { global: u32 },
+    ImportedTableAccessUnsupported { table: u32 },
     InvalidConstExpr,
     MissingStore,
     MissingReturn,
@@ -67,6 +76,10 @@ pub enum RuntimeTrap {
     Unreachable,
     CallStackExhausted,
     OutOfBoundsMemoryAccess,
+    OutOfBoundsTableAccess,
+    UndefinedElement,
+    UninitializedElement,
+    IndirectCallTypeMismatch,
     IntegerDivideByZero,
     IntegerOverflow,
     InvalidConversionToInteger,
@@ -79,6 +92,10 @@ impl RuntimeTrap {
             RuntimeTrap::Unreachable => "unreachable",
             RuntimeTrap::CallStackExhausted => "call stack exhausted",
             RuntimeTrap::OutOfBoundsMemoryAccess => "out of bounds memory access",
+            RuntimeTrap::OutOfBoundsTableAccess => "out of bounds table access",
+            RuntimeTrap::UndefinedElement => "undefined element",
+            RuntimeTrap::UninitializedElement => "uninitialized element",
+            RuntimeTrap::IndirectCallTypeMismatch => "indirect call type mismatch",
             RuntimeTrap::IntegerDivideByZero => "integer divide by zero",
             RuntimeTrap::IntegerOverflow => "integer overflow",
             RuntimeTrap::InvalidConversionToInteger => "invalid conversion to integer",
@@ -141,6 +158,79 @@ fn execute_call(
     execute_func_in(Some(module), store, callee, call_args, depth + 1)
 }
 
+/// Resolve and invoke an indirect call target through a table.
+#[allow(clippy::too_many_arguments)]
+fn execute_call_indirect(
+    module: Option<&RegModule>,
+    store: Option<&mut Store>,
+    type_idx: &crate::types::TypeIdx,
+    table: &TableIdx,
+    idx: u32,
+    call_args: &[Value],
+    depth: usize,
+) -> Result<Vec<Value>, RuntimeError> {
+    let module = module.ok_or(RuntimeError {
+        kind: RuntimeErrorKind::UnknownFunction { func: 0 },
+    })?;
+    let store = store.ok_or(RuntimeError {
+        kind: RuntimeErrorKind::MissingStore,
+    })?;
+    if store.is_imported_table(table.0) {
+        return Err(RuntimeError {
+            kind: RuntimeErrorKind::ImportedTableAccessUnsupported { table: table.0 },
+        });
+    }
+    let target = store
+        .table(table.0)
+        .ok_or(RuntimeError {
+            kind: RuntimeErrorKind::UnknownTable { table: table.0 },
+        })?
+        .get(idx as usize)
+        .copied()
+        .ok_or(trap(RuntimeTrap::UndefinedElement))?;
+    let Value::FuncRef(func_idx) = target else {
+        return Err(RuntimeError {
+            kind: RuntimeErrorKind::TypeMismatch {
+                expected: ValType::Ref(RefType::FuncRef),
+                found: target.val_type(),
+            },
+        });
+    };
+    let Some(func_idx) = func_idx else {
+        return Err(trap(RuntimeTrap::UninitializedElement));
+    };
+    if func_idx < module.imported_func_count {
+        return Err(RuntimeError {
+            kind: RuntimeErrorKind::ImportedFunctionCallUnsupported { func: func_idx },
+        });
+    }
+    let callee = module
+        .funcs
+        .iter()
+        .find(|func| func.idx.0 == func_idx)
+        .ok_or(RuntimeError {
+            kind: RuntimeErrorKind::UnknownFunction { func: func_idx },
+        })?;
+    // Structural type check: the callee's type must match the declared one.
+    let expected = module.types.get(type_idx.0 as usize).ok_or(RuntimeError {
+        kind: RuntimeErrorKind::UnknownType {
+            type_idx: type_idx.0,
+        },
+    })?;
+    let actual = module
+        .types
+        .get(callee.type_idx.0 as usize)
+        .ok_or(RuntimeError {
+            kind: RuntimeErrorKind::UnknownType {
+                type_idx: callee.type_idx.0,
+            },
+        })?;
+    if expected != actual {
+        return Err(trap(RuntimeTrap::IndirectCallTypeMismatch));
+    }
+    execute_func_in(Some(module), Some(store), callee, call_args, depth + 1)
+}
+
 /// Maximum call depth before the interpreter traps with stack exhaustion.
 /// Bounded so that unbounded recursion exhausts the interpreter before the
 /// host thread's stack does (test threads run with small stacks).
@@ -190,7 +280,8 @@ fn execute_func_in(
     for (idx, &arg) in args.iter().enumerate() {
         locals[idx] = Some(arg);
     }
-    // Non-parameter locals are zero-initialized per the spec.
+    // Non-parameter locals are zero-initialized per spec (null for
+    // nullable references).
     for (slot, &ty) in locals.iter_mut().zip(func.locals.iter()).skip(args.len()) {
         if slot.is_none() {
             *slot = match ty {
@@ -198,6 +289,7 @@ fn execute_func_in(
                 ValType::Num(NumType::I64) => Some(Value::I64(0)),
                 ValType::Num(NumType::F32) => Some(Value::F32(0.0)),
                 ValType::Num(NumType::F64) => Some(Value::F64(0.0)),
+                ValType::Ref(ref_type) if ref_nullable(&ref_type) => Some(Value::FuncRef(None)),
                 _ => None,
             };
         }
@@ -242,6 +334,31 @@ fn execute_func_in(
                     .collect::<Result<Vec<_>, _>>()?;
                 let returned =
                     execute_call(module, store.as_deref_mut(), callee_idx, &call_args, depth)?;
+                for (&dst, value) in results.iter().zip(returned) {
+                    set_reg(&mut registers, dst, value)?;
+                }
+            } else if let RegOp::CallIndirect {
+                type_idx,
+                table,
+                index,
+                args: arg_regs,
+                results,
+            } = &instr.op
+            {
+                let idx = expect_addr(get_reg(&registers, *index)?)?;
+                let call_args = arg_regs
+                    .iter()
+                    .map(|&reg| get_reg(&registers, reg))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let returned = execute_call_indirect(
+                    module,
+                    store.as_deref_mut(),
+                    type_idx,
+                    table,
+                    idx,
+                    &call_args,
+                    depth,
+                )?;
                 for (&dst, value) in results.iter().zip(returned) {
                     set_reg(&mut registers, dst, value)?;
                 }
@@ -381,6 +498,12 @@ fn execute_reg_op(
             // context; reaching this arm means there was none.
             return Err(RuntimeError {
                 kind: RuntimeErrorKind::UnknownFunction { func: func.0 },
+            });
+        }
+        RegOp::CallIndirect { .. } => {
+            // Same, but without a direct function index to report.
+            return Err(RuntimeError {
+                kind: RuntimeErrorKind::UnknownFunction { func: 0 },
             });
         }
         RegOp::Load {
@@ -541,8 +664,184 @@ fn execute_reg_op(
             };
             set_reg(registers, *dst, Value::I32(result))?;
         }
+        RegOp::TableGet { dst, table, index } => {
+            let store = require_store(store)?;
+            let idx = expect_addr(get_reg(registers, *index)?)?;
+            let value = table_slot(store, *table, idx)?;
+            set_reg(registers, *dst, *value)?;
+        }
+        RegOp::TableSet {
+            table,
+            index,
+            value,
+        } => {
+            let store = require_store(store)?;
+            let idx = expect_addr(get_reg(registers, *index)?)?;
+            let value = get_reg(registers, *value)?;
+            let slot = table_slot_mut(store, *table, idx)?;
+            *slot = value;
+        }
+        RegOp::TableSize { dst, table } => {
+            let store = require_store(store)?;
+            let len = defined_table(store, table.0)?.len();
+            set_reg(registers, *dst, Value::I32(len as i32))?;
+        }
+        RegOp::TableGrow {
+            dst,
+            table,
+            value,
+            delta,
+        } => {
+            let store = require_store(store)?;
+            let delta = expect_addr(get_reg(registers, *delta)?)?;
+            let value = get_reg(registers, *value)?;
+            let max = store
+                .table_type(table.0)
+                .and_then(|ty| ty.limits.max)
+                .map(|max| max as usize)
+                .unwrap_or(usize::MAX);
+            let tbl = defined_table_mut(store, table.0)?;
+            let old = tbl.len();
+            let result = match old.checked_add(delta as usize) {
+                Some(new) if new <= max => {
+                    tbl.resize(new, value);
+                    old as i32
+                }
+                _ => -1,
+            };
+            set_reg(registers, *dst, Value::I32(result))?;
+        }
+        RegOp::TableFill {
+            table,
+            dst,
+            value,
+            count,
+        } => {
+            let store = require_store(store)?;
+            let dst = expect_addr(get_reg(registers, *dst)?)? as usize;
+            let count = expect_addr(get_reg(registers, *count)?)? as usize;
+            let value = get_reg(registers, *value)?;
+            let tbl = defined_table_mut(store, table.0)?;
+            let Some(end) = dst.checked_add(count) else {
+                return Err(trap(RuntimeTrap::OutOfBoundsTableAccess));
+            };
+            if end > tbl.len() {
+                return Err(trap(RuntimeTrap::OutOfBoundsTableAccess));
+            }
+            tbl[dst..end].fill(value);
+        }
+        RegOp::TableCopy {
+            dst_table,
+            src_table,
+            dst,
+            src,
+            count,
+        } => {
+            let store = require_store(store)?;
+            let dst = expect_addr(get_reg(registers, *dst)?)? as usize;
+            let src = expect_addr(get_reg(registers, *src)?)? as usize;
+            let count = expect_addr(get_reg(registers, *count)?)? as usize;
+            // Bounds-check both ranges before copying (via a temporary, so
+            // overlapping copies within one table behave per spec).
+            let src_len = defined_table(store, src_table.0)?.len();
+            let dst_len = defined_table(store, dst_table.0)?.len();
+            let (Some(src_end), Some(dst_end)) = (src.checked_add(count), dst.checked_add(count))
+            else {
+                return Err(trap(RuntimeTrap::OutOfBoundsTableAccess));
+            };
+            if src_end > src_len || dst_end > dst_len {
+                return Err(trap(RuntimeTrap::OutOfBoundsTableAccess));
+            }
+            let temp: Vec<Value> = defined_table(store, src_table.0)?[src..src_end].to_vec();
+            defined_table_mut(store, dst_table.0)?[dst..dst_end].copy_from_slice(&temp);
+        }
+        RegOp::TableInit {
+            table,
+            elem,
+            dst,
+            src,
+            count,
+        } => {
+            let store = require_store(store)?;
+            let dst = expect_addr(get_reg(registers, *dst)?)? as usize;
+            let src = expect_addr(get_reg(registers, *src)?)? as usize;
+            let count = expect_addr(get_reg(registers, *count)?)? as usize;
+            let segment = store
+                .elem(elem.0)
+                .ok_or(RuntimeError {
+                    kind: RuntimeErrorKind::UnknownElem { elem: elem.0 },
+                })?
+                .as_ref()
+                .ok_or(trap(RuntimeTrap::OutOfBoundsTableAccess))?;
+            let table_len = defined_table(store, table.0)?.len();
+            let (Some(src_end), Some(dst_end)) = (src.checked_add(count), dst.checked_add(count))
+            else {
+                return Err(trap(RuntimeTrap::OutOfBoundsTableAccess));
+            };
+            if src_end > segment.len() || dst_end > table_len {
+                return Err(trap(RuntimeTrap::OutOfBoundsTableAccess));
+            }
+            let temp: Vec<Value> = segment[src..src_end].to_vec();
+            defined_table_mut(store, table.0)?[dst..dst_end].copy_from_slice(&temp);
+        }
+        RegOp::ElemDrop { elem } => {
+            let store = require_store(store)?;
+            store.drop_elem(elem.0).ok_or(RuntimeError {
+                kind: RuntimeErrorKind::UnknownElem { elem: elem.0 },
+            })?;
+        }
+        RegOp::RefNull { dst } => {
+            set_reg(registers, *dst, Value::FuncRef(None))?;
+        }
+        RegOp::RefFunc { dst, func } => {
+            set_reg(registers, *dst, Value::FuncRef(Some(func.0)))?;
+        }
+        RegOp::RefIsNull { dst, value } => {
+            let value = get_reg(registers, *value)?;
+            let is_null = matches!(value, Value::FuncRef(None));
+            set_reg(registers, *dst, Value::I32(is_null as i32))?;
+        }
     }
     Ok(())
+}
+
+/// Read a defined table with imported/unknown handling.
+fn defined_table(store: &Store, idx: u32) -> Result<&Vec<Value>, RuntimeError> {
+    if store.is_imported_table(idx) {
+        return Err(RuntimeError {
+            kind: RuntimeErrorKind::ImportedTableAccessUnsupported { table: idx },
+        });
+    }
+    store.table(idx).ok_or(RuntimeError {
+        kind: RuntimeErrorKind::UnknownTable { table: idx },
+    })
+}
+
+fn defined_table_mut(store: &mut Store, idx: u32) -> Result<&mut Vec<Value>, RuntimeError> {
+    if store.is_imported_table(idx) {
+        return Err(RuntimeError {
+            kind: RuntimeErrorKind::ImportedTableAccessUnsupported { table: idx },
+        });
+    }
+    store.table_mut(idx).ok_or(RuntimeError {
+        kind: RuntimeErrorKind::UnknownTable { table: idx },
+    })
+}
+
+fn table_slot(store: &Store, table: TableIdx, idx: u32) -> Result<&Value, RuntimeError> {
+    defined_table(store, table.0)?
+        .get(idx as usize)
+        .ok_or(trap(RuntimeTrap::OutOfBoundsTableAccess))
+}
+
+fn table_slot_mut(
+    store: &mut Store,
+    table: TableIdx,
+    idx: u32,
+) -> Result<&mut Value, RuntimeError> {
+    defined_table_mut(store, table.0)?
+        .get_mut(idx as usize)
+        .ok_or(trap(RuntimeTrap::OutOfBoundsTableAccess))
 }
 
 fn require_store(store: Option<&mut Store>) -> Result<&mut Store, RuntimeError> {
@@ -592,6 +891,14 @@ fn memory_slice_mut<'s>(
         return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
     }
     Ok(&mut mem[ea as usize..end as usize])
+}
+
+/// Whether references of this type default to null (nullable refs).
+fn ref_nullable(ref_type: &RefType) -> bool {
+    match ref_type {
+        RefType::FuncRef | RefType::ExternRef => true,
+        RefType::Typed { nullable, .. } => *nullable,
+    }
 }
 
 fn set_reg(registers: &mut [Option<Value>], reg: Reg, value: Value) -> Result<(), RuntimeError> {
