@@ -15,7 +15,20 @@
 | 30 | Saturating truncation (`I32TruncSat*`, `I64TruncSat*`) | XS | anytime |
 | 31 | SIMD v128 core: `Value::V128`, v128.const, lane arithmetic subset matched to Borsalino Level 1 needs, v128 load/store | L | 27 |
 | 32 | GPU backend slot: `Option<Box<dyn GpuBackend>>` in engine state, trait def, no-op default | S | 31 |
-| 33 | Borsalino Level 1: Metal offload for bulk SIMD (>1024 elements) | L | 32 |
+| 33 | Borsalino Level 1: Vulkan backend installed in the slot; bulk SIMD offload with per-platform size thresholds (unified-memory vs discrete GPU) | L | 32 |
+
+## Platform pivot (June 2026)
+
+Baedeker is no longer iOS-first. Borsalino's Vulkan backend runs transparently across
+Metal/Nvidia/AMD hardware, removing the only iOS-specific technical dependency. Baedeker
+is now a **general cross-platform WASM runtime**: Linux, macOS, iOS, Android, and anything
+else Rust targets. Embedding is via C-compatible FFI (Swift interop on Apple platforms);
+GPU offload is Vulkan-based everywhere. PR 33 proceeds unchanged in shape, but the backend
+is Vulkan, not Metal — and offload thresholds are per-platform. The first-class offload
+targets are unified-memory machines: Apple silicon AND Nvidia Grace Blackwell (DGX Spark
+GB10), where Borsalino dispatch is already tuned and shows considerable compute gains;
+PCIe-discrete GPUs shift the crossover to larger N. Phase 5 of the ROADMAP is now "Platform
+Integration Layers".
 
 ## Guardrails / explicit non-goals
 

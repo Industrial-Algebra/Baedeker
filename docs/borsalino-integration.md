@@ -1,22 +1,34 @@
 # Borsalino Integration for Baedeker
 
-**Date:** 2026-06-03
+**Date:** 2026-06-03 (revised 2026-06 for cross-platform Vulkan)
 **Status:** Design exploration — Borsalino v0.1.0 API is complete for all levels
 
 ## Overview
 
-Baedeker targets iOS as a first-class platform, with "a clear path to GPU acceleration
-through Metal compute" stated in its README. Borsalino provides the Metal compute layer
-— a thin `GpuBackend` trait with WGSL compilation, synchronous dispatch, and batched
-execution. The integration is purely on Baedeker's side: Borsalino's API surface is
-complete for WASM GPU acceleration with zero extensions needed.
+Baedeker targets every platform Rust compiles to, with GPU acceleration as a first-class
+goal. Borsalino provides the GPU compute layer — a thin `GpuBackend` trait with WGSL
+compilation, synchronous dispatch, and batched execution — over Vulkan, which runs
+transparently across Metal, Nvidia, and AMD hardware. The integration is purely on
+Baedeker's side: Borsalino's API surface is complete for WASM GPU acceleration with zero
+extensions needed.
 
-## Why Metal on iPad
+## Why Vulkan, and what portability costs
 
-iPad Pro runs M4/M5 chips with unified memory (CPU and GPU share physical RAM).
-Borsalino's Metal backend was debugged on exactly this class of hardware (M3, M3 Pro)
-and its `HOST_VISIBLE | HOST_COHERENT` memory strategy means zero-copy between
-Baedeker's WASM linear memory and GPU buffers.
+Borsalino's Vulkan backend is the portability layer: one WGSL shader source and one
+dispatch API work on Apple silicon (through Metal), discrete Nvidia/AMD GPUs, and mobile
+parts, with no per-vendor code in Baedeker.
+
+The performance picture differs by memory architecture, and it matters for the offload
+thresholds in Level 1-2:
+
+- **Unified memory (Apple silicon; Nvidia Grace Blackwell such as DGX Spark GB10):**
+  CPU and GPU share physical RAM. Borsalino's `HOST_VISIBLE | HOST_COHERENT` memory
+  strategy (debugged on M3/M3 Pro and tuned further on GB10, where dispatch shows
+  considerable compute gains) means zero-copy between Baedeker's WASM linear memory
+  and GPU buffers. These are the first-class offload targets.
+- **Discrete GPUs (PCIe-attached):** buffer uploads/downloads cross the PCIe bus. The
+  same API works, but the CPU↔GPU crossover point moves to larger N — the per-platform
+  benchmarks in the Implementation Strategy are how we set thresholds.
 
 ```rust
 // Baedeker holds WASM linear memory as a Rust Vec<u8>
@@ -70,7 +82,7 @@ fn exec_f32x4_add(&self, a_ptr: u32, b_ptr: u32, out_ptr: u32, count: u32) {
 
 **When to dispatch on GPU vs CPU:** Threshold decision. For N < 256, CPU execution
 (in the register IR) is faster (avoids dispatch overhead). For N >= 1024, GPU wins.
-Benchmark the crossover point on M4/M5.
+Benchmark the crossover point per platform (unified-memory and discrete GPUs differ).
 
 **Borsalino changes required:** None.
 
@@ -84,7 +96,7 @@ compile the block to WGSL and dispatch all blocks in a batch.
 
 **Borsalino API used:**
 - `GpuBackend::compile()` — JIT-compile each unique basic block to WGSL
-- `GpuBackend::dispatch_many()` — dispatch all blocks in one Metal command buffer
+- `GpuBackend::dispatch_many()` — dispatch all blocks in one Vulkan command buffer
   (amortises command-buffer overhead, critical for many small blocks)
 
 **Architecture:**
@@ -98,22 +110,22 @@ Basic-block extractor → identifies arithmetic-only blocks
     ↓
 Block → WGSL compiler (Baedeker) → naga validates
     ↓
-GpuBackend::compile() → MTLComputePipelineState
+GpuBackend::compile() → Vulkan compute pipeline
     ↓
-dispatch_many([block1, block2, ...]) → single Metal command buffer
+dispatch_many([block1, block2, ...]) → single command buffer
     ↓
 read_buffer → register values back to Baedeker's VM state
 ```
 
-**Key design decision:** Mapping WASM linear memory to Metal buffers. On unified
-memory (iPad), Baedeker's `Vec<u8>` linear memory can be bound directly as a Metal
+**Key design decision:** Mapping WASM linear memory to GPU buffers. On unified
+memory (Apple silicon), Baedeker's `Vec<u8>` linear memory can be bound directly as a
 buffer. GPU blocks that need memory access bind the full linear memory at `[[buffer(0)]]`
 and use an offset parameter for bounds.
 
 **Performance:** RTX 5080 benchmarks show `dispatch_many()` reduces per-dispatch
-latency from 37 µs to 0.5 µs at 256 dispatches. On M3 Metal, 59× faster per-dispatch
-was measured. For register blocks averaging 10-50 instructions, this overhead is
-critical — without batching, GPU dispatch would be slower than CPU execution.
+latency from 37 µs to 0.5 µs at 256 dispatches. On M3 (through Metal), 59× faster
+per-dispatch was measured. For register blocks averaging 10-50 instructions, this overhead
+is critical — without batching, GPU dispatch would be slower than CPU execution.
 
 **Borsalino changes required:** None.
 
@@ -126,14 +138,14 @@ coprocessor. This involves:
 
 - Register allocation across GPU threadgroups
 - WASM control flow (`br`, `br_if`, `loop`) → WGSL control flow
-- WASM memory model → Metal buffer bindings with bounds checking
+- WASM memory model → GPU buffer bindings with bounds checking
 - WASM table/call_indirect → GPU-side dispatch or fallback
 - Stack frame management on GPU (shared memory per threadgroup)
 
 **Borsalino API used:** Same as Level 1-2.
 
 **Borsalino changes required:** None — but may want:
-- Metal performance counters (`gpu.timestamp()`) for profiling WASM execution
+- GPU performance counters (`gpu.timestamp()`) for profiling WASM execution
 - `dispatch_async()` for non-blocking WASM coprocessor model (Phase 3+)
 
 ## Implementation Strategy
@@ -142,28 +154,30 @@ coprocessor. This involves:
 
 ```toml
 [dependencies]
-borsalino = { version = "0.1", features = ["metal"] }
+borsalino = { version = "0.1", features = ["vulkan"] }
 ```
 
-On iPad (a `cdylib` linked into an iOS app), Borsalino compiles the Metal backend
-and links against Metal.framework. The Xcode project must include Metal in its
-framework list.
+Borsalino's Vulkan backend builds anywhere a Vulkan driver exists: desktop Linux/Windows,
+macOS/iOS (through Metal compatibility), and Android. Platform packaging notes live with
+the platform integration work (Baedeker Phase 5); the runtime itself needs no per-vendor
+code.
 
 ### Phase 2: Level 1 SIMD Offload
 
-1. Add `Option<MetalBackend>` to Baedeker's engine state
+1. Install a Borsalino Vulkan backend in Baedeker's `GpuBackend` slot
 2. Compile v128 SIMD kernels at init time
-3. Implement SIMD dispatch with a size threshold (benchmark on M4)
+3. Implement SIMD dispatch with a size threshold (benchmark per platform)
 4. Fall back to register IR execution for small N
 
 ### Phase 3: Benchmark and Tune
 
-Use `examples/dispatch_profile.rs` and `examples/bench.rs` from Borsalino on iPad
-hardware to establish baselines. Key metrics:
+Use `examples/dispatch_profile.rs` and `examples/bench.rs` from Borsalino to establish
+baselines across the memory-architecture spectrum: Apple silicon (M-class), Nvidia Grace
+Blackwell (DGX Spark GB10), and PCIe-discrete GPUs (RTX class). Key metrics:
 - Compile latency for SIMD kernels
-- Dispatch overhead on M4/M5 Metal
-- Crossover point where GPU beats CPU for f32x4 operations
-- Memory bandwidth for WASM linear memory → Metal buffer transfers
+- Dispatch overhead per platform
+- Crossover point where GPU beats CPU for f32x4 operations (differs by memory architecture)
+- Memory bandwidth for WASM linear memory → GPU buffer transfers
 
 ### Phase 4: Level 2 Register-Block JIT (Optional)
 
@@ -177,7 +191,7 @@ None required for Levels 1-2, but these would benefit Level 3:
 |---|---|---|
 | `gpu.timestamp()` | Profile WASM execution on GPU | Low |
 | `dispatch_async()` | Non-blocking WASM coprocessor | Medium |
-| Metal performance counters | Occupancy, bandwidth metrics | Low |
+| GPU performance counters | Occupancy, bandwidth metrics | Low |
 
 All are Baedeker-side work items; Borsalino's API is feature-complete for the
 integration.

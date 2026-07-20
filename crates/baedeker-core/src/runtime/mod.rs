@@ -8,6 +8,8 @@ use alloc::{string::String, vec::Vec};
 
 mod store;
 
+pub mod gpu;
+
 pub use store::{PAGE_SIZE, Store};
 
 use crate::lower::{

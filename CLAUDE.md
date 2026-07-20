@@ -2,14 +2,18 @@
 
 ## Project Identity
 
-Baedeker is a WebAssembly runtime implemented in Rust, targeting iOS as a first-class platform.
+Baedeker is a WebAssembly runtime implemented in Rust, targeting every platform Rust compiles
+to — Linux, macOS, iOS, Android, and beyond — as a first-class, embeddable engine.
 Named after the Hindmost Baedeker from Larry Niven's Ringworld/Fleet of Worlds series — cautious,
 methodical, but ultimately willing to venture into the unknown.
 
 The project is authored by Justin, founder of Industrial Algebra LLC. Baedeker is part of a
 broader ecosystem of Rust crates (Amari, Cliffy, Minuet, Orlando) focused on geometric algebra,
 information geometry, and high-performance functional programming. A primary motivation is
-running this ecosystem on iOS hardware without rewriting in Swift.
+running this ecosystem on any platform — mobile, desktop, and embedded — without per-platform
+rewrites. Apple platforms remain an important embedding target (FFI/Swift interop), and GPU
+acceleration is platform-portable via Vulkan-based compute (running across Metal, Nvidia, and
+AMD hardware).
 
 Baedeker is a language-runtime and systems project. Its binary decoding, malformed-input
 handling, validation, and future robustness testing are strictly in service of standards-compliant
@@ -84,7 +88,7 @@ GitHub Actions on every PR and pushes to `develop`/`main`.
 - [WASM Binary Format](https://webassembly.github.io/spec/core/binary/index.html)
 
 ## Related IA Projects
-- **Amari**: First workload — geometric algebra on WASM/iOS
+- **Amari**: First workload — geometric algebra on WASM across platforms
 - **Cliffy**: Geometric FRP, informs IR pipeline architecture
 - **Orlando**: "Transform transformations" philosophy for lowering passes
 - **Minuet**: Information geometry primitives

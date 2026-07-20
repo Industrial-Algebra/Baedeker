@@ -40,9 +40,10 @@ produce a working (if incomplete) artifact at each boundary, so the project is a
 and testable — never in a state where three more layers need to exist before anything executes.
 
 The target spec is full WebAssembly 3.0 validation, with execution support growing in phases on
-top of that semantic front-end, and the primary deployment target is iOS via Rust FFI into Swift.
-JIT compilation is explicitly out of scope for the initial architecture; the engine is
-interpreter-first with AOT as a future layer.
+top of that semantic front-end. Deployment targets are everywhere Rust compiles — Linux, macOS,
+iOS, Android — with host integration via a C-compatible FFI (idiomatic Swift on Apple platforms)
+and GPU acceleration via Vulkan-based compute. JIT compilation is explicitly out of scope for
+the initial architecture; the engine is interpreter-first with AOT as a future layer.
 
 ---
 
@@ -932,8 +933,9 @@ first.
 - Execute that IR with a small, auditable runtime core.
 - Keep validation as the gatekeeper for unsupported modules and unsupported type-system surfaces.
 - Avoid baking the current flat-functype limitation too deeply into runtime internals.
-- Build GPU-offload awareness into the engine architecture from the start, so Borsalino-backed
-  Metal compute dispatch has a natural home in the runtime without a later retrofit.
+- Build GPU-offload awareness into the engine architecture from the start, so Vulkan-based
+  compute dispatch (via Borsalino, across Metal/Nvidia/AMD hardware) has a natural home in the
+  runtime without a later retrofit.
   (See [`docs/borsalino-integration.md`](borsalino-integration.md) for the full design.)
 
 ### Phase 2 design guardrails
@@ -1010,7 +1012,8 @@ real modules and Borsalino GPU acceleration.
 - **Direct and indirect calls.** Implement function call frames so multi-function modules execute.
 - **Linear memory, globals, tables.** The state machinery needed for real workloads.
 - **GPU backend slot.** Add an optional `GpuBackend` to the engine state with a trait-based
-  interface, so the Metal backend can be plugged in on iOS without changing the core engine.
+  interface, so a Vulkan-based backend can be plugged in on any platform without changing the
+  core engine.
 - Keep execution support staged: runtime parity should broaden in deliberate cohorts.
 - Use Node/V8 / external-runtime parity where useful once runtime semantics are comparable.
 
@@ -1036,9 +1039,10 @@ a sequence of register transfers. If you can express this as a composable transd
 you get a clean architecture for layering optimization passes later.
 
 This is also where Borsalino enters the picture. The register IR's basic-block structure feeds
-directly into WGSL compilation for Metal GPU dispatch. The lowering pass produces both a CPU
-execution plan and — for arithmetic-only blocks — a candidate GPU shader. See
-[`docs/borsalino-integration.md`](borsalino-integration.md) for the integration design.
+directly into WGSL compilation for Vulkan GPU dispatch (portable across Metal/Nvidia/AMD
+hardware). The lowering pass produces both a CPU execution plan and — for arithmetic-only
+blocks — a candidate GPU shader. See [`docs/borsalino-integration.md`](borsalino-integration.md)
+for the integration design.
 
 ---
 
@@ -1106,8 +1110,8 @@ long-term target. They are no longer the gate in front of Phase 2.
   evaluate global initializer expressions, run the start function.
 - Build the host function interface: the Rust API for registering callable functions that
   WASM modules can import. This is the primary embedding API and its ergonomics matter
-  enormously — it's what you'll use to bridge Baedeker into Swift and to expose system
-  capabilities (Metal compute, file I/O, etc.).
+  enormously — it's what you'll use to bridge Baedeker into host applications (Swift on Apple
+  platforms, plain C everywhere) and to expose system capabilities (GPU compute, file I/O, etc.).
 - Implement multi-module linking: one module importing another module's exports.
 - Implement the `call_indirect` + table machinery that makes dynamic dispatch and
   function pointers work.
@@ -1122,21 +1126,25 @@ signatures, avoiding the runtime type-checking overhead that plagues some runtim
 
 ---
 
-## Phase 5 — iOS Integration Layer
+## Phase 5 — Platform Integration Layers
 
-**Focus:** Making Baedeker a first-class iOS citizen.
+**Focus:** Making Baedeker a first-class citizen on every target platform.
 
-- Build `baedeker-ios`: a crate that compiles to a static library with C-compatible FFI.
-- Produce a Swift package that wraps the FFI in idiomatic Swift (async/await for long-running
-  WASM computations, value types for WASM values, closures for host functions).
-- Implement an AOT pipeline: compile WASM to Baedeker's internal IR at build time (on macOS),
-  serialize the IR, bundle it into the iOS app, deserialize and execute on device.
-  This sidesteps the JIT prohibition entirely.
-- Implement a Metal compute host module: a standard set of importable functions that let
-  WASM modules dispatch GPU compute kernels, pass buffers, and read results. This is
-  purpose-built for running Amari/Cliffy workloads on iPad GPU hardware.
-- **Milestone:** A Swift iOS app that loads a WASM module compiled from Amari, performs a
-  geometric algebra computation, and displays the result. The demo that proves the thesis.
+- Build `baedeker-ffi`: a crate that compiles to a static library with a C-compatible FFI,
+  usable from any host language on any OS Baedeker targets.
+- Produce idiomatic wrappers over the FFI per ecosystem: a Swift package for Apple platforms
+  (async/await for long-running WASM computations, value types for WASM values, closures for
+  host functions), with Kotlin/Android and plain-C headers as follow-ons.
+- Implement an AOT pipeline: compile WASM to Baedeker's internal IR at build time,
+  serialize the IR, bundle it into the app, deserialize and execute on device. This sidesteps
+  the iOS JIT prohibition and improves startup time everywhere else too.
+- Implement a GPU compute host module: a standard set of importable functions that let WASM
+  modules dispatch Vulkan compute kernels (via Borsalino, across Metal/Nvidia/AMD hardware),
+  pass buffers, and read results. Purpose-built for running Amari/Cliffy workloads on any
+  GPU-capable device, from iPad to desktop.
+- **Milestone:** An iOS Swift app that loads a WASM module compiled from Amari and performs a
+  geometric algebra computation — and the same module running unmodified in a native
+  desktop CLI. The demo that proves the thesis on two platforms at once.
 
 ---
 
