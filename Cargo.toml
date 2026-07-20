@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/baedeker-borsalino",
     "crates/baedeker-core",
     "crates/baedeker-cli",
     "crates/baedeker-testdata",

@@ -75,6 +75,7 @@ pub enum RuntimeErrorKind {
     ImportedTableAccessUnsupported { table: u32 },
     InvalidConstExpr,
     InvalidLaneIndex { lane: u8 },
+    Gpu(crate::runtime::gpu::GpuError),
     MissingStore,
     MissingReturn,
 }
