@@ -1,0 +1,15 @@
+[package]
+name = "baedeker-borsalino"
+description = "Borsalino GPU backend adapter for the Baedeker WebAssembly runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+baedeker-core = { path = "../baedeker-core" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+borsalino = { version = "0.5", features = ["metal"] }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+borsalino = { version = "0.5", features = ["vulkan"] }

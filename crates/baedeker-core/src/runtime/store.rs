@@ -4,9 +4,29 @@
 use alloc::vec::Vec;
 
 use crate::lower::{RegConstInstr, RegElemValue, RegElementMode, RegModule};
-use crate::runtime::gpu::GpuBackend;
+use crate::runtime::gpu::{GpuBackend, GpuError, GpuKernelId};
 use crate::runtime::{RuntimeError, RuntimeErrorKind, RuntimeTrap, Value, trap};
 use crate::types::{MemType, TableType};
+
+/// WGSL element-wise f32 add kernel for bulk SIMD offload.
+const WGSL_F32_ADD: &str = r#"
+@group(0) @binding(0) var<storage, read> a: array<f32>;
+@group(0) @binding(1) var<storage, read> b: array<f32>;
+@group(0) @binding(2) var<storage, read_write> out: array<f32>;
+
+@compute @workgroup_size(256)
+fn vadd(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    if (i < arrayLength(&out)) {
+        out[i] = a[i] + b[i];
+    }
+}
+"#;
+
+/// Default element count at or above which bulk SIMD work dispatches to
+/// GPU. Below this, CPU execution avoids dispatch overhead. Per-platform
+/// tuning (unified-memory vs discrete GPU) adjusts this at runtime.
+pub const DEFAULT_OFFLOAD_THRESHOLD: usize = 1024;
 
 /// Size of one WebAssembly memory page in bytes.
 pub const PAGE_SIZE: usize = 65536;
@@ -27,6 +47,10 @@ pub struct Store {
     elements: Vec<Option<Vec<Value>>>,
     /// Optional GPU backend for bulk SIMD offload (Borsalino Level 1).
     gpu: Option<alloc::boxed::Box<dyn GpuBackend>>,
+    /// Element count at or above which bulk SIMD work dispatches to GPU.
+    offload_threshold: usize,
+    /// Lazily compiled offload kernels, keyed by kernel name.
+    offload_kernels: alloc::collections::BTreeMap<&'static str, GpuKernelId>,
     imported_memory_count: u32,
     imported_global_count: u32,
     imported_table_count: u32,
@@ -68,6 +92,8 @@ impl Store {
             table_types,
             elements: alloc::vec![None; module.elements.len()],
             gpu: None,
+            offload_threshold: DEFAULT_OFFLOAD_THRESHOLD,
+            offload_kernels: alloc::collections::BTreeMap::new(),
             imported_memory_count: module.imported_memory_count,
             imported_global_count: module.imported_global_count,
             imported_table_count: module.imported_table_count,
@@ -219,6 +245,12 @@ impl Store {
         self.memories.get(defined).map(Vec::as_slice)
     }
 
+    /// Mutable access to a defined memory's bytes (embedding/debug access).
+    pub fn get_memory_mut(&mut self, idx: u32) -> Option<&mut [u8]> {
+        let defined = idx.checked_sub(self.imported_memory_count)? as usize;
+        self.memories.get_mut(defined).map(Vec::as_mut_slice)
+    }
+
     /// Install a GPU backend for bulk SIMD offload.
     pub fn set_gpu(&mut self, backend: alloc::boxed::Box<dyn GpuBackend>) {
         self.gpu = Some(backend);
@@ -240,6 +272,87 @@ impl Store {
             Some(backend) => Some(&mut **backend),
             None => None,
         }
+    }
+
+    /// Set the element count at or above which bulk SIMD work dispatches
+    /// to GPU (per-platform tuning).
+    pub fn set_offload_threshold(&mut self, threshold: usize) {
+        self.offload_threshold = threshold;
+    }
+
+    /// Bulk element-wise f32 addition over linear-memory regions:
+    /// `out[i] = a[i] + b[i]` for `count` f32 elements (Borsalino Level 1).
+    ///
+    /// At or above the offload threshold with a GPU backend installed, the
+    /// work dispatches to GPU; otherwise it executes on CPU. Memory 0.
+    pub fn f32_add_region(
+        &mut self,
+        a_ptr: u32,
+        b_ptr: u32,
+        out_ptr: u32,
+        count: usize,
+    ) -> Result<(), RuntimeError> {
+        let byte_len = count
+            .checked_mul(4)
+            .ok_or(trap(RuntimeTrap::OutOfBoundsMemoryAccess))?;
+        for ptr in [a_ptr, b_ptr, out_ptr] {
+            let end = ptr as u64 + byte_len as u64;
+            if end > self.memories.first().map_or(0, Vec::len) as u64 {
+                return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
+            }
+        }
+
+        if self.gpu.is_none() || count < self.offload_threshold {
+            // CPU path: element-wise add over the regions.
+            let mem = &mut self.memories[0];
+            for i in 0..count {
+                let at = a_ptr as usize + i * 4;
+                let bt = b_ptr as usize + i * 4;
+                let ot = out_ptr as usize + i * 4;
+                let lhs = f32::from_le_bytes(mem[at..at + 4].try_into().expect("width checked"));
+                let rhs = f32::from_le_bytes(mem[bt..bt + 4].try_into().expect("width checked"));
+                mem[ot..ot + 4].copy_from_slice(&(lhs + rhs).to_le_bytes());
+            }
+            return Ok(());
+        }
+
+        // GPU path: compile (once), upload regions, dispatch, read back.
+        let kernel = match self.offload_kernels.get("f32_add") {
+            Some(&kernel) => kernel,
+            None => {
+                let gpu = self.gpu.as_mut().expect("gpu checked above");
+                let kernel = gpu
+                    .compile("vadd", WGSL_F32_ADD)
+                    .map_err(runtime_gpu_error)?;
+                self.offload_kernels.insert("f32_add", kernel);
+                kernel
+            }
+        };
+
+        let mem = &mut self.memories[0];
+        let gpu = self.gpu.as_mut().expect("gpu checked above");
+        let buf_a = gpu
+            .create_buffer(&mem[a_ptr as usize..a_ptr as usize + byte_len])
+            .map_err(runtime_gpu_error)?;
+        let buf_b = gpu
+            .create_buffer(&mem[b_ptr as usize..b_ptr as usize + byte_len])
+            .map_err(runtime_gpu_error)?;
+        let buf_out = gpu
+            .create_buffer_uninit(byte_len)
+            .map_err(runtime_gpu_error)?;
+        let workgroups = [count.div_ceil(256) as u32, 1, 1];
+        gpu.dispatch(kernel, &[buf_a, buf_b, buf_out], workgroups)
+            .map_err(runtime_gpu_error)?;
+        let result = gpu.read_buffer(buf_out).map_err(runtime_gpu_error)?;
+        mem[out_ptr as usize..out_ptr as usize + byte_len].copy_from_slice(&result[..byte_len]);
+        Ok(())
+    }
+}
+
+/// Map a GPU backend error into a runtime error.
+fn runtime_gpu_error(error: GpuError) -> RuntimeError {
+    RuntimeError {
+        kind: RuntimeErrorKind::Gpu(error),
     }
 }
 
