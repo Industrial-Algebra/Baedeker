@@ -48,7 +48,7 @@ pub struct RegModule {
     /// All function types in the module's type section, for structural
     /// `call_indirect` type checks.
     pub types: Vec<FuncType>,
-    /// Active data segments applied to memory at instantiation.
+    /// All data segments in index order; mode decides instantiation behavior.
     pub data: Vec<RegDataSegment>,
     /// Number of imported memories (runtime access is not yet supported).
     pub imported_memory_count: u32,
@@ -97,13 +97,23 @@ pub struct RegGlobal {
     pub init: Vec<RegConstInstr>,
 }
 
-/// An active data segment in lowered register IR.
+/// A data segment in lowered register IR.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegDataSegment {
-    pub memory: MemIdx,
-    /// Const offset expression, evaluated at instantiation.
-    pub offset: Vec<RegConstInstr>,
+    pub mode: RegDataMode,
     pub bytes: Vec<u8>,
+}
+
+/// Instantiation behavior of a data segment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegDataMode {
+    /// Written into memory at instantiation, then dropped.
+    Active {
+        memory: MemIdx,
+        offset: Vec<RegConstInstr>,
+    },
+    /// Retained for `memory.init` until dropped.
+    Passive,
 }
 
 /// An instruction in a lowered constant expression (global initializers,
@@ -344,6 +354,33 @@ pub enum RegOp {
         dst: Reg,
         memory: MemIdx,
         delta: Reg,
+    },
+    /// `memory.init`: mem[dst..] = data_segment[src..] over count bytes.
+    MemoryInit {
+        memory: MemIdx,
+        data: crate::types::DataIdx,
+        dst: Reg,
+        src: Reg,
+        count: Reg,
+    },
+    /// `data.drop`: drop the data segment's runtime storage.
+    DataDrop {
+        data: crate::types::DataIdx,
+    },
+    /// `memory.copy`: dst_mem[dst..] = src_mem[src..] over count bytes.
+    MemoryCopy {
+        dst_memory: MemIdx,
+        src_memory: MemIdx,
+        dst: Reg,
+        src: Reg,
+        count: Reg,
+    },
+    /// `memory.fill`: mem[dst..dst+count] = value (low byte).
+    MemoryFill {
+        memory: MemIdx,
+        dst: Reg,
+        value: Reg,
+        count: Reg,
     },
     /// Indirect call through a table (`call_indirect`).
     CallIndirect {
@@ -1272,18 +1309,21 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
 
     let mut data = Vec::new();
     for segment in module.data() {
-        if let DataMode::Active {
-            memory,
-            offset_expr,
-            offset_offset,
-        } = &segment.mode
-        {
-            data.push(RegDataSegment {
+        let mode = match &segment.mode {
+            DataMode::Active {
+                memory,
+                offset_expr,
+                offset_offset,
+            } => RegDataMode::Active {
                 memory: *memory,
                 offset: lower_const_expr(offset_expr, *offset_offset)?,
-                bytes: segment.init.to_vec(),
-            });
-        }
+            },
+            DataMode::Passive => RegDataMode::Passive,
+        };
+        data.push(RegDataSegment {
+            mode,
+            bytes: segment.init.to_vec(),
+        });
     }
 
     let imported_table_count = module
@@ -2269,6 +2309,53 @@ impl<'b> FuncBuilder<'b> {
                         dst,
                         memory,
                         delta: delta.reg,
+                    },
+                );
+            }
+            Instr::MemoryInit(data_idx, mem_idx) => {
+                let count = self.pop_expect(offset, "memory.init", ValType::Num(NumType::I32))?;
+                let src = self.pop_expect(offset, "memory.init", ValType::Num(NumType::I32))?;
+                let dst = self.pop_expect(offset, "memory.init", ValType::Num(NumType::I32))?;
+                self.emit(
+                    offset,
+                    RegOp::MemoryInit {
+                        memory: mem_idx,
+                        data: data_idx,
+                        dst: dst.reg,
+                        src: src.reg,
+                        count: count.reg,
+                    },
+                );
+            }
+            Instr::DataDrop(data_idx) => {
+                self.emit(offset, RegOp::DataDrop { data: data_idx });
+            }
+            Instr::MemoryCopy { dst, src } => {
+                let count = self.pop_expect(offset, "memory.copy", ValType::Num(NumType::I32))?;
+                let src_idx = self.pop_expect(offset, "memory.copy", ValType::Num(NumType::I32))?;
+                let dst_idx = self.pop_expect(offset, "memory.copy", ValType::Num(NumType::I32))?;
+                self.emit(
+                    offset,
+                    RegOp::MemoryCopy {
+                        dst_memory: dst,
+                        src_memory: src,
+                        dst: dst_idx.reg,
+                        src: src_idx.reg,
+                        count: count.reg,
+                    },
+                );
+            }
+            Instr::MemoryFill(memory) => {
+                let count = self.pop_expect(offset, "memory.fill", ValType::Num(NumType::I32))?;
+                let value = self.pop_expect(offset, "memory.fill", ValType::Num(NumType::I32))?;
+                let dst = self.pop_expect(offset, "memory.fill", ValType::Num(NumType::I32))?;
+                self.emit(
+                    offset,
+                    RegOp::MemoryFill {
+                        memory,
+                        dst: dst.reg,
+                        value: value.reg,
+                        count: count.reg,
                     },
                 );
             }
@@ -4420,6 +4507,34 @@ mod tests {
             run_wat_export(source, "sat", &[crate::runtime::Value::F32(-2.9)]),
             Ok(vec![crate::runtime::Value::I32(-2)])
         );
+    }
+
+    #[test]
+    fn lower_bulk_memory_ops_shape() {
+        let reg_module = lower_wat(
+            "(module
+               (memory 1)
+               (data $d \"ab\")
+               (func (export \"f\") (param i32)
+                 local.get 0
+                 i32.const 0
+                 i32.const 2
+                 memory.init $d
+                 local.get 0
+                 i32.const 1
+                 i32.const 8
+                 memory.fill
+                 data.drop $d))",
+        );
+        let func = &reg_module.funcs[0];
+        let ops: Vec<&RegOp> = func.blocks[0]
+            .instrs
+            .iter()
+            .map(|instr| &instr.op)
+            .collect();
+        assert!(matches!(ops[3], RegOp::MemoryInit { .. }));
+        assert!(matches!(ops[7], RegOp::MemoryFill { .. }));
+        assert!(matches!(ops[8], RegOp::DataDrop { .. }));
     }
 
     #[test]

@@ -3,7 +3,7 @@
 
 use alloc::vec::Vec;
 
-use crate::lower::{RegConstInstr, RegElemValue, RegElementMode, RegModule};
+use crate::lower::{RegConstInstr, RegDataMode, RegElemValue, RegElementMode, RegModule};
 use crate::runtime::gpu::{GpuBackend, GpuError, GpuKernelId};
 use crate::runtime::{RuntimeError, RuntimeErrorKind, RuntimeTrap, Value, trap};
 use crate::types::{MemType, TableType};
@@ -45,6 +45,9 @@ pub struct Store {
     /// Element segment storage; `None` after the segment is dropped (or was
     /// active/declarative at instantiation).
     elements: Vec<Option<Vec<Value>>>,
+    /// Data segment storage; `None` after the segment is dropped (or was
+    /// active at instantiation).
+    data: Vec<Option<Vec<u8>>>,
     /// Optional GPU backend for bulk SIMD offload (Borsalino Level 1).
     gpu: Option<alloc::boxed::Box<dyn GpuBackend>>,
     /// Element count at or above which bulk SIMD work dispatches to GPU.
@@ -91,6 +94,7 @@ impl Store {
             tables,
             table_types,
             elements: alloc::vec![None; module.elements.len()],
+            data: Vec::new(),
             gpu: None,
             offload_threshold: DEFAULT_OFFLOAD_THRESHOLD,
             offload_kernels: alloc::collections::BTreeMap::new(),
@@ -138,28 +142,40 @@ impl Store {
         }
 
         for segment in &module.data {
-            let offset = eval_const(&segment.offset, &store.globals, store.imported_global_count)?;
-            let Value::I32(offset) = offset else {
-                return Err(RuntimeError {
-                    kind: RuntimeErrorKind::InvalidConstExpr,
-                });
-            };
-            let memory = store.memory_mut(segment.memory.0).ok_or(RuntimeError {
-                kind: RuntimeErrorKind::UnknownMemory {
-                    memory: segment.memory.0,
-                },
-            })?;
-            let start = offset as usize;
-            let Some(end) = start.checked_add(segment.bytes.len()) else {
-                return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
-            };
-            if end > memory.len() {
-                return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
+            match &segment.mode {
+                RegDataMode::Active { memory, offset } => {
+                    let offset = eval_const(offset, &store.globals, store.imported_global_count)?;
+                    let Value::I32(offset) = offset else {
+                        return Err(RuntimeError {
+                            kind: RuntimeErrorKind::InvalidConstExpr,
+                        });
+                    };
+                    let mem = store.memory_mut(memory.0).ok_or(RuntimeError {
+                        kind: RuntimeErrorKind::UnknownMemory { memory: memory.0 },
+                    })?;
+                    let start = offset as usize;
+                    let Some(end) = start.checked_add(segment.bytes.len()) else {
+                        return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
+                    };
+                    if end > mem.len() {
+                        return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
+                    }
+                    mem[start..end].copy_from_slice(&segment.bytes);
+                    store.data.push(None);
+                }
+                RegDataMode::Passive => {
+                    store.data.push(Some(segment.bytes.clone()));
+                }
             }
-            memory[start..end].copy_from_slice(&segment.bytes);
         }
 
         Ok(store)
+    }
+
+    /// Shared access to a defined memory by index-space index.
+    pub(crate) fn memory_ref(&self, idx: u32) -> Option<&Vec<u8>> {
+        let defined = idx.checked_sub(self.imported_memory_count)? as usize;
+        self.memories.get(defined)
     }
 
     /// Mutable access to a defined memory by index-space index, or `None`
@@ -230,6 +246,18 @@ impl Store {
     /// Drop an element segment's storage.
     pub(crate) fn drop_elem(&mut self, idx: u32) -> Option<()> {
         let slot = self.elements.get_mut(idx as usize)?;
+        *slot = None;
+        Some(())
+    }
+
+    /// Shared access to a retained data segment.
+    pub(crate) fn data(&self, idx: u32) -> Option<&Option<Vec<u8>>> {
+        self.data.get(idx as usize)
+    }
+
+    /// Drop a data segment's storage.
+    pub(crate) fn drop_data(&mut self, idx: u32) -> Option<()> {
+        let slot = self.data.get_mut(idx as usize)?;
         *slot = None;
         Some(())
     }
