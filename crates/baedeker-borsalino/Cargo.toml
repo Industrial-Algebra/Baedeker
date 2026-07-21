@@ -9,7 +9,7 @@ license.workspace = true
 baedeker-core = { path = "../baedeker-core" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-borsalino = { version = "0.5", features = ["metal"] }
+borsalino = { version = "0.5.1", features = ["metal"] }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
-borsalino = { version = "0.5", features = ["vulkan"] }
+borsalino = { version = "0.5.1", features = ["vulkan"] }

@@ -75,9 +75,9 @@ checksum = "843867be96c8daad0d758b57df9392b6d8d271134fce549de6ce169ff98a92af"
 
 [[package]]
 name = "borsalino"
-version = "0.5.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24c769fd9a27735ab2f58d72de4fcd0e6875bc906b4392170493d5dcb69dd942"
+checksum = "b2d7cdcb985ddaf9904aa505f8d551fd4eed98552c667833a7bc638642f2139d"
 dependencies = [
  "ash",
  "bytemuck",
