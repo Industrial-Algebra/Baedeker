@@ -66,6 +66,7 @@ pub enum RuntimeErrorKind {
     UnknownFunction { func: u32 },
     ImportedFunctionCallUnsupported { func: u32 },
     UnknownMemory { memory: u32 },
+    UnknownDataSegment { data: u32 },
     UnknownGlobal { global: u32 },
     UnknownTable { table: u32 },
     UnknownElem { elem: u32 },
@@ -679,6 +680,92 @@ fn execute_reg_op(
             };
             set_reg(registers, *dst, Value::I32(result))?;
         }
+        RegOp::MemoryInit {
+            memory,
+            data,
+            dst,
+            src,
+            count,
+        } => {
+            let store = require_store(store)?;
+            let dst = expect_addr(get_reg(registers, *dst)?)? as usize;
+            let src = expect_addr(get_reg(registers, *src)?)? as usize;
+            let count = expect_addr(get_reg(registers, *count)?)? as usize;
+            // Bounds-check and copy the segment range before borrowing memory.
+            let (bytes, dst_end) = {
+                let segment = store
+                    .data(data.0)
+                    .ok_or(RuntimeError {
+                        kind: RuntimeErrorKind::UnknownDataSegment { data: data.0 },
+                    })?
+                    .as_ref()
+                    .ok_or(trap(RuntimeTrap::OutOfBoundsMemoryAccess))?;
+                let (Some(src_end), Some(dst_end)) =
+                    (src.checked_add(count), dst.checked_add(count))
+                else {
+                    return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
+                };
+                if src_end > segment.len() {
+                    return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
+                }
+                (segment[src..src_end].to_vec(), dst_end)
+            };
+            let mem = defined_memory_mut(store, memory.0)?;
+            if dst_end > mem.len() {
+                return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
+            }
+            mem[dst..dst_end].copy_from_slice(&bytes);
+        }
+        RegOp::DataDrop { data } => {
+            let store = require_store(store)?;
+            store.drop_data(data.0).ok_or(RuntimeError {
+                kind: RuntimeErrorKind::UnknownDataSegment { data: data.0 },
+            })?;
+        }
+        RegOp::MemoryCopy {
+            dst_memory,
+            src_memory,
+            dst,
+            src,
+            count,
+        } => {
+            let store = require_store(store)?;
+            let dst = expect_addr(get_reg(registers, *dst)?)? as usize;
+            let src = expect_addr(get_reg(registers, *src)?)? as usize;
+            let count = expect_addr(get_reg(registers, *count)?)? as usize;
+            // Bounds-check both ranges before copying (via a temporary, so
+            // overlapping regions copy per spec).
+            let src_len = defined_memory(store, src_memory.0)?.len();
+            let dst_len = defined_memory(store, dst_memory.0)?.len();
+            let (Some(src_end), Some(dst_end)) = (src.checked_add(count), dst.checked_add(count))
+            else {
+                return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
+            };
+            if src_end > src_len || dst_end > dst_len {
+                return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
+            }
+            let temp: Vec<u8> = defined_memory(store, src_memory.0)?[src..src_end].to_vec();
+            defined_memory_mut(store, dst_memory.0)?[dst..dst_end].copy_from_slice(&temp);
+        }
+        RegOp::MemoryFill {
+            memory,
+            dst,
+            value,
+            count,
+        } => {
+            let store = require_store(store)?;
+            let dst = expect_addr(get_reg(registers, *dst)?)? as usize;
+            let count = expect_addr(get_reg(registers, *count)?)? as usize;
+            let value = expect_addr(get_reg(registers, *value)?)? as u8;
+            let mem = defined_memory_mut(store, memory.0)?;
+            let Some(end) = dst.checked_add(count) else {
+                return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
+            };
+            if end > mem.len() {
+                return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
+            }
+            mem[dst..end].fill(value);
+        }
         RegOp::TableGet { dst, table, index } => {
             let store = require_store(store)?;
             let idx = expect_addr(get_reg(registers, *index)?)?;
@@ -947,6 +1034,29 @@ fn table_slot_mut(
 fn require_store(store: Option<&mut Store>) -> Result<&mut Store, RuntimeError> {
     store.ok_or(RuntimeError {
         kind: RuntimeErrorKind::MissingStore,
+    })
+}
+
+/// Read a defined memory with imported/unknown handling.
+fn defined_memory(store: &Store, idx: u32) -> Result<&Vec<u8>, RuntimeError> {
+    if store.is_imported_memory(idx) {
+        return Err(RuntimeError {
+            kind: RuntimeErrorKind::ImportedMemoryAccessUnsupported { memory: idx },
+        });
+    }
+    store.memory_ref(idx).ok_or(RuntimeError {
+        kind: RuntimeErrorKind::UnknownMemory { memory: idx },
+    })
+}
+
+fn defined_memory_mut(store: &mut Store, idx: u32) -> Result<&mut Vec<u8>, RuntimeError> {
+    if store.is_imported_memory(idx) {
+        return Err(RuntimeError {
+            kind: RuntimeErrorKind::ImportedMemoryAccessUnsupported { memory: idx },
+        });
+    }
+    store.memory_mut(idx).ok_or(RuntimeError {
+        kind: RuntimeErrorKind::UnknownMemory { memory: idx },
     })
 }
 
