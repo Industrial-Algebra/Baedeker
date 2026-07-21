@@ -17,21 +17,25 @@ use std::collections::HashMap;
 use baedeker_core::runtime::gpu::{GpuBackend, GpuBufferId, GpuError, GpuErrorKind, GpuKernelId};
 
 /// A [`GpuBackend`] implementation backed by Borsalino.
+///
+/// Field order matters: Rust drops struct fields in declaration order, so
+/// the pipeline and buffer registries MUST be dropped before `inner` (the
+/// backend device) — destroying a buffer or pipeline requires a live device.
 pub struct BorsalinoGpu<B: borsalino::GpuBackend> {
-    inner: B,
-    next_id: u64,
     pipelines: HashMap<GpuKernelId, borsalino::ComputePipeline>,
     buffers: HashMap<GpuBufferId, borsalino::GpuBuffer>,
+    inner: B,
+    next_id: u64,
 }
 
 impl<B: borsalino::GpuBackend> BorsalinoGpu<B> {
     /// Wrap an initialized Borsalino backend.
     pub fn new(inner: B) -> Self {
         Self {
-            inner,
-            next_id: 1,
             pipelines: HashMap::new(),
             buffers: HashMap::new(),
+            inner,
+            next_id: 1,
         }
     }
 
@@ -142,12 +146,14 @@ fn map_error(error: borsalino::GpuError) -> GpuError {
 mod tests {
     use super::*;
 
-    /// Hardware integration test: run explicitly with `--ignored` on a
-    /// machine with a working Vulkan/Metal driver. NOTE: borsalino's
-    /// Vulkan init currently SIGSEGVs under Mesa ICD setups (tracked in
-    /// the Borsalino repo); ignored by default so CI stays green.
+    /// Hardware integration test: run explicitly with `--ignored`. Verified
+    /// working end-to-end on lavapipe (Mesa software Vulkan, VM) — the
+    /// v0.5.0-era SIGSEGV was this adapter's field drop order (registries
+    /// outliving the device), fixed by dropping pipelines/buffers before
+    /// the backend. Remains ignored by default so GPU-less CI skips
+    /// cleanly (`init()` returns `Err`).
     #[test]
-    #[ignore = "requires a working GPU driver; see Borsalino init segfault note"]
+    #[ignore = "requires a working GPU driver; verified on lavapipe — run with --ignored"]
     fn real_backend_dispatch_when_gpu_available() {
         let Ok(backend) = borsalino::init() else {
             eprintln!("no GPU backend available; skipping hardware test");
