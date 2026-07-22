@@ -37,6 +37,9 @@ pub struct RegModule {
     /// Number of imported functions: `FuncIdx` values below this are not
     /// lowered and cannot be called by the interpreter yet.
     pub imported_func_count: u32,
+    /// Function import declarations in index order (for host-function
+    /// registration and lazy import resolution).
+    pub imported_funcs: Vec<RegImport>,
     /// Defined memories (instantiated as zeroed linear memory).
     pub memories: Vec<MemType>,
     /// Defined globals, initialized in declaration order at instantiation.
@@ -132,6 +135,14 @@ pub enum RegConstInstr {
     I64Add,
     I64Sub,
     I64Mul,
+}
+
+/// A function import declaration in lowered register IR.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegImport {
+    pub module: String,
+    pub name: String,
+    pub ty: FuncType,
 }
 
 /// A function export in lowered register IR.
@@ -1332,6 +1343,19 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
         .filter(|import| matches!(import.desc, ImportDesc::Table(_)))
         .count() as u32;
 
+    let imported_funcs = module
+        .imports()
+        .iter()
+        .filter_map(|import| match import.desc {
+            ImportDesc::Func(type_idx) => Some(RegImport {
+                module: import.module.clone(),
+                name: import.name.clone(),
+                ty: module.types()[type_idx.0 as usize].clone(),
+            }),
+            _ => None,
+        })
+        .collect();
+
     let tables = module.tables().to_vec();
     let types = module.types().to_vec();
 
@@ -1379,6 +1403,7 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
         funcs,
         exports,
         imported_func_count,
+        imported_funcs,
         memories,
         globals,
         tables,
@@ -4535,6 +4560,155 @@ mod tests {
         assert!(matches!(ops[3], RegOp::MemoryInit { .. }));
         assert!(matches!(ops[7], RegOp::MemoryFill { .. }));
         assert!(matches!(ops[8], RegOp::DataDrop { .. }));
+    }
+
+    #[test]
+    fn execute_host_function_milestone() {
+        // The Phase 4 milestone: a module importing env.print_i32 calls the
+        // host, which records the call.
+        let source = "(module
+            (import \"env\" \"print_i32\" (func $print (param i32)))
+            (func (export \"main\")
+              i32.const 42
+              call $print))";
+        let reg_module = lower_wat(source);
+        let mut store = crate::runtime::Store::instantiate(&reg_module).unwrap();
+
+        let recorded = alloc::rc::Rc::new(core::cell::RefCell::new(Vec::new()));
+        let sink = recorded.clone();
+        store
+            .register_host_func(
+                "env",
+                "print_i32",
+                crate::runtime::HostFunction::new(
+                    crate::types::FuncType {
+                        params: vec![ValType::Num(NumType::I32)],
+                        results: vec![],
+                    },
+                    move |args| {
+                        sink.borrow_mut().push(args[0]);
+                        Ok(vec![])
+                    },
+                ),
+            )
+            .unwrap();
+
+        let result = crate::runtime::execute_export(&reg_module, &mut store, "main", &[]);
+        assert_eq!(result, Ok(vec![]));
+        assert_eq!(
+            recorded.borrow().as_slice(),
+            &[crate::runtime::Value::I32(42)]
+        );
+    }
+
+    #[test]
+    fn execute_host_function_with_results() {
+        let source = "(module
+            (import \"env\" \"double\" (func $double (param i32) (result i32)))
+            (func (export \"go\") (param i32) (result i32)
+              local.get 0
+              call $double
+              i32.const 2
+              i32.add))";
+        let reg_module = lower_wat(source);
+        let mut store = crate::runtime::Store::instantiate(&reg_module).unwrap();
+        store
+            .register_host_func(
+                "env",
+                "double",
+                crate::runtime::HostFunction::new(
+                    crate::types::FuncType {
+                        params: vec![ValType::Num(NumType::I32)],
+                        results: vec![ValType::Num(NumType::I32)],
+                    },
+                    |args| {
+                        let crate::runtime::Value::I32(v) = args[0] else {
+                            unreachable!()
+                        };
+                        Ok(vec![crate::runtime::Value::I32(v * 2)])
+                    },
+                ),
+            )
+            .unwrap();
+
+        assert_eq!(
+            crate::runtime::execute_export(
+                &reg_module,
+                &mut store,
+                "go",
+                &[crate::runtime::Value::I32(20)],
+            ),
+            Ok(vec![crate::runtime::Value::I32(42)])
+        );
+    }
+
+    #[test]
+    fn unregistered_import_fails_on_call_not_instantiation() {
+        let source = "(module
+            (import \"env\" \"missing\" (func $missing))
+            (func (export \"go\")
+              call $missing))";
+        let reg_module = lower_wat(source);
+        // Instantiation succeeds (lazy resolution).
+        let mut store = crate::runtime::Store::instantiate(&reg_module).unwrap();
+        let error = crate::runtime::execute_export(&reg_module, &mut store, "go", &[])
+            .expect_err("expected UnknownImport on call");
+        assert_eq!(
+            error.kind,
+            crate::runtime::RuntimeErrorKind::UnknownImport {
+                module: "env".into(),
+                name: "missing".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn host_registration_rejects_mismatch_and_unknown() {
+        let source = "(module
+            (import \"env\" \"f\" (func $f (param i32))))";
+        let reg_module = lower_wat(source);
+        let mut store = crate::runtime::Store::instantiate(&reg_module).unwrap();
+
+        // Wrong signature.
+        let error = store
+            .register_host_func(
+                "env",
+                "f",
+                crate::runtime::HostFunction::new(
+                    crate::types::FuncType {
+                        params: vec![],
+                        results: vec![],
+                    },
+                    |_| Ok(vec![]),
+                ),
+            )
+            .expect_err("expected ImportTypeMismatch");
+        assert!(matches!(
+            error.kind,
+            crate::runtime::RuntimeErrorKind::ImportTypeMismatch { .. }
+        ));
+
+        // Undeclared import name.
+        let error = store
+            .register_host_func(
+                "env",
+                "nope",
+                crate::runtime::HostFunction::new(
+                    crate::types::FuncType {
+                        params: vec![],
+                        results: vec![],
+                    },
+                    |_| Ok(vec![]),
+                ),
+            )
+            .expect_err("expected UnknownImport");
+        assert_eq!(
+            error.kind,
+            crate::runtime::RuntimeErrorKind::UnknownImport {
+                module: "env".into(),
+                name: "nope".into(),
+            }
+        );
     }
 
     #[test]
