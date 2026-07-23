@@ -12,7 +12,7 @@ pub mod gpu;
 pub mod host;
 
 pub use host::HostFunction;
-pub use store::{PAGE_SIZE, Store};
+pub use store::{Imports, PAGE_SIZE, Store};
 
 use crate::lower::{
     BinaryOp, LaneShape, Reg, RegFunc, RegInstr, RegModule, RegOp, RegTerm, UnaryOp, V128BinaryKind,
@@ -192,11 +192,6 @@ fn execute_call_indirect(
     let store = store.ok_or(RuntimeError {
         kind: RuntimeErrorKind::MissingStore,
     })?;
-    if store.is_imported_table(table.0) {
-        return Err(RuntimeError {
-            kind: RuntimeErrorKind::ImportedTableAccessUnsupported { table: table.0 },
-        });
-    }
     let target = store
         .table(table.0)
         .ok_or(RuntimeError {
@@ -265,7 +260,7 @@ pub fn execute_func(func: &RegFunc, args: &[Value]) -> Result<Vec<Value>, Runtim
 /// Execute a function with optional module context for resolving `call`
 /// targets and optional store context for memory/global access, tracking
 /// recursion depth for stack exhaustion.
-fn execute_func_in(
+pub(crate) fn execute_func_in(
     module: Option<&RegModule>,
     mut store: Option<&mut Store>,
     func: &RegFunc,
@@ -623,11 +618,6 @@ fn execute_reg_op(
         }
         RegOp::GlobalGet { dst, global } => {
             let store = require_store(store)?;
-            if store.is_imported_global(global.0) {
-                return Err(RuntimeError {
-                    kind: RuntimeErrorKind::ImportedGlobalAccessUnsupported { global: global.0 },
-                });
-            }
             let value = store.global(global.0).ok_or(RuntimeError {
                 kind: RuntimeErrorKind::UnknownGlobal { global: global.0 },
             })?;
@@ -635,11 +625,6 @@ fn execute_reg_op(
         }
         RegOp::GlobalSet { global, value } => {
             let store = require_store(store)?;
-            if store.is_imported_global(global.0) {
-                return Err(RuntimeError {
-                    kind: RuntimeErrorKind::ImportedGlobalAccessUnsupported { global: global.0 },
-                });
-            }
             let value = get_reg(registers, *value)?;
             store.set_global(global.0, value).ok_or(RuntimeError {
                 kind: RuntimeErrorKind::UnknownGlobal { global: global.0 },
@@ -647,11 +632,6 @@ fn execute_reg_op(
         }
         RegOp::MemorySize { dst, memory } => {
             let store = require_store(store)?;
-            if store.is_imported_memory(memory.0) {
-                return Err(RuntimeError {
-                    kind: RuntimeErrorKind::ImportedMemoryAccessUnsupported { memory: memory.0 },
-                });
-            }
             let pages = store
                 .memory_mut(memory.0)
                 .ok_or(RuntimeError {
@@ -663,11 +643,6 @@ fn execute_reg_op(
         }
         RegOp::MemoryGrow { dst, memory, delta } => {
             let store = require_store(store)?;
-            if store.is_imported_memory(memory.0) {
-                return Err(RuntimeError {
-                    kind: RuntimeErrorKind::ImportedMemoryAccessUnsupported { memory: memory.0 },
-                });
-            }
             let delta = expect_addr(get_reg(registers, *delta)?)?;
             let max_pages = store
                 .memory_type(memory.0)
@@ -1000,22 +975,12 @@ fn execute_reg_op(
 
 /// Read a defined table with imported/unknown handling.
 fn defined_table(store: &Store, idx: u32) -> Result<&Vec<Value>, RuntimeError> {
-    if store.is_imported_table(idx) {
-        return Err(RuntimeError {
-            kind: RuntimeErrorKind::ImportedTableAccessUnsupported { table: idx },
-        });
-    }
     store.table(idx).ok_or(RuntimeError {
         kind: RuntimeErrorKind::UnknownTable { table: idx },
     })
 }
 
 fn defined_table_mut(store: &mut Store, idx: u32) -> Result<&mut Vec<Value>, RuntimeError> {
-    if store.is_imported_table(idx) {
-        return Err(RuntimeError {
-            kind: RuntimeErrorKind::ImportedTableAccessUnsupported { table: idx },
-        });
-    }
     store.table_mut(idx).ok_or(RuntimeError {
         kind: RuntimeErrorKind::UnknownTable { table: idx },
     })
@@ -1045,22 +1010,12 @@ fn require_store(store: Option<&mut Store>) -> Result<&mut Store, RuntimeError> 
 
 /// Read a defined memory with imported/unknown handling.
 fn defined_memory(store: &Store, idx: u32) -> Result<&Vec<u8>, RuntimeError> {
-    if store.is_imported_memory(idx) {
-        return Err(RuntimeError {
-            kind: RuntimeErrorKind::ImportedMemoryAccessUnsupported { memory: idx },
-        });
-    }
     store.memory_ref(idx).ok_or(RuntimeError {
         kind: RuntimeErrorKind::UnknownMemory { memory: idx },
     })
 }
 
 fn defined_memory_mut(store: &mut Store, idx: u32) -> Result<&mut Vec<u8>, RuntimeError> {
-    if store.is_imported_memory(idx) {
-        return Err(RuntimeError {
-            kind: RuntimeErrorKind::ImportedMemoryAccessUnsupported { memory: idx },
-        });
-    }
     store.memory_mut(idx).ok_or(RuntimeError {
         kind: RuntimeErrorKind::UnknownMemory { memory: idx },
     })
@@ -1087,13 +1042,6 @@ fn memory_slice_mut<'s>(
     addr: u32,
     width: usize,
 ) -> Result<&'s mut [u8], RuntimeError> {
-    if store.is_imported_memory(memarg.memory.0) {
-        return Err(RuntimeError {
-            kind: RuntimeErrorKind::ImportedMemoryAccessUnsupported {
-                memory: memarg.memory.0,
-            },
-        });
-    }
     let mem = store.memory_mut(memarg.memory.0).ok_or(RuntimeError {
         kind: RuntimeErrorKind::UnknownMemory {
             memory: memarg.memory.0,
