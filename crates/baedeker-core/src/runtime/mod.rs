@@ -9,7 +9,9 @@ use alloc::{string::String, vec::Vec};
 mod store;
 
 pub mod gpu;
+pub mod host;
 
+pub use host::HostFunction;
 pub use store::{PAGE_SIZE, Store};
 
 use crate::lower::{
@@ -64,6 +66,8 @@ pub enum RuntimeErrorKind {
     UnknownExport { name: String },
     ExportedFunctionNotLowered { func: u32 },
     UnknownFunction { func: u32 },
+    UnknownImport { module: String, name: String },
+    ImportTypeMismatch { module: String, name: String },
     ImportedFunctionCallUnsupported { func: u32 },
     UnknownMemory { memory: u32 },
     UnknownDataSegment { data: u32 },
@@ -154,10 +158,12 @@ fn execute_call(
         kind: RuntimeErrorKind::UnknownFunction { func: callee_idx.0 },
     })?;
     if callee_idx.0 < module.imported_func_count {
-        // Host functions are not yet supported; fail explicitly.
-        return Err(RuntimeError {
-            kind: RuntimeErrorKind::ImportedFunctionCallUnsupported { func: callee_idx.0 },
-        });
+        // Imported function: dispatch to a registered host function (lazy
+        // import resolution).
+        let store = store.ok_or(RuntimeError {
+            kind: RuntimeErrorKind::MissingStore,
+        })?;
+        return store.call_host(callee_idx.0, call_args);
     }
     let callee = module
         .funcs

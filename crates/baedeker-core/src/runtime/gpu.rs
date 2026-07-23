@@ -148,6 +148,7 @@ mod tests {
             funcs: Vec::new(),
             exports: Vec::new(),
             imported_func_count: 0,
+            imported_funcs: Vec::new(),
             memories: Vec::new(),
             globals: Vec::new(),
             tables: Vec::new(),

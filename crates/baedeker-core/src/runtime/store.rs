@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 
 use crate::lower::{RegConstInstr, RegDataMode, RegElemValue, RegElementMode, RegModule};
 use crate::runtime::gpu::{GpuBackend, GpuError, GpuKernelId};
+use crate::runtime::host::HostFunction;
 use crate::runtime::{RuntimeError, RuntimeErrorKind, RuntimeTrap, Value, trap};
 use crate::types::{MemType, TableType};
 
@@ -54,6 +55,10 @@ pub struct Store {
     offload_threshold: usize,
     /// Lazily compiled offload kernels, keyed by kernel name.
     offload_kernels: alloc::collections::BTreeMap<&'static str, GpuKernelId>,
+    /// Function import declarations (from the lowered module).
+    imported_funcs: Vec<crate::lower::RegImport>,
+    /// Registered host functions, one slot per function import.
+    host_funcs: Vec<Option<HostFunction>>,
     imported_memory_count: u32,
     imported_global_count: u32,
     imported_table_count: u32,
@@ -98,6 +103,8 @@ impl Store {
             gpu: None,
             offload_threshold: DEFAULT_OFFLOAD_THRESHOLD,
             offload_kernels: alloc::collections::BTreeMap::new(),
+            imported_funcs: module.imported_funcs.clone(),
+            host_funcs: (0..module.imported_funcs.len()).map(|_| None).collect(),
             imported_memory_count: module.imported_memory_count,
             imported_global_count: module.imported_global_count,
             imported_table_count: module.imported_table_count,
@@ -300,6 +307,73 @@ impl Store {
             Some(backend) => Some(&mut **backend),
             None => None,
         }
+    }
+
+    /// Register a host function for a function import `(module, name)`.
+    ///
+    /// Fails with [`RuntimeErrorKind::UnknownImport`] when the module does
+    /// not declare that import, or [`RuntimeErrorKind::ImportTypeMismatch`]
+    /// when the signatures differ.
+    pub fn register_host_func(
+        &mut self,
+        module: &str,
+        name: &str,
+        func: HostFunction,
+    ) -> Result<(), RuntimeError> {
+        let Some(pos) = self
+            .imported_funcs
+            .iter()
+            .position(|import| import.module == module && import.name == name)
+        else {
+            return Err(RuntimeError {
+                kind: RuntimeErrorKind::UnknownImport {
+                    module: module.into(),
+                    name: name.into(),
+                },
+            });
+        };
+        if func.ty() != &self.imported_funcs[pos].ty {
+            return Err(RuntimeError {
+                kind: RuntimeErrorKind::ImportTypeMismatch {
+                    module: module.into(),
+                    name: name.into(),
+                },
+            });
+        }
+        self.host_funcs[pos] = Some(func);
+        Ok(())
+    }
+
+    /// Invoke the registered host function for an imported function index,
+    /// failing with [`RuntimeErrorKind::UnknownImport`] when unregistered.
+    pub(crate) fn call_host(
+        &mut self,
+        func_idx: u32,
+        args: &[Value],
+    ) -> Result<Vec<Value>, RuntimeError> {
+        if self
+            .host_funcs
+            .get(func_idx as usize)
+            .and_then(Option::as_ref)
+            .is_none()
+        {
+            let (module, name) = self
+                .imported_func(func_idx)
+                .map(|import| (import.module.clone(), import.name.clone()))
+                .unwrap_or_default();
+            return Err(RuntimeError {
+                kind: RuntimeErrorKind::UnknownImport { module, name },
+            });
+        }
+        self.host_funcs[func_idx as usize]
+            .as_mut()
+            .expect("registration checked above")
+            .call(args)
+    }
+
+    /// The import declaration for an imported function index.
+    pub(crate) fn imported_func(&self, func_idx: u32) -> Option<&crate::lower::RegImport> {
+        self.imported_funcs.get(func_idx as usize)
     }
 
     /// Set the element count at or above which bulk SIMD work dispatches
