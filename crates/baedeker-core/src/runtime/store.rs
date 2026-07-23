@@ -1,13 +1,14 @@
 //! Mutable runtime state for an instantiated module: linear memories and
 //! globals. See [Spec §4.4](https://webassembly.github.io/spec/core/exec/runtime.html).
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::lower::{RegConstInstr, RegDataMode, RegElemValue, RegElementMode, RegModule};
 use crate::runtime::gpu::{GpuBackend, GpuError, GpuKernelId};
 use crate::runtime::host::HostFunction;
 use crate::runtime::{RuntimeError, RuntimeErrorKind, RuntimeTrap, Value, trap};
-use crate::types::{MemType, TableType};
+use crate::types::{GlobalType, Limits, MemType, TableType};
 
 /// WGSL element-wise f32 add kernel for bulk SIMD offload.
 const WGSL_F32_ADD: &str = r#"
@@ -31,6 +32,111 @@ pub const DEFAULT_OFFLOAD_THRESHOLD: usize = 1024;
 
 /// Size of one WebAssembly memory page in bytes.
 pub const PAGE_SIZE: usize = 65536;
+
+/// Entities provided by the host to satisfy a module's state imports
+/// (memories, globals, tables), resolved eagerly at instantiation.
+/// Function imports resolve separately and lazily via
+/// [`Store::register_host_func`].
+#[derive(Debug, Default)]
+pub struct Imports {
+    memories: Vec<MemoryProvider>,
+    globals: Vec<GlobalProvider>,
+    tables: Vec<TableProvider>,
+}
+
+impl Imports {
+    /// An empty import set.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Provide an imported memory `(module, name)`.
+    pub fn memory(mut self, module: &str, name: &str, ty: MemType) -> Self {
+        self.memories.push(MemoryProvider {
+            module: module.into(),
+            name: name.into(),
+            ty,
+        });
+        self
+    }
+
+    /// Provide an imported global `(module, name)` with its value.
+    pub fn global(mut self, module: &str, name: &str, ty: GlobalType, value: Value) -> Self {
+        self.globals.push(GlobalProvider {
+            module: module.into(),
+            name: name.into(),
+            ty,
+            value,
+        });
+        self
+    }
+
+    /// Provide an imported table `(module, name)`.
+    pub fn table(mut self, module: &str, name: &str, ty: TableType) -> Self {
+        self.tables.push(TableProvider {
+            module: module.into(),
+            name: name.into(),
+            ty,
+        });
+        self
+    }
+}
+
+/// A host-provided memory for import resolution.
+#[derive(Debug)]
+struct MemoryProvider {
+    module: String,
+    name: String,
+    ty: MemType,
+}
+
+/// A host-provided global for import resolution.
+#[derive(Debug)]
+struct GlobalProvider {
+    module: String,
+    name: String,
+    ty: GlobalType,
+    value: Value,
+}
+
+/// A host-provided table for import resolution.
+#[derive(Debug)]
+struct TableProvider {
+    module: String,
+    name: String,
+    ty: TableType,
+}
+
+/// Spec limits matching: provided limits must be at least as permissive as
+/// declared import limits.
+fn limits_match(provided: &Limits, declared: &Limits) -> bool {
+    if provided.min < declared.min {
+        return false;
+    }
+    match (provided.max, declared.max) {
+        (_, None) => true,
+        (Some(provided), Some(declared)) => provided <= declared,
+        (None, Some(_)) => false,
+    }
+}
+
+fn unknown_import(module: &str, name: &str) -> RuntimeError {
+    RuntimeError {
+        kind: RuntimeErrorKind::UnknownImport {
+            module: module.into(),
+            name: name.into(),
+        },
+    }
+}
+
+fn import_type_mismatch(module: &str, name: &str) -> RuntimeError {
+    RuntimeError {
+        kind: RuntimeErrorKind::ImportTypeMismatch {
+            module: module.into(),
+            name: name.into(),
+        },
+    }
+}
 
 /// Mutable state of an instantiated module.
 ///
@@ -59,21 +165,98 @@ pub struct Store {
     imported_funcs: Vec<crate::lower::RegImport>,
     /// Registered host functions, one slot per function import.
     host_funcs: Vec<Option<HostFunction>>,
+    imported_memories: Vec<Vec<u8>>,
+    imported_memory_types: Vec<MemType>,
+    imported_global_values: Vec<Value>,
+    imported_tables: Vec<Vec<Value>>,
+    imported_table_types: Vec<TableType>,
     imported_memory_count: u32,
     imported_global_count: u32,
     imported_table_count: u32,
 }
 
 impl Store {
-    /// Instantiate a lowered module: zero memories to their minimum size,
-    /// evaluate global initializers in declaration order, then apply active
-    /// data segments.
+    /// Instantiate a lowered module with an empty import set. Modules with
+    /// state imports (memories, globals, tables) need
+    /// [`Store::instantiate_with_imports`].
     pub fn instantiate(module: &RegModule) -> Result<Self, RuntimeError> {
+        Self::instantiate_with_imports(module, &Imports::new())
+    }
+
+    /// Instantiate a lowered module: resolve state imports eagerly from
+    /// `imports`, zero memories to their minimum size, evaluate global
+    /// initializers in declaration order, apply active data segments, and
+    /// run the start function if present.
+    pub fn instantiate_with_imports(
+        module: &RegModule,
+        imports: &Imports,
+    ) -> Result<Self, RuntimeError> {
+        // Resolve imported memories eagerly (spec limits matching).
+        let mut imported_memories = Vec::with_capacity(module.imported_memories.len());
+        let mut imported_memory_types = Vec::with_capacity(module.imported_memories.len());
+        for declared in &module.imported_memories {
+            let provider = imports
+                .memories
+                .iter()
+                .find(|provider| {
+                    provider.module == declared.module && provider.name == declared.name
+                })
+                .ok_or_else(|| unknown_import(&declared.module, &declared.name))?;
+            if !limits_match(&provider.ty.limits, &declared.ty.limits) {
+                return Err(import_type_mismatch(&declared.module, &declared.name));
+            }
+            imported_memories.push(alloc::vec![0u8; provider.ty.limits.min as usize * PAGE_SIZE]);
+            imported_memory_types.push(provider.ty);
+        }
+
+        // Resolve imported globals eagerly (exact type match).
+        let mut imported_global_values = Vec::with_capacity(module.imported_globals.len());
+        for declared in &module.imported_globals {
+            let provider = imports
+                .globals
+                .iter()
+                .find(|provider| {
+                    provider.module == declared.module && provider.name == declared.name
+                })
+                .ok_or_else(|| unknown_import(&declared.module, &declared.name))?;
+            if provider.ty != declared.ty {
+                return Err(import_type_mismatch(&declared.module, &declared.name));
+            }
+            if provider.value.val_type() != declared.ty.val_type {
+                return Err(import_type_mismatch(&declared.module, &declared.name));
+            }
+            imported_global_values.push(provider.value);
+        }
+
+        // Resolve imported tables eagerly (elem type exact, limits matching).
+        let mut imported_tables = Vec::with_capacity(module.imported_tables.len());
+        let mut imported_table_types = Vec::with_capacity(module.imported_tables.len());
+        for declared in &module.imported_tables {
+            let provider = imports
+                .tables
+                .iter()
+                .find(|provider| {
+                    provider.module == declared.module && provider.name == declared.name
+                })
+                .ok_or_else(|| unknown_import(&declared.module, &declared.name))?;
+            if provider.ty.elem != declared.ty.elem
+                || !limits_match(&provider.ty.limits, &declared.ty.limits)
+            {
+                return Err(import_type_mismatch(&declared.module, &declared.name));
+            }
+            imported_tables.push(alloc::vec![
+                Value::FuncRef(None);
+                provider.ty.limits.min as usize
+            ]);
+            imported_table_types.push(provider.ty);
+        }
+
         let mut globals = Vec::with_capacity(module.globals.len());
         for global in &module.globals {
             globals.push(eval_const(
                 &global.init,
                 &globals,
+                &imported_global_values,
                 module.imported_global_count,
             )?);
         }
@@ -105,6 +288,11 @@ impl Store {
             offload_kernels: alloc::collections::BTreeMap::new(),
             imported_funcs: module.imported_funcs.clone(),
             host_funcs: (0..module.imported_funcs.len()).map(|_| None).collect(),
+            imported_memories,
+            imported_memory_types,
+            imported_global_values,
+            imported_tables,
+            imported_table_types,
             imported_memory_count: module.imported_memory_count,
             imported_global_count: module.imported_global_count,
             imported_table_count: module.imported_table_count,
@@ -123,7 +311,12 @@ impl Store {
                 .collect();
             match &segment.mode {
                 RegElementMode::Active { table, offset } => {
-                    let offset = eval_const(offset, &store.globals, store.imported_global_count)?;
+                    let offset = eval_const(
+                        offset,
+                        &store.globals,
+                        &store.imported_global_values,
+                        store.imported_global_count,
+                    )?;
                     let Value::I32(offset) = offset else {
                         return Err(RuntimeError {
                             kind: RuntimeErrorKind::InvalidConstExpr,
@@ -151,7 +344,12 @@ impl Store {
         for segment in &module.data {
             match &segment.mode {
                 RegDataMode::Active { memory, offset } => {
-                    let offset = eval_const(offset, &store.globals, store.imported_global_count)?;
+                    let offset = eval_const(
+                        offset,
+                        &store.globals,
+                        &store.imported_global_values,
+                        store.imported_global_count,
+                    )?;
                     let Value::I32(offset) = offset else {
                         return Err(RuntimeError {
                             kind: RuntimeErrorKind::InvalidConstExpr,
@@ -176,73 +374,107 @@ impl Store {
             }
         }
 
+        // Run the start function, if the module declares one.
+        if let Some(start_idx) = module.start {
+            if start_idx.0 < module.imported_func_count {
+                store.call_host(start_idx.0, &[])?;
+            } else {
+                let func = module
+                    .funcs
+                    .iter()
+                    .find(|func| func.idx == start_idx)
+                    .ok_or(RuntimeError {
+                        kind: RuntimeErrorKind::UnknownFunction { func: start_idx.0 },
+                    })?;
+                crate::runtime::execute_func_in(Some(module), Some(&mut store), func, &[], 0)?;
+            }
+        }
+
         Ok(store)
     }
 
-    /// Shared access to a defined memory by index-space index.
+    /// Shared access to a memory by index-space index (imported first).
     pub(crate) fn memory_ref(&self, idx: u32) -> Option<&Vec<u8>> {
-        let defined = idx.checked_sub(self.imported_memory_count)? as usize;
-        self.memories.get(defined)
+        let idx = idx as usize;
+        if idx < self.imported_memory_count as usize {
+            return self.imported_memories.get(idx);
+        }
+        self.memories.get(idx - self.imported_memory_count as usize)
     }
 
-    /// Mutable access to a defined memory by index-space index, or `None`
-    /// when the index is imported or out of range.
+    /// Mutable access to a memory by index-space index (imported first).
     pub(crate) fn memory_mut(&mut self, idx: u32) -> Option<&mut Vec<u8>> {
-        let defined = idx.checked_sub(self.imported_memory_count)? as usize;
-        self.memories.get_mut(defined)
+        let idx = idx as usize;
+        if idx < self.imported_memory_count as usize {
+            return self.imported_memories.get_mut(idx);
+        }
+        self.memories
+            .get_mut(idx - self.imported_memory_count as usize)
     }
 
-    /// The declared type of a defined memory (for grow limits).
+    /// The declared type of a memory by index-space index (imported first).
     pub(crate) fn memory_type(&self, idx: u32) -> Option<&MemType> {
-        let defined = idx.checked_sub(self.imported_memory_count)? as usize;
-        self.memory_types.get(defined)
+        let idx = idx as usize;
+        if idx < self.imported_memory_count as usize {
+            return self.imported_memory_types.get(idx);
+        }
+        self.memory_types
+            .get(idx - self.imported_memory_count as usize)
     }
 
-    /// Read a defined global by index-space index.
+    /// Read a global by index-space index (imported first).
     pub(crate) fn global(&self, idx: u32) -> Option<Value> {
-        let defined = idx.checked_sub(self.imported_global_count)? as usize;
-        self.globals.get(defined).copied()
+        let idx = idx as usize;
+        if idx < self.imported_global_count as usize {
+            return self.imported_global_values.get(idx).copied();
+        }
+        self.globals
+            .get(idx - self.imported_global_count as usize)
+            .copied()
     }
 
-    /// Write a defined global by index-space index.
+    /// Write a global by index-space index (imported first).
     pub(crate) fn set_global(&mut self, idx: u32, value: Value) -> Option<()> {
-        let defined = idx.checked_sub(self.imported_global_count)? as usize;
-        let slot = self.globals.get_mut(defined)?;
+        let idx = idx as usize;
+        if idx < self.imported_global_count as usize {
+            let slot = self.imported_global_values.get_mut(idx)?;
+            *slot = value;
+            return Some(());
+        }
+        let slot = self
+            .globals
+            .get_mut(idx - self.imported_global_count as usize)?;
         *slot = value;
         Some(())
     }
 
-    /// Whether an index-space memory index refers to an imported memory.
-    pub(crate) fn is_imported_memory(&self, idx: u32) -> bool {
-        idx < self.imported_memory_count
-    }
-
-    /// Whether an index-space global index refers to an imported global.
-    pub(crate) fn is_imported_global(&self, idx: u32) -> bool {
-        idx < self.imported_global_count
-    }
-
-    /// Shared access to a defined table by index-space index.
+    /// Shared access to a table by index-space index (imported first).
     pub(crate) fn table(&self, idx: u32) -> Option<&Vec<Value>> {
-        let defined = idx.checked_sub(self.imported_table_count)? as usize;
-        self.tables.get(defined)
+        let idx = idx as usize;
+        if idx < self.imported_table_count as usize {
+            return self.imported_tables.get(idx);
+        }
+        self.tables.get(idx - self.imported_table_count as usize)
     }
 
-    /// Mutable access to a defined table by index-space index.
+    /// Mutable access to a table by index-space index (imported first).
     pub(crate) fn table_mut(&mut self, idx: u32) -> Option<&mut Vec<Value>> {
-        let defined = idx.checked_sub(self.imported_table_count)? as usize;
-        self.tables.get_mut(defined)
+        let idx = idx as usize;
+        if idx < self.imported_table_count as usize {
+            return self.imported_tables.get_mut(idx);
+        }
+        self.tables
+            .get_mut(idx - self.imported_table_count as usize)
     }
 
-    /// The declared type of a defined table (for grow limits).
+    /// The declared type of a table by index-space index (imported first).
     pub(crate) fn table_type(&self, idx: u32) -> Option<&TableType> {
-        let defined = idx.checked_sub(self.imported_table_count)? as usize;
-        self.table_types.get(defined)
-    }
-
-    /// Whether an index-space table index refers to an imported table.
-    pub(crate) fn is_imported_table(&self, idx: u32) -> bool {
-        idx < self.imported_table_count
+        let idx = idx as usize;
+        if idx < self.imported_table_count as usize {
+            return self.imported_table_types.get(idx);
+        }
+        self.table_types
+            .get(idx - self.imported_table_count as usize)
     }
 
     /// Shared access to a retained element segment.
@@ -463,6 +695,7 @@ fn runtime_gpu_error(error: GpuError) -> RuntimeError {
 fn eval_const(
     expr: &[RegConstInstr],
     globals: &[Value],
+    imported_globals: &[Value],
     imported_global_count: u32,
 ) -> Result<Value, RuntimeError> {
     let mut stack: Vec<Value> = Vec::new();
@@ -473,17 +706,19 @@ fn eval_const(
             RegConstInstr::F32Const(bits) => stack.push(Value::F32(f32::from_bits(bits))),
             RegConstInstr::F64Const(bits) => stack.push(Value::F64(f64::from_bits(bits))),
             RegConstInstr::GlobalGet(global) => {
-                if global.0 < imported_global_count {
-                    return Err(RuntimeError {
-                        kind: RuntimeErrorKind::ImportedGlobalAccessUnsupported {
-                            global: global.0,
-                        },
-                    });
-                }
-                let defined = (global.0 - imported_global_count) as usize;
-                let value = globals.get(defined).copied().ok_or(RuntimeError {
-                    kind: RuntimeErrorKind::UnknownGlobal { global: global.0 },
-                })?;
+                let idx = global.0 as usize;
+                let value = if idx < imported_global_count as usize {
+                    imported_globals.get(idx).copied().ok_or(RuntimeError {
+                        kind: RuntimeErrorKind::UnknownGlobal { global: global.0 },
+                    })?
+                } else {
+                    globals
+                        .get(idx - imported_global_count as usize)
+                        .copied()
+                        .ok_or(RuntimeError {
+                            kind: RuntimeErrorKind::UnknownGlobal { global: global.0 },
+                        })?
+                };
                 stack.push(value);
             }
             RegConstInstr::I32Add => {

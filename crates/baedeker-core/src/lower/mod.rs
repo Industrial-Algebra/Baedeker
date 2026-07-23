@@ -40,6 +40,14 @@ pub struct RegModule {
     /// Function import declarations in index order (for host-function
     /// registration and lazy import resolution).
     pub imported_funcs: Vec<RegImport>,
+    /// Memory import declarations in index order.
+    pub imported_memories: Vec<RegMemoryImport>,
+    /// Global import declarations in index order.
+    pub imported_globals: Vec<RegGlobalImport>,
+    /// Table import declarations in index order.
+    pub imported_tables: Vec<RegTableImport>,
+    /// The start function, if the module declares one.
+    pub start: Option<FuncIdx>,
     /// Defined memories (instantiated as zeroed linear memory).
     pub memories: Vec<MemType>,
     /// Defined globals, initialized in declaration order at instantiation.
@@ -143,6 +151,30 @@ pub struct RegImport {
     pub module: String,
     pub name: String,
     pub ty: FuncType,
+}
+
+/// A memory import declaration in lowered register IR.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegMemoryImport {
+    pub module: String,
+    pub name: String,
+    pub ty: MemType,
+}
+
+/// A global import declaration in lowered register IR.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegGlobalImport {
+    pub module: String,
+    pub name: String,
+    pub ty: crate::types::GlobalType,
+}
+
+/// A table import declaration in lowered register IR.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegTableImport {
+    pub module: String,
+    pub name: String,
+    pub ty: TableType,
 }
 
 /// A function export in lowered register IR.
@@ -1356,6 +1388,47 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
         })
         .collect();
 
+    let imported_memories = module
+        .imports()
+        .iter()
+        .filter_map(|import| match import.desc {
+            ImportDesc::Mem(ty) => Some(RegMemoryImport {
+                module: import.module.clone(),
+                name: import.name.clone(),
+                ty,
+            }),
+            _ => None,
+        })
+        .collect();
+
+    let imported_globals = module
+        .imports()
+        .iter()
+        .filter_map(|import| match import.desc {
+            ImportDesc::Global(ty) => Some(RegGlobalImport {
+                module: import.module.clone(),
+                name: import.name.clone(),
+                ty,
+            }),
+            _ => None,
+        })
+        .collect();
+
+    let imported_tables = module
+        .imports()
+        .iter()
+        .filter_map(|import| match import.desc {
+            ImportDesc::Table(ty) => Some(RegTableImport {
+                module: import.module.clone(),
+                name: import.name.clone(),
+                ty,
+            }),
+            _ => None,
+        })
+        .collect();
+
+    let start = module.start();
+
     let tables = module.tables().to_vec();
     let types = module.types().to_vec();
 
@@ -1404,6 +1477,10 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
         exports,
         imported_func_count,
         imported_funcs,
+        imported_memories,
+        imported_globals,
+        imported_tables,
+        start,
         memories,
         globals,
         tables,
@@ -4709,6 +4786,221 @@ mod tests {
                 name: "nope".into(),
             }
         );
+    }
+
+    #[test]
+    fn execute_imported_memory() {
+        let source = "(module
+            (import \"env\" \"mem\" (memory 1 2))
+            (func (export \"roundtrip\") (param i32 i32) (result i32)
+              local.get 0
+              local.get 1
+              i32.store
+              local.get 0
+              i32.load)
+            (func (export \"grow\") (param i32) (result i32)
+              local.get 0
+              memory.grow))";
+        let reg_module = lower_wat(source);
+        let imports = crate::runtime::Imports::new().memory(
+            "env",
+            "mem",
+            crate::types::MemType {
+                limits: crate::types::Limits {
+                    min: 1,
+                    max: Some(2),
+                },
+            },
+        );
+        let mut store =
+            crate::runtime::Store::instantiate_with_imports(&reg_module, &imports).unwrap();
+
+        assert_eq!(
+            crate::runtime::execute_export(
+                &reg_module,
+                &mut store,
+                "roundtrip",
+                &[
+                    crate::runtime::Value::I32(8),
+                    crate::runtime::Value::I32(42)
+                ],
+            ),
+            Ok(vec![crate::runtime::Value::I32(42)])
+        );
+        // Grow to the provided max (2 pages) succeeds; beyond fails with -1.
+        assert_eq!(
+            crate::runtime::execute_export(
+                &reg_module,
+                &mut store,
+                "grow",
+                &[crate::runtime::Value::I32(1)],
+            ),
+            Ok(vec![crate::runtime::Value::I32(1)])
+        );
+        assert_eq!(
+            crate::runtime::execute_export(
+                &reg_module,
+                &mut store,
+                "grow",
+                &[crate::runtime::Value::I32(1)],
+            ),
+            Ok(vec![crate::runtime::Value::I32(-1)])
+        );
+    }
+
+    #[test]
+    fn execute_imported_global_and_chained_init() {
+        let source = "(module
+            (import \"env\" \"base\" (global $base i32))
+            (global $derived i32 (i32.add (global.get $base) (i32.const 8)))
+            (func (export \"get_derived\") (result i32)
+              global.get $derived))";
+        let reg_module = lower_wat(source);
+        let imports = crate::runtime::Imports::new().global(
+            "env",
+            "base",
+            crate::types::GlobalType {
+                val_type: ValType::Num(NumType::I32),
+                mutability: crate::types::Mutability::Const,
+            },
+            crate::runtime::Value::I32(42),
+        );
+        let mut store =
+            crate::runtime::Store::instantiate_with_imports(&reg_module, &imports).unwrap();
+
+        // The init expr read the imported global's value at instantiation.
+        assert_eq!(
+            crate::runtime::execute_export(&reg_module, &mut store, "get_derived", &[]),
+            Ok(vec![crate::runtime::Value::I32(50)])
+        );
+    }
+
+    #[test]
+    fn execute_imported_mutable_global() {
+        let source = "(module
+            (import \"env\" \"counter\" (global $counter (mut i32)))
+            (func (export \"bump\") (result i32)
+              global.get $counter
+              i32.const 1
+              i32.add
+              global.set $counter
+              global.get $counter))";
+        let reg_module = lower_wat(source);
+        let imports = crate::runtime::Imports::new().global(
+            "env",
+            "counter",
+            crate::types::GlobalType {
+                val_type: ValType::Num(NumType::I32),
+                mutability: crate::types::Mutability::Var,
+            },
+            crate::runtime::Value::I32(41),
+        );
+        let mut store =
+            crate::runtime::Store::instantiate_with_imports(&reg_module, &imports).unwrap();
+        assert_eq!(
+            crate::runtime::execute_export(&reg_module, &mut store, "bump", &[]),
+            Ok(vec![crate::runtime::Value::I32(42)])
+        );
+    }
+
+    #[test]
+    fn execute_imported_table() {
+        let source = "(module
+            (import \"env\" \"tbl\" (table 2 funcref))
+            (type $t (func (result i32)))
+            (func $f (type $t) i32.const 42)
+            (elem declare func $f)
+            (func (export \"go\") (param i32) (result i32)
+              local.get 0
+              call_indirect (type $t))
+            (func (export \"seed\")
+              i32.const 1
+              ref.func $f
+              table.set))";
+        let reg_module = lower_wat(source);
+        let imports = crate::runtime::Imports::new().table(
+            "env",
+            "tbl",
+            crate::types::TableType {
+                elem: crate::types::RefType::FuncRef,
+                limits: crate::types::Limits { min: 2, max: None },
+            },
+        );
+        let mut store =
+            crate::runtime::Store::instantiate_with_imports(&reg_module, &imports).unwrap();
+
+        crate::runtime::execute_export(&reg_module, &mut store, "seed", &[]).unwrap();
+        assert_eq!(
+            crate::runtime::execute_export(
+                &reg_module,
+                &mut store,
+                "go",
+                &[crate::runtime::Value::I32(1)],
+            ),
+            Ok(vec![crate::runtime::Value::I32(42)])
+        );
+    }
+
+    #[test]
+    fn start_function_runs_at_instantiation() {
+        let source = "(module
+            (global $g (mut i32) (i32.const 0))
+            (func $init
+              i32.const 42
+              global.set $g)
+            (func (export \"get\") (result i32)
+              global.get $g)
+            (start $init))";
+        let reg_module = lower_wat(source);
+        let mut store = crate::runtime::Store::instantiate(&reg_module).unwrap();
+        assert_eq!(
+            crate::runtime::execute_export(&reg_module, &mut store, "get", &[]),
+            Ok(vec![crate::runtime::Value::I32(42)])
+        );
+    }
+
+    #[test]
+    fn instantiate_missing_and_mismatched_state_imports() {
+        let source = "(module
+            (import \"env\" \"mem\" (memory 2))
+            (import \"env\" \"g\" (global i32)))";
+        let reg_module = lower_wat(source);
+
+        // Missing providers fail eagerly at instantiation.
+        let error =
+            crate::runtime::Store::instantiate(&reg_module).expect_err("expected UnknownImport");
+        assert_eq!(
+            error.kind,
+            crate::runtime::RuntimeErrorKind::UnknownImport {
+                module: "env".into(),
+                name: "mem".into(),
+            }
+        );
+
+        // Provided limits below declared min fail matching.
+        let imports = crate::runtime::Imports::new()
+            .memory(
+                "env",
+                "mem",
+                crate::types::MemType {
+                    limits: crate::types::Limits { min: 1, max: None },
+                },
+            )
+            .global(
+                "env",
+                "g",
+                crate::types::GlobalType {
+                    val_type: ValType::Num(NumType::I32),
+                    mutability: crate::types::Mutability::Const,
+                },
+                crate::runtime::Value::I32(0),
+            );
+        let error = crate::runtime::Store::instantiate_with_imports(&reg_module, &imports)
+            .expect_err("expected ImportTypeMismatch");
+        assert!(matches!(
+            error.kind,
+            crate::runtime::RuntimeErrorKind::ImportTypeMismatch { .. }
+        ));
     }
 
     #[test]
