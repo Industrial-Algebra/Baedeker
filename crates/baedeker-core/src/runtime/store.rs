@@ -8,7 +8,7 @@ use crate::lower::{RegConstInstr, RegDataMode, RegElemValue, RegElementMode, Reg
 use crate::runtime::gpu::{GpuBackend, GpuError, GpuKernelId};
 use crate::runtime::host::HostFunction;
 use crate::runtime::{RuntimeError, RuntimeErrorKind, RuntimeTrap, Value, trap};
-use crate::types::{GlobalType, Limits, MemType, TableType};
+use crate::types::{FuncIdx, GlobalType, Limits, MemType, TableType};
 
 /// WGSL element-wise f32 add kernel for bulk SIMD offload.
 const WGSL_F32_ADD: &str = r#"
@@ -50,12 +50,31 @@ impl Imports {
         Self::default()
     }
 
-    /// Provide an imported memory `(module, name)`.
+    /// Provide an imported memory `(module, name)` (fresh allocation).
     pub fn memory(mut self, module: &str, name: &str, ty: MemType) -> Self {
         self.memories.push(MemoryProvider {
             module: module.into(),
             name: name.into(),
             ty,
+            shared: None,
+        });
+        self
+    }
+
+    /// Provide an imported memory `(module, name)` linked from another
+    /// module's exports (shared handle).
+    pub fn shared_memory(
+        mut self,
+        module: &str,
+        name: &str,
+        ty: MemType,
+        shared: alloc::rc::Rc<core::cell::RefCell<Vec<u8>>>,
+    ) -> Self {
+        self.memories.push(MemoryProvider {
+            module: module.into(),
+            name: name.into(),
+            ty,
+            shared: Some(shared),
         });
         self
     }
@@ -66,17 +85,56 @@ impl Imports {
             module: module.into(),
             name: name.into(),
             ty,
-            value,
+            value: Some(value),
+            shared: None,
         });
         self
     }
 
-    /// Provide an imported table `(module, name)`.
+    /// Provide an imported global `(module, name)` linked from another
+    /// module's exports (shared cell).
+    pub fn shared_global(
+        mut self,
+        module: &str,
+        name: &str,
+        ty: GlobalType,
+        shared: alloc::rc::Rc<core::cell::Cell<Value>>,
+    ) -> Self {
+        self.globals.push(GlobalProvider {
+            module: module.into(),
+            name: name.into(),
+            ty,
+            value: None,
+            shared: Some(shared),
+        });
+        self
+    }
+
+    /// Provide an imported table `(module, name)` (fresh allocation).
     pub fn table(mut self, module: &str, name: &str, ty: TableType) -> Self {
         self.tables.push(TableProvider {
             module: module.into(),
             name: name.into(),
             ty,
+            shared: None,
+        });
+        self
+    }
+
+    /// Provide an imported table `(module, name)` linked from another
+    /// module's exports (shared handle).
+    pub fn shared_table(
+        mut self,
+        module: &str,
+        name: &str,
+        ty: TableType,
+        shared: alloc::rc::Rc<core::cell::RefCell<Vec<Value>>>,
+    ) -> Self {
+        self.tables.push(TableProvider {
+            module: module.into(),
+            name: name.into(),
+            ty,
+            shared: Some(shared),
         });
         self
     }
@@ -88,6 +146,8 @@ struct MemoryProvider {
     module: String,
     name: String,
     ty: MemType,
+    /// Shared handle when the memory is linked from another module.
+    shared: Option<alloc::rc::Rc<core::cell::RefCell<Vec<u8>>>>,
 }
 
 /// A host-provided global for import resolution.
@@ -96,7 +156,9 @@ struct GlobalProvider {
     module: String,
     name: String,
     ty: GlobalType,
-    value: Value,
+    value: Option<Value>,
+    /// Shared cell when the global is linked from another module.
+    shared: Option<alloc::rc::Rc<core::cell::Cell<Value>>>,
 }
 
 /// A host-provided table for import resolution.
@@ -105,6 +167,8 @@ struct TableProvider {
     module: String,
     name: String,
     ty: TableType,
+    /// Shared handle when the table is linked from another module.
+    shared: Option<alloc::rc::Rc<core::cell::RefCell<Vec<Value>>>>,
 }
 
 /// Spec limits matching: provided limits must be at least as permissive as
@@ -144,10 +208,11 @@ fn import_type_mismatch(module: &str, name: &str) -> RuntimeError {
 /// tracked so accesses to imported memories/globals can fail explicitly.
 #[derive(Debug)]
 pub struct Store {
-    memories: Vec<Vec<u8>>,
+    memories: Vec<alloc::rc::Rc<core::cell::RefCell<Vec<u8>>>>,
     memory_types: Vec<MemType>,
-    globals: Vec<Value>,
-    tables: Vec<Vec<Value>>,
+    globals: Vec<alloc::rc::Rc<core::cell::Cell<Value>>>,
+    global_types: Vec<GlobalType>,
+    tables: Vec<alloc::rc::Rc<core::cell::RefCell<Vec<Value>>>>,
     table_types: Vec<TableType>,
     /// Element segment storage; `None` after the segment is dropped (or was
     /// active/declarative at instantiation).
@@ -155,6 +220,8 @@ pub struct Store {
     /// Data segment storage; `None` after the segment is dropped (or was
     /// active at instantiation).
     data: Vec<Option<Vec<u8>>>,
+    /// Export declarations (from the lowered module).
+    exports: Vec<crate::lower::RegExport>,
     /// Optional GPU backend for bulk SIMD offload (Borsalino Level 1).
     gpu: Option<alloc::boxed::Box<dyn GpuBackend>>,
     /// Element count at or above which bulk SIMD work dispatches to GPU.
@@ -165,10 +232,11 @@ pub struct Store {
     imported_funcs: Vec<crate::lower::RegImport>,
     /// Registered host functions, one slot per function import.
     host_funcs: Vec<Option<HostFunction>>,
-    imported_memories: Vec<Vec<u8>>,
+    imported_memories: Vec<alloc::rc::Rc<core::cell::RefCell<Vec<u8>>>>,
     imported_memory_types: Vec<MemType>,
-    imported_global_values: Vec<Value>,
-    imported_tables: Vec<Vec<Value>>,
+    imported_global_values: Vec<alloc::rc::Rc<core::cell::Cell<Value>>>,
+    imported_global_types: Vec<GlobalType>,
+    imported_tables: Vec<alloc::rc::Rc<core::cell::RefCell<Vec<Value>>>>,
     imported_table_types: Vec<TableType>,
     imported_memory_count: u32,
     imported_global_count: u32,
@@ -205,12 +273,19 @@ impl Store {
             if !limits_match(&provider.ty.limits, &declared.ty.limits) {
                 return Err(import_type_mismatch(&declared.module, &declared.name));
             }
-            imported_memories.push(alloc::vec![0u8; provider.ty.limits.min as usize * PAGE_SIZE]);
+            let entity = provider.shared.clone().unwrap_or_else(|| {
+                alloc::rc::Rc::new(core::cell::RefCell::new(alloc::vec![
+                    0u8;
+                    provider.ty.limits.min as usize * PAGE_SIZE
+                ]))
+            });
+            imported_memories.push(entity);
             imported_memory_types.push(provider.ty);
         }
 
         // Resolve imported globals eagerly (exact type match).
         let mut imported_global_values = Vec::with_capacity(module.imported_globals.len());
+        let mut imported_global_types = Vec::with_capacity(module.imported_globals.len());
         for declared in &module.imported_globals {
             let provider = imports
                 .globals
@@ -222,10 +297,18 @@ impl Store {
             if provider.ty != declared.ty {
                 return Err(import_type_mismatch(&declared.module, &declared.name));
             }
-            if provider.value.val_type() != declared.ty.val_type {
-                return Err(import_type_mismatch(&declared.module, &declared.name));
-            }
-            imported_global_values.push(provider.value);
+            let entity = match (&provider.shared, provider.value) {
+                (Some(shared), _) => shared.clone(),
+                (None, Some(value)) => {
+                    if value.val_type() != declared.ty.val_type {
+                        return Err(import_type_mismatch(&declared.module, &declared.name));
+                    }
+                    alloc::rc::Rc::new(core::cell::Cell::new(value))
+                }
+                (None, None) => unreachable!("global provider sets value or shared"),
+            };
+            imported_global_values.push(entity);
+            imported_global_types.push(provider.ty);
         }
 
         // Resolve imported tables eagerly (elem type exact, limits matching).
@@ -244,34 +327,64 @@ impl Store {
             {
                 return Err(import_type_mismatch(&declared.module, &declared.name));
             }
-            imported_tables.push(alloc::vec![
-                Value::FuncRef(None);
-                provider.ty.limits.min as usize
-            ]);
+            let entity = provider.shared.clone().unwrap_or_else(|| {
+                alloc::rc::Rc::new(core::cell::RefCell::new(alloc::vec![
+                    Value::FuncRef(None);
+                    provider.ty.limits.min as usize
+                ]))
+            });
+            imported_tables.push(entity);
             imported_table_types.push(provider.ty);
         }
 
-        let mut globals = Vec::with_capacity(module.globals.len());
+        let imported_globals_plain: Vec<Value> = imported_global_values
+            .iter()
+            .map(|cell| cell.get())
+            .collect();
+        let mut globals_plain: Vec<Value> = Vec::with_capacity(module.globals.len());
+        let mut globals: Vec<alloc::rc::Rc<core::cell::Cell<Value>>> =
+            Vec::with_capacity(module.globals.len());
+        let mut global_types = Vec::with_capacity(module.globals.len());
         for global in &module.globals {
-            globals.push(eval_const(
+            let value = eval_const(
                 &global.init,
-                &globals,
-                &imported_global_values,
+                &globals_plain,
+                &imported_globals_plain,
                 module.imported_global_count,
-            )?);
+            )?;
+            globals_plain.push(value);
+            globals.push(alloc::rc::Rc::new(core::cell::Cell::new(value)));
+            global_types.push(crate::types::GlobalType {
+                val_type: global.ty,
+                mutability: if global.mutable {
+                    crate::types::Mutability::Var
+                } else {
+                    crate::types::Mutability::Const
+                },
+            });
         }
 
         let memories = module
             .memories
             .iter()
-            .map(|mem| alloc::vec![0u8; mem.limits.min as usize * PAGE_SIZE])
+            .map(|mem| {
+                alloc::rc::Rc::new(core::cell::RefCell::new(alloc::vec![
+                    0u8;
+                    mem.limits.min as usize * PAGE_SIZE
+                ]))
+            })
             .collect();
         let memory_types = module.memories.clone();
 
         let tables = module
             .tables
             .iter()
-            .map(|table| alloc::vec![Value::FuncRef(None); table.limits.min as usize])
+            .map(|table| {
+                alloc::rc::Rc::new(core::cell::RefCell::new(alloc::vec![
+                    Value::FuncRef(None);
+                    table.limits.min as usize
+                ]))
+            })
             .collect();
         let table_types = module.tables.clone();
 
@@ -279,10 +392,12 @@ impl Store {
             memories,
             memory_types,
             globals,
+            global_types,
             tables,
             table_types,
             elements: alloc::vec![None; module.elements.len()],
             data: Vec::new(),
+            exports: module.exports.clone(),
             gpu: None,
             offload_threshold: DEFAULT_OFFLOAD_THRESHOLD,
             offload_kernels: alloc::collections::BTreeMap::new(),
@@ -291,6 +406,7 @@ impl Store {
             imported_memories,
             imported_memory_types,
             imported_global_values,
+            imported_global_types,
             imported_tables,
             imported_table_types,
             imported_memory_count: module.imported_memory_count,
@@ -313,8 +429,8 @@ impl Store {
                 RegElementMode::Active { table, offset } => {
                     let offset = eval_const(
                         offset,
-                        &store.globals,
-                        &store.imported_global_values,
+                        &globals_plain,
+                        &imported_globals_plain,
                         store.imported_global_count,
                     )?;
                     let Value::I32(offset) = offset else {
@@ -322,17 +438,21 @@ impl Store {
                             kind: RuntimeErrorKind::InvalidConstExpr,
                         });
                     };
-                    let target = store.table_mut(table.0).ok_or(RuntimeError {
-                        kind: RuntimeErrorKind::UnknownTable { table: table.0 },
-                    })?;
-                    let start = offset as usize;
-                    let Some(end) = start.checked_add(values.len()) else {
-                        return Err(trap(RuntimeTrap::OutOfBoundsTableAccess));
-                    };
-                    if end > target.len() {
-                        return Err(trap(RuntimeTrap::OutOfBoundsTableAccess));
-                    }
-                    target[start..end].copy_from_slice(&values);
+                    store
+                        .with_table_mut(table.0, |target| {
+                            let start = offset as usize;
+                            let Some(end) = start.checked_add(values.len()) else {
+                                return Err(trap(RuntimeTrap::OutOfBoundsTableAccess));
+                            };
+                            if end > target.len() {
+                                return Err(trap(RuntimeTrap::OutOfBoundsTableAccess));
+                            }
+                            target[start..end].copy_from_slice(&values);
+                            Ok(())
+                        })
+                        .ok_or(RuntimeError {
+                            kind: RuntimeErrorKind::UnknownTable { table: table.0 },
+                        })??;
                 }
                 RegElementMode::Passive => {
                     store.elements[idx] = Some(values);
@@ -346,8 +466,8 @@ impl Store {
                 RegDataMode::Active { memory, offset } => {
                     let offset = eval_const(
                         offset,
-                        &store.globals,
-                        &store.imported_global_values,
+                        &globals_plain,
+                        &imported_globals_plain,
                         store.imported_global_count,
                     )?;
                     let Value::I32(offset) = offset else {
@@ -355,17 +475,21 @@ impl Store {
                             kind: RuntimeErrorKind::InvalidConstExpr,
                         });
                     };
-                    let mem = store.memory_mut(memory.0).ok_or(RuntimeError {
-                        kind: RuntimeErrorKind::UnknownMemory { memory: memory.0 },
-                    })?;
-                    let start = offset as usize;
-                    let Some(end) = start.checked_add(segment.bytes.len()) else {
-                        return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
-                    };
-                    if end > mem.len() {
-                        return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
-                    }
-                    mem[start..end].copy_from_slice(&segment.bytes);
+                    store
+                        .with_memory_mut(memory.0, |mem| {
+                            let start = offset as usize;
+                            let Some(end) = start.checked_add(segment.bytes.len()) else {
+                                return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
+                            };
+                            if end > mem.len() {
+                                return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
+                            }
+                            mem[start..end].copy_from_slice(&segment.bytes);
+                            Ok(())
+                        })
+                        .ok_or(RuntimeError {
+                            kind: RuntimeErrorKind::UnknownMemory { memory: memory.0 },
+                        })??;
                     store.data.push(None);
                 }
                 RegDataMode::Passive => {
@@ -393,23 +517,18 @@ impl Store {
         Ok(store)
     }
 
-    /// Shared access to a memory by index-space index (imported first).
-    pub(crate) fn memory_ref(&self, idx: u32) -> Option<&Vec<u8>> {
+    /// The shared handle of a memory by index-space index (imported first).
+    pub(crate) fn shared_memory(
+        &self,
+        idx: u32,
+    ) -> Option<alloc::rc::Rc<core::cell::RefCell<Vec<u8>>>> {
         let idx = idx as usize;
         if idx < self.imported_memory_count as usize {
-            return self.imported_memories.get(idx);
-        }
-        self.memories.get(idx - self.imported_memory_count as usize)
-    }
-
-    /// Mutable access to a memory by index-space index (imported first).
-    pub(crate) fn memory_mut(&mut self, idx: u32) -> Option<&mut Vec<u8>> {
-        let idx = idx as usize;
-        if idx < self.imported_memory_count as usize {
-            return self.imported_memories.get_mut(idx);
+            return self.imported_memories.get(idx).cloned();
         }
         self.memories
-            .get_mut(idx - self.imported_memory_count as usize)
+            .get(idx - self.imported_memory_count as usize)
+            .cloned()
     }
 
     /// The declared type of a memory by index-space index (imported first).
@@ -424,47 +543,67 @@ impl Store {
 
     /// Read a global by index-space index (imported first).
     pub(crate) fn global(&self, idx: u32) -> Option<Value> {
-        let idx = idx as usize;
-        if idx < self.imported_global_count as usize {
-            return self.imported_global_values.get(idx).copied();
-        }
-        self.globals
-            .get(idx - self.imported_global_count as usize)
-            .copied()
+        self.shared_global(idx).map(|cell| cell.get())
     }
 
     /// Write a global by index-space index (imported first).
     pub(crate) fn set_global(&mut self, idx: u32, value: Value) -> Option<()> {
-        let idx = idx as usize;
-        if idx < self.imported_global_count as usize {
-            let slot = self.imported_global_values.get_mut(idx)?;
-            *slot = value;
-            return Some(());
-        }
-        let slot = self
-            .globals
-            .get_mut(idx - self.imported_global_count as usize)?;
-        *slot = value;
+        let cell = self.shared_global(idx)?;
+        cell.set(value);
         Some(())
     }
 
-    /// Shared access to a table by index-space index (imported first).
-    pub(crate) fn table(&self, idx: u32) -> Option<&Vec<Value>> {
+    /// The shared cell of a global by index-space index (imported first).
+    pub(crate) fn shared_global(&self, idx: u32) -> Option<alloc::rc::Rc<core::cell::Cell<Value>>> {
         let idx = idx as usize;
-        if idx < self.imported_table_count as usize {
-            return self.imported_tables.get(idx);
+        if idx < self.imported_global_count as usize {
+            return self.imported_global_values.get(idx).cloned();
         }
-        self.tables.get(idx - self.imported_table_count as usize)
+        self.globals
+            .get(idx - self.imported_global_count as usize)
+            .cloned()
     }
 
-    /// Mutable access to a table by index-space index (imported first).
-    pub(crate) fn table_mut(&mut self, idx: u32) -> Option<&mut Vec<Value>> {
+    /// The declared type of a global by index-space index (imported first).
+    pub(crate) fn global_type(&self, idx: u32) -> Option<&GlobalType> {
+        let idx = idx as usize;
+        if idx < self.imported_global_count as usize {
+            return self.imported_global_types.get(idx);
+        }
+        self.global_types
+            .get(idx - self.imported_global_count as usize)
+    }
+
+    /// Read a table by index-space index (imported first) via closure.
+    pub(crate) fn with_table<R>(&self, idx: u32, f: impl FnOnce(&[Value]) -> R) -> Option<R> {
+        let shared = self.shared_table(idx)?;
+        let table = shared.borrow();
+        Some(f(&table))
+    }
+
+    /// Mutate a table by index-space index (imported first) via closure.
+    pub(crate) fn with_table_mut<R>(
+        &self,
+        idx: u32,
+        f: impl FnOnce(&mut [Value]) -> R,
+    ) -> Option<R> {
+        let shared = self.shared_table(idx)?;
+        let mut table = shared.borrow_mut();
+        Some(f(&mut table))
+    }
+
+    /// The shared handle of a table by index-space index (imported first).
+    pub(crate) fn shared_table(
+        &self,
+        idx: u32,
+    ) -> Option<alloc::rc::Rc<core::cell::RefCell<Vec<Value>>>> {
         let idx = idx as usize;
         if idx < self.imported_table_count as usize {
-            return self.imported_tables.get_mut(idx);
+            return self.imported_tables.get(idx).cloned();
         }
         self.tables
-            .get_mut(idx - self.imported_table_count as usize)
+            .get(idx - self.imported_table_count as usize)
+            .cloned()
     }
 
     /// The declared type of a table by index-space index (imported first).
@@ -475,6 +614,50 @@ impl Store {
         }
         self.table_types
             .get(idx - self.imported_table_count as usize)
+    }
+
+    /// An exported function by name.
+    pub fn export_func(&self, name: &str) -> Option<FuncIdx> {
+        self.exports.iter().find_map(|export| match export.desc {
+            crate::lower::RegExportDesc::Func(idx) if export.name == name => Some(idx),
+            _ => None,
+        })
+    }
+
+    /// An exported memory by name: its declared type and shared handle.
+    pub fn export_memory(
+        &self,
+        name: &str,
+    ) -> Option<(MemType, alloc::rc::Rc<core::cell::RefCell<Vec<u8>>>)> {
+        let idx = self.exports.iter().find_map(|export| match export.desc {
+            crate::lower::RegExportDesc::Mem(idx) if export.name == name => Some(idx),
+            _ => None,
+        })?;
+        Some((*self.memory_type(idx.0)?, self.shared_memory(idx.0)?))
+    }
+
+    /// An exported global by name: its declared type and shared cell.
+    pub fn export_global(
+        &self,
+        name: &str,
+    ) -> Option<(GlobalType, alloc::rc::Rc<core::cell::Cell<Value>>)> {
+        let idx = self.exports.iter().find_map(|export| match export.desc {
+            crate::lower::RegExportDesc::Global(idx) if export.name == name => Some(idx),
+            _ => None,
+        })?;
+        Some((*self.global_type(idx.0)?, self.shared_global(idx.0)?))
+    }
+
+    /// An exported table by name: its declared type and shared handle.
+    pub fn export_table(
+        &self,
+        name: &str,
+    ) -> Option<(TableType, alloc::rc::Rc<core::cell::RefCell<Vec<Value>>>)> {
+        let idx = self.exports.iter().find_map(|export| match export.desc {
+            crate::lower::RegExportDesc::Table(idx) if export.name == name => Some(idx),
+            _ => None,
+        })?;
+        Some((*self.table_type(idx.0)?, self.shared_table(idx.0)?))
     }
 
     /// Shared access to a retained element segment.
@@ -501,21 +684,26 @@ impl Store {
         Some(())
     }
 
-    /// Read a defined global's current value (embedding/debug access).
+    /// Read a global's current value by index-space index (embedding access).
     pub fn get_global(&self, idx: u32) -> Option<Value> {
         self.global(idx)
     }
 
-    /// Read a defined memory's bytes (embedding/debug access).
-    pub fn get_memory(&self, idx: u32) -> Option<&[u8]> {
-        let defined = idx.checked_sub(self.imported_memory_count)? as usize;
-        self.memories.get(defined).map(Vec::as_slice)
+    /// Read a memory's bytes by index-space index via closure (embedding
+    /// access; memories are shared handles, so direct slices are not
+    /// available).
+    pub fn with_memory<R>(&self, idx: u32, f: impl FnOnce(&[u8]) -> R) -> Option<R> {
+        let shared = self.shared_memory(idx)?;
+        let mem = shared.borrow();
+        Some(f(&mem))
     }
 
-    /// Mutable access to a defined memory's bytes (embedding/debug access).
-    pub fn get_memory_mut(&mut self, idx: u32) -> Option<&mut [u8]> {
-        let defined = idx.checked_sub(self.imported_memory_count)? as usize;
-        self.memories.get_mut(defined).map(Vec::as_mut_slice)
+    /// Mutate a memory's bytes by index-space index via closure (embedding
+    /// access).
+    pub fn with_memory_mut<R>(&mut self, idx: u32, f: impl FnOnce(&mut [u8]) -> R) -> Option<R> {
+        let shared = self.shared_memory(idx)?;
+        let mut mem = shared.borrow_mut();
+        Some(f(&mut mem))
     }
 
     /// Install a GPU backend for bulk SIMD offload.
@@ -629,24 +817,31 @@ impl Store {
         let byte_len = count
             .checked_mul(4)
             .ok_or(trap(RuntimeTrap::OutOfBoundsMemoryAccess))?;
+        let mem_len = self.with_memory(0, |mem| mem.len()).ok_or(RuntimeError {
+            kind: RuntimeErrorKind::UnknownMemory { memory: 0 },
+        })? as u64;
         for ptr in [a_ptr, b_ptr, out_ptr] {
             let end = ptr as u64 + byte_len as u64;
-            if end > self.memories.first().map_or(0, Vec::len) as u64 {
+            if end > mem_len {
                 return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
             }
         }
 
         if self.gpu.is_none() || count < self.offload_threshold {
             // CPU path: element-wise add over the regions.
-            let mem = &mut self.memories[0];
-            for i in 0..count {
-                let at = a_ptr as usize + i * 4;
-                let bt = b_ptr as usize + i * 4;
-                let ot = out_ptr as usize + i * 4;
-                let lhs = f32::from_le_bytes(mem[at..at + 4].try_into().expect("width checked"));
-                let rhs = f32::from_le_bytes(mem[bt..bt + 4].try_into().expect("width checked"));
-                mem[ot..ot + 4].copy_from_slice(&(lhs + rhs).to_le_bytes());
-            }
+            self.with_memory_mut(0, |mem| {
+                for i in 0..count {
+                    let at = a_ptr as usize + i * 4;
+                    let bt = b_ptr as usize + i * 4;
+                    let ot = out_ptr as usize + i * 4;
+                    let lhs =
+                        f32::from_le_bytes(mem[at..at + 4].try_into().expect("width checked"));
+                    let rhs =
+                        f32::from_le_bytes(mem[bt..bt + 4].try_into().expect("width checked"));
+                    mem[ot..ot + 4].copy_from_slice(&(lhs + rhs).to_le_bytes());
+                }
+            })
+            .expect("memory 0 length checked above");
             return Ok(());
         }
 
@@ -663,14 +858,19 @@ impl Store {
             }
         };
 
-        let mem = &mut self.memories[0];
+        let mem = self.shared_memory(0).ok_or(RuntimeError {
+            kind: RuntimeErrorKind::UnknownMemory { memory: 0 },
+        })?;
+        let (a_bytes, b_bytes) = {
+            let mem = mem.borrow();
+            (
+                mem[a_ptr as usize..a_ptr as usize + byte_len].to_vec(),
+                mem[b_ptr as usize..b_ptr as usize + byte_len].to_vec(),
+            )
+        };
         let gpu = self.gpu.as_mut().expect("gpu checked above");
-        let buf_a = gpu
-            .create_buffer(&mem[a_ptr as usize..a_ptr as usize + byte_len])
-            .map_err(runtime_gpu_error)?;
-        let buf_b = gpu
-            .create_buffer(&mem[b_ptr as usize..b_ptr as usize + byte_len])
-            .map_err(runtime_gpu_error)?;
+        let buf_a = gpu.create_buffer(&a_bytes).map_err(runtime_gpu_error)?;
+        let buf_b = gpu.create_buffer(&b_bytes).map_err(runtime_gpu_error)?;
         let buf_out = gpu
             .create_buffer_uninit(byte_len)
             .map_err(runtime_gpu_error)?;
@@ -678,7 +878,8 @@ impl Store {
         gpu.dispatch(kernel, &[buf_a, buf_b, buf_out], workgroups)
             .map_err(runtime_gpu_error)?;
         let result = gpu.read_buffer(buf_out).map_err(runtime_gpu_error)?;
-        mem[out_ptr as usize..out_ptr as usize + byte_len].copy_from_slice(&result[..byte_len]);
+        mem.borrow_mut()[out_ptr as usize..out_ptr as usize + byte_len]
+            .copy_from_slice(&result[..byte_len]);
         Ok(())
     }
 }

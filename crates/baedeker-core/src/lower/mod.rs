@@ -181,7 +181,16 @@ pub struct RegTableImport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegExport {
     pub name: String,
-    pub func: FuncIdx,
+    pub desc: RegExportDesc,
+}
+
+/// What kind of item an export refers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegExportDesc {
+    Func(FuncIdx),
+    Table(TableIdx),
+    Mem(MemIdx),
+    Global(GlobalIdx),
 }
 
 /// A defined function lowered into register IR.
@@ -1463,12 +1472,14 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
     let exports = module
         .exports()
         .iter()
-        .filter_map(|export| match export.desc {
-            ExportDesc::Func(func) => Some(RegExport {
-                name: export.name.clone(),
-                func,
-            }),
-            ExportDesc::Table(_) | ExportDesc::Mem(_) | ExportDesc::Global(_) => None,
+        .map(|export| RegExport {
+            name: export.name.clone(),
+            desc: match export.desc {
+                ExportDesc::Func(idx) => RegExportDesc::Func(idx),
+                ExportDesc::Table(idx) => RegExportDesc::Table(idx),
+                ExportDesc::Mem(idx) => RegExportDesc::Mem(idx),
+                ExportDesc::Global(idx) => RegExportDesc::Global(idx),
+            },
         })
         .collect();
 
@@ -5001,6 +5012,159 @@ mod tests {
             error.kind,
             crate::runtime::RuntimeErrorKind::ImportTypeMismatch { .. }
         ));
+    }
+
+    #[test]
+    fn linked_function_call_across_modules() {
+        // Module A exports "add"; module B imports it as ("a", "add") and
+        // calls it through a link_func bridge.
+        let module_a = alloc::rc::Rc::new(lower_wat(
+            "(module
+               (func (export \"add\") (param i32 i32) (result i32)
+                 local.get 0 local.get 1 i32.add))",
+        ));
+        let store_a = alloc::rc::Rc::new(core::cell::RefCell::new(
+            crate::runtime::Store::instantiate(&module_a).unwrap(),
+        ));
+        let func_idx = store_a.borrow().export_func("add").unwrap();
+
+        let module_b = lower_wat(
+            "(module
+               (import \"a\" \"add\" (func $add (param i32 i32) (result i32)))
+               (func (export \"go\") (param i32 i32) (result i32)
+                 local.get 0 local.get 1 call $add))",
+        );
+        let mut store_b = crate::runtime::Store::instantiate(&module_b).unwrap();
+        let ty = module_b.imported_funcs[0].ty.clone();
+        store_b
+            .register_host_func(
+                "a",
+                "add",
+                crate::runtime::link_func(module_a.clone(), store_a.clone(), func_idx, ty),
+            )
+            .unwrap();
+
+        assert_eq!(
+            crate::runtime::execute_export(
+                &module_b,
+                &mut store_b,
+                "go",
+                &[
+                    crate::runtime::Value::I32(20),
+                    crate::runtime::Value::I32(22)
+                ],
+            ),
+            Ok(vec![crate::runtime::Value::I32(42)])
+        );
+    }
+
+    #[test]
+    fn shared_memory_across_modules() {
+        // A exports its memory; B imports the same handle and writes through
+        // it; the write is visible to A.
+        let module_a = alloc::rc::Rc::new(lower_wat(
+            "(module
+               (memory (export \"mem\") 1)
+               (func (export \"load\") (param i32) (result i32)
+                 local.get 0 i32.load))",
+        ));
+        let store_a = alloc::rc::Rc::new(core::cell::RefCell::new(
+            crate::runtime::Store::instantiate(&module_a).unwrap(),
+        ));
+        let (mem_ty, shared_mem) = store_a.borrow().export_memory("mem").unwrap();
+
+        let module_b = lower_wat(
+            "(module
+               (import \"a\" \"mem\" (memory 1))
+               (func (export \"store\") (param i32 i32)
+                 local.get 0 local.get 1 i32.store))",
+        );
+        let imports = crate::runtime::Imports::new().shared_memory("a", "mem", mem_ty, shared_mem);
+        let mut store_b =
+            crate::runtime::Store::instantiate_with_imports(&module_b, &imports).unwrap();
+
+        crate::runtime::execute_export(
+            &module_b,
+            &mut store_b,
+            "store",
+            &[
+                crate::runtime::Value::I32(16),
+                crate::runtime::Value::I32(42),
+            ],
+        )
+        .unwrap();
+
+        // A reads the value B wrote into the shared memory.
+        let mut store_a_mut = store_a.borrow_mut();
+        assert_eq!(
+            crate::runtime::execute_export(
+                &module_a,
+                &mut store_a_mut,
+                "load",
+                &[crate::runtime::Value::I32(16)],
+            ),
+            Ok(vec![crate::runtime::Value::I32(42)])
+        );
+    }
+
+    #[test]
+    fn shared_global_across_modules() {
+        let module_a = alloc::rc::Rc::new(lower_wat(
+            "(module
+               (global (export \"counter\") (mut i32) (i32.const 41))
+               (func (export \"get\") (result i32) global.get 0))",
+        ));
+        let store_a = alloc::rc::Rc::new(core::cell::RefCell::new(
+            crate::runtime::Store::instantiate(&module_a).unwrap(),
+        ));
+        let (global_ty, shared_global) = store_a.borrow().export_global("counter").unwrap();
+
+        let module_b = lower_wat(
+            "(module
+               (import \"a\" \"counter\" (global (mut i32)))
+               (func (export \"bump\") (result i32)
+                 global.get 0
+                 i32.const 1
+                 i32.add
+                 global.set 0
+                 global.get 0))",
+        );
+        let imports =
+            crate::runtime::Imports::new().shared_global("a", "counter", global_ty, shared_global);
+        let mut store_b =
+            crate::runtime::Store::instantiate_with_imports(&module_b, &imports).unwrap();
+
+        crate::runtime::execute_export(&module_b, &mut store_b, "bump", &[]).unwrap();
+
+        let mut store_a_mut = store_a.borrow_mut();
+        assert_eq!(
+            crate::runtime::execute_export(&module_a, &mut store_a_mut, "get", &[]),
+            Ok(vec![crate::runtime::Value::I32(42)])
+        );
+    }
+
+    #[test]
+    fn reentrant_store_call_fails_gracefully() {
+        // Calling a linked function while its store is already executing
+        // fails with ReentrantStore instead of deadlocking on the RefCell.
+        let module_a = alloc::rc::Rc::new(lower_wat("(module (func (export \"noop\")))"));
+        let store_a = alloc::rc::Rc::new(core::cell::RefCell::new(
+            crate::runtime::Store::instantiate(&module_a).unwrap(),
+        ));
+        let func_idx = store_a.borrow().export_func("noop").unwrap();
+        let mut guard = crate::runtime::link_func(
+            module_a,
+            store_a.clone(),
+            func_idx,
+            crate::types::FuncType {
+                params: vec![],
+                results: vec![],
+            },
+        );
+
+        let _hold = store_a.borrow_mut(); // A is "executing"
+        let error = guard.call(&[]).expect_err("expected ReentrantStore");
+        assert_eq!(error.kind, crate::runtime::RuntimeErrorKind::ReentrantStore);
     }
 
     #[test]

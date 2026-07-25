@@ -8,7 +8,7 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use crate::runtime::{RuntimeError, Value};
+use crate::runtime::{RuntimeError, RuntimeErrorKind, Value, execute_func_in};
 use crate::types::FuncType;
 
 /// The native closure behind a [`HostFunction`].
@@ -52,4 +52,33 @@ impl core::fmt::Debug for HostFunction {
             .field("ty", &self.ty)
             .finish()
     }
+}
+
+/// Link a function exported by another module instance: the resulting
+/// [`HostFunction`] executes `func_idx` against that instance's store when
+/// called, so cross-module calls work with each instance's own state.
+///
+/// Register it as an import on the calling module's store, e.g.
+/// `store_b.register_host_func("a", "add", link_func(module_a, store_a, idx, ty))`.
+///
+/// Cross-module call chains are bounded by [`RuntimeErrorKind::ReentrantStore`]:
+/// a call that re-enters a store already executing fails rather than
+/// deadlocking (mutual recursion across modules is not yet supported).
+pub fn link_func(
+    module: alloc::rc::Rc<crate::lower::RegModule>,
+    store: alloc::rc::Rc<core::cell::RefCell<crate::runtime::Store>>,
+    func_idx: crate::types::FuncIdx,
+    ty: FuncType,
+) -> HostFunction {
+    HostFunction::new(ty, move |args| {
+        let Some(func) = module.funcs.iter().find(|func| func.idx == func_idx) else {
+            return Err(RuntimeError {
+                kind: RuntimeErrorKind::UnknownFunction { func: func_idx.0 },
+            });
+        };
+        let mut store = store.try_borrow_mut().map_err(|_| RuntimeError {
+            kind: RuntimeErrorKind::ReentrantStore,
+        })?;
+        execute_func_in(Some(&module), Some(&mut *store), func, args, 0)
+    })
 }
