@@ -201,13 +201,19 @@ mod tests {
 
     /// Write an f32 into the store's memory 0.
     fn store_f32(store: &mut crate::runtime::Store, addr: u32, value: f32) {
-        let mem = store.get_memory_mut(0).expect("memory 0");
-        mem[addr as usize..addr as usize + 4].copy_from_slice(&value.to_le_bytes());
+        store
+            .with_memory_mut(0, |mem| {
+                mem[addr as usize..addr as usize + 4].copy_from_slice(&value.to_le_bytes());
+            })
+            .expect("memory 0");
     }
 
     fn read_f32(store: &crate::runtime::Store, addr: u32) -> f32 {
-        let mem = store.get_memory(0).expect("memory 0");
-        f32::from_le_bytes(mem[addr as usize..addr as usize + 4].try_into().unwrap())
+        store
+            .with_memory(0, |mem| {
+                f32::from_le_bytes(mem[addr as usize..addr as usize + 4].try_into().unwrap())
+            })
+            .expect("memory 0")
     }
 
     #[test]
@@ -241,8 +247,10 @@ mod tests {
         store.f32_add_region(0, 256, 512, 8).unwrap();
 
         // The fake's readback fills the output region with 0xAA.
-        let mem = store.get_memory(0).expect("memory 0");
-        assert!(mem[512..512 + 32].iter().all(|byte| *byte == 0xAA));
+        let all_filled = store
+            .with_memory(0, |mem| mem[512..512 + 32].iter().all(|byte| *byte == 0xAA))
+            .expect("memory 0");
+        assert!(all_filled);
         assert_eq!(stats.borrow().dispatches, 1);
         assert_eq!(stats.borrow().compiled, 1, "kernel compiled once");
 

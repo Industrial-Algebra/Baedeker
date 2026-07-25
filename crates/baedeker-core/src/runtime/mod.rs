@@ -11,7 +11,7 @@ mod store;
 pub mod gpu;
 pub mod host;
 
-pub use host::HostFunction;
+pub use host::{HostFunction, link_func};
 pub use store::{Imports, PAGE_SIZE, Store};
 
 use crate::lower::{
@@ -68,6 +68,7 @@ pub enum RuntimeErrorKind {
     UnknownFunction { func: u32 },
     UnknownImport { module: String, name: String },
     ImportTypeMismatch { module: String, name: String },
+    ReentrantStore,
     ImportedFunctionCallUnsupported { func: u32 },
     UnknownMemory { memory: u32 },
     UnknownDataSegment { data: u32 },
@@ -133,14 +134,20 @@ pub fn execute_export(
             kind: RuntimeErrorKind::UnknownExport { name: name.into() },
         })?;
 
+    let func_idx = match export.desc {
+        crate::lower::RegExportDesc::Func(idx) => idx,
+        _ => {
+            return Err(RuntimeError {
+                kind: RuntimeErrorKind::UnknownExport { name: name.into() },
+            });
+        }
+    };
     let func = module
         .funcs
         .iter()
-        .find(|func| func.idx == export.func)
+        .find(|func| func.idx == func_idx)
         .ok_or(RuntimeError {
-            kind: RuntimeErrorKind::ExportedFunctionNotLowered {
-                func: export.func.0,
-            },
+            kind: RuntimeErrorKind::ExportedFunctionNotLowered { func: func_idx.0 },
         })?;
 
     execute_func_in(Some(module), Some(store), func, args, 0)
@@ -193,12 +200,10 @@ fn execute_call_indirect(
         kind: RuntimeErrorKind::MissingStore,
     })?;
     let target = store
-        .table(table.0)
+        .with_table(table.0, |table| table.get(idx as usize).copied())
         .ok_or(RuntimeError {
             kind: RuntimeErrorKind::UnknownTable { table: table.0 },
         })?
-        .get(idx as usize)
-        .copied()
         .ok_or(trap(RuntimeTrap::UndefinedElement))?;
     let Value::FuncRef(func_idx) = target else {
         return Err(RuntimeError {
@@ -526,7 +531,15 @@ fn execute_reg_op(
             memarg,
         } => {
             let addr = expect_addr(get_reg(registers, *addr)?)?;
-            let bytes = memory_slice_mut(require_store(store)?, memarg, addr, op.byte_width())?;
+            let store = require_store(store)?;
+            let mem = store.shared_memory(memarg.memory.0).ok_or(RuntimeError {
+                kind: RuntimeErrorKind::UnknownMemory {
+                    memory: memarg.memory.0,
+                },
+            })?;
+            let mem = mem.borrow();
+            let range = memory_bounds(&mem, memarg, addr, op.byte_width())?;
+            let bytes = &mem[range];
             let value = match op {
                 crate::lower::LoadOp::I32 => {
                     Value::I32(i32::from_le_bytes(bytes.try_into().expect("width checked")))
@@ -574,7 +587,15 @@ fn execute_reg_op(
         } => {
             let addr = expect_addr(get_reg(registers, *addr)?)?;
             let value = get_reg(registers, *value)?;
-            let bytes = memory_slice_mut(require_store(store)?, memarg, addr, op.byte_width())?;
+            let store = require_store(store)?;
+            let mem = store.shared_memory(memarg.memory.0).ok_or(RuntimeError {
+                kind: RuntimeErrorKind::UnknownMemory {
+                    memory: memarg.memory.0,
+                },
+            })?;
+            let mut mem = mem.borrow_mut();
+            let range = memory_bounds(&mem, memarg, addr, op.byte_width())?;
+            let bytes = &mut mem[range];
             match (op, value) {
                 (crate::lower::StoreOp::I32, Value::I32(v)) => {
                     bytes.copy_from_slice(&v.to_le_bytes());
@@ -633,11 +654,10 @@ fn execute_reg_op(
         RegOp::MemorySize { dst, memory } => {
             let store = require_store(store)?;
             let pages = store
-                .memory_mut(memory.0)
+                .with_memory(memory.0, |mem| mem.len())
                 .ok_or(RuntimeError {
                     kind: RuntimeErrorKind::UnknownMemory { memory: memory.0 },
                 })?
-                .len()
                 / PAGE_SIZE;
             set_reg(registers, *dst, Value::I32(pages as i32))?;
         }
@@ -648,16 +668,19 @@ fn execute_reg_op(
                 .memory_type(memory.0)
                 .and_then(|ty| ty.limits.max)
                 .unwrap_or(65536) as usize;
-            let mem = store.memory_mut(memory.0).ok_or(RuntimeError {
+            let mem = store.shared_memory(memory.0).ok_or(RuntimeError {
                 kind: RuntimeErrorKind::UnknownMemory { memory: memory.0 },
             })?;
-            let old_pages = mem.len() / PAGE_SIZE;
-            let result = match old_pages.checked_add(delta as usize) {
-                Some(new_pages) if new_pages <= max_pages => {
-                    mem.resize(new_pages * PAGE_SIZE, 0);
-                    old_pages as i32
+            let result = {
+                let mut mem = mem.borrow_mut();
+                let old_pages = mem.len() / PAGE_SIZE;
+                match old_pages.checked_add(delta as usize) {
+                    Some(new_pages) if new_pages <= max_pages => {
+                        mem.resize(new_pages * PAGE_SIZE, 0);
+                        old_pages as i32
+                    }
+                    _ => -1,
                 }
-                _ => -1,
             };
             set_reg(registers, *dst, Value::I32(result))?;
         }
@@ -691,11 +714,17 @@ fn execute_reg_op(
                 }
                 (segment[src..src_end].to_vec(), dst_end)
             };
-            let mem = defined_memory_mut(store, memory.0)?;
-            if dst_end > mem.len() {
-                return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
-            }
-            mem[dst..dst_end].copy_from_slice(&bytes);
+            store
+                .with_memory_mut(memory.0, |mem| {
+                    if dst_end > mem.len() {
+                        return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
+                    }
+                    mem[dst..dst_end].copy_from_slice(&bytes);
+                    Ok(())
+                })
+                .ok_or(RuntimeError {
+                    kind: RuntimeErrorKind::UnknownMemory { memory: memory.0 },
+                })??;
         }
         RegOp::DataDrop { data } => {
             let store = require_store(store)?;
@@ -716,8 +745,20 @@ fn execute_reg_op(
             let count = expect_addr(get_reg(registers, *count)?)? as usize;
             // Bounds-check both ranges before copying (via a temporary, so
             // overlapping regions copy per spec).
-            let src_len = defined_memory(store, src_memory.0)?.len();
-            let dst_len = defined_memory(store, dst_memory.0)?.len();
+            let src_len = store
+                .with_memory(src_memory.0, |mem| mem.len())
+                .ok_or(RuntimeError {
+                    kind: RuntimeErrorKind::UnknownMemory {
+                        memory: src_memory.0,
+                    },
+                })?;
+            let dst_len = store
+                .with_memory(dst_memory.0, |mem| mem.len())
+                .ok_or(RuntimeError {
+                    kind: RuntimeErrorKind::UnknownMemory {
+                        memory: dst_memory.0,
+                    },
+                })?;
             let (Some(src_end), Some(dst_end)) = (src.checked_add(count), dst.checked_add(count))
             else {
                 return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
@@ -725,8 +766,22 @@ fn execute_reg_op(
             if src_end > src_len || dst_end > dst_len {
                 return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
             }
-            let temp: Vec<u8> = defined_memory(store, src_memory.0)?[src..src_end].to_vec();
-            defined_memory_mut(store, dst_memory.0)?[dst..dst_end].copy_from_slice(&temp);
+            let temp: Vec<u8> = store
+                .with_memory(src_memory.0, |mem| mem[src..src_end].to_vec())
+                .ok_or(RuntimeError {
+                    kind: RuntimeErrorKind::UnknownMemory {
+                        memory: src_memory.0,
+                    },
+                })?;
+            store
+                .with_memory_mut(dst_memory.0, |mem| {
+                    mem[dst..dst_end].copy_from_slice(&temp);
+                })
+                .ok_or(RuntimeError {
+                    kind: RuntimeErrorKind::UnknownMemory {
+                        memory: dst_memory.0,
+                    },
+                })?;
         }
         RegOp::MemoryFill {
             memory,
@@ -738,20 +793,31 @@ fn execute_reg_op(
             let dst = expect_addr(get_reg(registers, *dst)?)? as usize;
             let count = expect_addr(get_reg(registers, *count)?)? as usize;
             let value = expect_addr(get_reg(registers, *value)?)? as u8;
-            let mem = defined_memory_mut(store, memory.0)?;
-            let Some(end) = dst.checked_add(count) else {
-                return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
-            };
-            if end > mem.len() {
-                return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
-            }
-            mem[dst..end].fill(value);
+            store
+                .with_memory_mut(memory.0, |mem| {
+                    let Some(end) = dst.checked_add(count) else {
+                        return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
+                    };
+                    if end > mem.len() {
+                        return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
+                    }
+                    mem[dst..end].fill(value);
+                    Ok(())
+                })
+                .ok_or(RuntimeError {
+                    kind: RuntimeErrorKind::UnknownMemory { memory: memory.0 },
+                })??;
         }
         RegOp::TableGet { dst, table, index } => {
             let store = require_store(store)?;
             let idx = expect_addr(get_reg(registers, *index)?)?;
-            let value = table_slot(store, *table, idx)?;
-            set_reg(registers, *dst, *value)?;
+            let value = store
+                .with_table(table.0, |table| table.get(idx as usize).copied())
+                .ok_or(RuntimeError {
+                    kind: RuntimeErrorKind::UnknownTable { table: table.0 },
+                })?
+                .ok_or(trap(RuntimeTrap::OutOfBoundsTableAccess))?;
+            set_reg(registers, *dst, value)?;
         }
         RegOp::TableSet {
             table,
@@ -761,12 +827,25 @@ fn execute_reg_op(
             let store = require_store(store)?;
             let idx = expect_addr(get_reg(registers, *index)?)?;
             let value = get_reg(registers, *value)?;
-            let slot = table_slot_mut(store, *table, idx)?;
-            *slot = value;
+            store
+                .with_table_mut(table.0, |table| {
+                    let slot = table
+                        .get_mut(idx as usize)
+                        .ok_or(trap(RuntimeTrap::OutOfBoundsTableAccess))?;
+                    *slot = value;
+                    Ok(())
+                })
+                .ok_or(RuntimeError {
+                    kind: RuntimeErrorKind::UnknownTable { table: table.0 },
+                })??;
         }
         RegOp::TableSize { dst, table } => {
             let store = require_store(store)?;
-            let len = defined_table(store, table.0)?.len();
+            let len = store
+                .with_table(table.0, |table| table.len())
+                .ok_or(RuntimeError {
+                    kind: RuntimeErrorKind::UnknownTable { table: table.0 },
+                })?;
             set_reg(registers, *dst, Value::I32(len as i32))?;
         }
         RegOp::TableGrow {
@@ -783,14 +862,19 @@ fn execute_reg_op(
                 .and_then(|ty| ty.limits.max)
                 .map(|max| max as usize)
                 .unwrap_or(usize::MAX);
-            let tbl = defined_table_mut(store, table.0)?;
-            let old = tbl.len();
-            let result = match old.checked_add(delta as usize) {
-                Some(new) if new <= max => {
-                    tbl.resize(new, value);
-                    old as i32
+            let tbl = store.shared_table(table.0).ok_or(RuntimeError {
+                kind: RuntimeErrorKind::UnknownTable { table: table.0 },
+            })?;
+            let result = {
+                let mut tbl = tbl.borrow_mut();
+                let old = tbl.len();
+                match old.checked_add(delta as usize) {
+                    Some(new) if new <= max => {
+                        tbl.resize(new, value);
+                        old as i32
+                    }
+                    _ => -1,
                 }
-                _ => -1,
             };
             set_reg(registers, *dst, Value::I32(result))?;
         }
@@ -804,14 +888,20 @@ fn execute_reg_op(
             let dst = expect_addr(get_reg(registers, *dst)?)? as usize;
             let count = expect_addr(get_reg(registers, *count)?)? as usize;
             let value = get_reg(registers, *value)?;
-            let tbl = defined_table_mut(store, table.0)?;
-            let Some(end) = dst.checked_add(count) else {
-                return Err(trap(RuntimeTrap::OutOfBoundsTableAccess));
-            };
-            if end > tbl.len() {
-                return Err(trap(RuntimeTrap::OutOfBoundsTableAccess));
-            }
-            tbl[dst..end].fill(value);
+            store
+                .with_table_mut(table.0, |tbl| {
+                    let Some(end) = dst.checked_add(count) else {
+                        return Err(trap(RuntimeTrap::OutOfBoundsTableAccess));
+                    };
+                    if end > tbl.len() {
+                        return Err(trap(RuntimeTrap::OutOfBoundsTableAccess));
+                    }
+                    tbl[dst..end].fill(value);
+                    Ok(())
+                })
+                .ok_or(RuntimeError {
+                    kind: RuntimeErrorKind::UnknownTable { table: table.0 },
+                })??;
         }
         RegOp::TableCopy {
             dst_table,
@@ -826,8 +916,18 @@ fn execute_reg_op(
             let count = expect_addr(get_reg(registers, *count)?)? as usize;
             // Bounds-check both ranges before copying (via a temporary, so
             // overlapping copies within one table behave per spec).
-            let src_len = defined_table(store, src_table.0)?.len();
-            let dst_len = defined_table(store, dst_table.0)?.len();
+            let src_len =
+                store
+                    .with_table(src_table.0, |table| table.len())
+                    .ok_or(RuntimeError {
+                        kind: RuntimeErrorKind::UnknownTable { table: src_table.0 },
+                    })?;
+            let dst_len =
+                store
+                    .with_table(dst_table.0, |table| table.len())
+                    .ok_or(RuntimeError {
+                        kind: RuntimeErrorKind::UnknownTable { table: dst_table.0 },
+                    })?;
             let (Some(src_end), Some(dst_end)) = (src.checked_add(count), dst.checked_add(count))
             else {
                 return Err(trap(RuntimeTrap::OutOfBoundsTableAccess));
@@ -835,8 +935,18 @@ fn execute_reg_op(
             if src_end > src_len || dst_end > dst_len {
                 return Err(trap(RuntimeTrap::OutOfBoundsTableAccess));
             }
-            let temp: Vec<Value> = defined_table(store, src_table.0)?[src..src_end].to_vec();
-            defined_table_mut(store, dst_table.0)?[dst..dst_end].copy_from_slice(&temp);
+            let temp: Vec<Value> = store
+                .with_table(src_table.0, |table| table[src..src_end].to_vec())
+                .ok_or(RuntimeError {
+                    kind: RuntimeErrorKind::UnknownTable { table: src_table.0 },
+                })?;
+            store
+                .with_table_mut(dst_table.0, |table| {
+                    table[dst..dst_end].copy_from_slice(&temp);
+                })
+                .ok_or(RuntimeError {
+                    kind: RuntimeErrorKind::UnknownTable { table: dst_table.0 },
+                })?;
         }
         RegOp::TableInit {
             table,
@@ -856,7 +966,11 @@ fn execute_reg_op(
                 })?
                 .as_ref()
                 .ok_or(trap(RuntimeTrap::OutOfBoundsTableAccess))?;
-            let table_len = defined_table(store, table.0)?.len();
+            let table_len = store
+                .with_table(table.0, |table| table.len())
+                .ok_or(RuntimeError {
+                    kind: RuntimeErrorKind::UnknownTable { table: table.0 },
+                })?;
             let (Some(src_end), Some(dst_end)) = (src.checked_add(count), dst.checked_add(count))
             else {
                 return Err(trap(RuntimeTrap::OutOfBoundsTableAccess));
@@ -865,7 +979,13 @@ fn execute_reg_op(
                 return Err(trap(RuntimeTrap::OutOfBoundsTableAccess));
             }
             let temp: Vec<Value> = segment[src..src_end].to_vec();
-            defined_table_mut(store, table.0)?[dst..dst_end].copy_from_slice(&temp);
+            store
+                .with_table_mut(table.0, |table| {
+                    table[dst..dst_end].copy_from_slice(&temp);
+                })
+                .ok_or(RuntimeError {
+                    kind: RuntimeErrorKind::UnknownTable { table: table.0 },
+                })?;
         }
         RegOp::ElemDrop { elem } => {
             let store = require_store(store)?;
@@ -973,52 +1093,28 @@ fn execute_reg_op(
     Ok(())
 }
 
-/// Read a defined table with imported/unknown handling.
-fn defined_table(store: &Store, idx: u32) -> Result<&Vec<Value>, RuntimeError> {
-    store.table(idx).ok_or(RuntimeError {
-        kind: RuntimeErrorKind::UnknownTable { table: idx },
-    })
-}
-
-fn defined_table_mut(store: &mut Store, idx: u32) -> Result<&mut Vec<Value>, RuntimeError> {
-    store.table_mut(idx).ok_or(RuntimeError {
-        kind: RuntimeErrorKind::UnknownTable { table: idx },
-    })
-}
-
-fn table_slot(store: &Store, table: TableIdx, idx: u32) -> Result<&Value, RuntimeError> {
-    defined_table(store, table.0)?
-        .get(idx as usize)
-        .ok_or(trap(RuntimeTrap::OutOfBoundsTableAccess))
-}
-
-fn table_slot_mut(
-    store: &mut Store,
-    table: TableIdx,
-    idx: u32,
-) -> Result<&mut Value, RuntimeError> {
-    defined_table_mut(store, table.0)?
-        .get_mut(idx as usize)
-        .ok_or(trap(RuntimeTrap::OutOfBoundsTableAccess))
-}
-
 fn require_store(store: Option<&mut Store>) -> Result<&mut Store, RuntimeError> {
     store.ok_or(RuntimeError {
         kind: RuntimeErrorKind::MissingStore,
     })
 }
 
-/// Read a defined memory with imported/unknown handling.
-fn defined_memory(store: &Store, idx: u32) -> Result<&Vec<u8>, RuntimeError> {
-    store.memory_ref(idx).ok_or(RuntimeError {
-        kind: RuntimeErrorKind::UnknownMemory { memory: idx },
-    })
-}
-
-fn defined_memory_mut(store: &mut Store, idx: u32) -> Result<&mut Vec<u8>, RuntimeError> {
-    store.memory_mut(idx).ok_or(RuntimeError {
-        kind: RuntimeErrorKind::UnknownMemory { memory: idx },
-    })
+/// Bounds-check `addr + memarg.offset` over `width` bytes against a memory,
+/// returning the valid byte range.
+fn memory_bounds(
+    mem: &[u8],
+    memarg: &MemArg,
+    addr: u32,
+    width: usize,
+) -> Result<core::ops::Range<usize>, RuntimeError> {
+    let ea = addr as u64 + memarg.offset as u64;
+    let end = ea
+        .checked_add(width as u64)
+        .ok_or(trap(RuntimeTrap::OutOfBoundsMemoryAccess))?;
+    if end > mem.len() as u64 {
+        return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
+    }
+    Ok(ea as usize..end as usize)
 }
 
 /// Extract an i32 memory address operand as u32.
@@ -1032,29 +1128,6 @@ fn expect_addr(value: Value) -> Result<u32, RuntimeError> {
             },
         }),
     }
-}
-
-/// Bounds-checked mutable slice into linear memory for `addr + memarg.offset`
-/// over `width` bytes.
-fn memory_slice_mut<'s>(
-    store: &'s mut Store,
-    memarg: &MemArg,
-    addr: u32,
-    width: usize,
-) -> Result<&'s mut [u8], RuntimeError> {
-    let mem = store.memory_mut(memarg.memory.0).ok_or(RuntimeError {
-        kind: RuntimeErrorKind::UnknownMemory {
-            memory: memarg.memory.0,
-        },
-    })?;
-    let ea = addr as u64 + memarg.offset as u64;
-    let end = ea
-        .checked_add(width as u64)
-        .ok_or(trap(RuntimeTrap::OutOfBoundsMemoryAccess))?;
-    if end > mem.len() as u64 {
-        return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
-    }
-    Ok(&mut mem[ea as usize..end as usize])
 }
 
 /// Whether references of this type default to null (nullable refs).
