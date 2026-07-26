@@ -1,0 +1,43 @@
+[package]
+name = "baedeker-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+baedeker-core = { path = "../crates/baedeker-core" }
+arbitrary = "1" 
+
+[dependencies.wasm-smith]
+version = "0.254"
+optional = true
+
+[features]
+default = ["wasm-smith"]
+
+# Standalone workspace — intentionally not a member of the root workspace
+# (fuzz builds use a separate nightly toolchain and sanitizer flags).
+[workspace]
+
+[[bin]]
+name = "decode"
+path = "fuzz_targets/decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "validate_lower"
+path = "fuzz_targets/validate_lower.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "smith_module"
+path = "fuzz_targets/smith_module.rs"
+test = false
+doc = false
+required-features = ["wasm-smith"]

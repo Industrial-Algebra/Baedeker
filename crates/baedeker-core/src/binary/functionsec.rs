@@ -18,7 +18,7 @@ pub fn parse_function_section(section: &RawSection<'_>) -> Result<Vec<TypeIdx>, 
         e
     })?;
 
-    let mut functions = Vec::with_capacity(count as usize);
+    let mut functions = Vec::with_capacity(cursor.capacity_hint(count));
     for _ in 0..count {
         let type_idx = leb128::decode_u32(&mut cursor).map_err(|mut e| {
             e.context = DecodeContext::FunctionSection;

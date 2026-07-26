@@ -417,7 +417,7 @@ pub fn decode_instr_with_offset(
         0x0D => Instr::BrIf(LabelIdx(decode_u32(cursor, base_offset)?)),
         0x0E => {
             let target_count = decode_u32(cursor, base_offset)?;
-            let mut targets = Vec::with_capacity(target_count as usize);
+            let mut targets = Vec::with_capacity(cursor.capacity_hint(target_count));
             for _ in 0..target_count {
                 targets.push(LabelIdx(decode_u32(cursor, base_offset)?));
             }
@@ -842,7 +842,7 @@ fn parse_result_types(
     base_offset: usize,
 ) -> Result<Vec<ValType>, DecodeError> {
     let count = decode_u32(cursor, base_offset)?;
-    let mut types = Vec::with_capacity(count as usize);
+    let mut types = Vec::with_capacity(cursor.capacity_hint(count));
     for _ in 0..count {
         types.push(parse_binary_val_type(
             cursor,

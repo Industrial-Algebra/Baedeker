@@ -14,7 +14,7 @@ pub fn parse_export_section(section: &RawSection<'_>) -> Result<Vec<Export>, Dec
     let mut cursor = Cursor::new(section.data);
     let count = decode_u32_in_section(&mut cursor, section.offset)?;
 
-    let mut exports = Vec::with_capacity(count as usize);
+    let mut exports = Vec::with_capacity(cursor.capacity_hint(count));
     for _ in 0..count {
         let name = parse_name(&mut cursor, section.offset)?;
         let desc = parse_export_desc(&mut cursor, section.offset)?;

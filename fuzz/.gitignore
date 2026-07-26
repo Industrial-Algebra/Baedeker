@@ -1,0 +1,8 @@
+# Fuzz build artifacts and corpus growth
+target/
+artifacts/
+
+# Corpus directories are kept but their grown contents are not committed;
+# add interesting minimized crashes to ../crates/baedeker-core/tests/ as
+# regression cases instead.
+corpus/*/

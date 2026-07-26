@@ -20,7 +20,7 @@ pub fn parse_import_section(section: &RawSection<'_>) -> Result<Vec<Import>, Dec
     let mut cursor = Cursor::new(section.data);
     let count = decode_u32_in_section(&mut cursor, section.offset, DecodeContext::ImportSection)?;
 
-    let mut imports = Vec::with_capacity(count as usize);
+    let mut imports = Vec::with_capacity(cursor.capacity_hint(count));
     for _ in 0..count {
         let module = parse_name(&mut cursor, section.offset)?;
         let name = parse_name(&mut cursor, section.offset)?;

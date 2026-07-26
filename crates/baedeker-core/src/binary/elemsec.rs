@@ -19,7 +19,7 @@ pub fn parse_element_section<'a>(
     let mut cursor = Cursor::new(section.data);
     let count = decode_u32_in_section(&mut cursor, section.offset)?;
 
-    let mut segments = Vec::with_capacity(count as usize);
+    let mut segments = Vec::with_capacity(cursor.capacity_hint(count));
     for _ in 0..count {
         segments.push(parse_element_segment(&mut cursor, section.offset)?);
     }
@@ -156,7 +156,7 @@ fn parse_funcidx_vec(
     base_offset: usize,
 ) -> Result<Vec<FuncIdx>, DecodeError> {
     let count = decode_u32_in_section(cursor, base_offset)?;
-    let mut funcs = Vec::with_capacity(count as usize);
+    let mut funcs = Vec::with_capacity(cursor.capacity_hint(count));
     for _ in 0..count {
         funcs.push(FuncIdx(decode_u32_in_section(cursor, base_offset)?));
     }
@@ -168,7 +168,7 @@ fn parse_expr_vec<'a>(
     base_offset: usize,
 ) -> Result<Vec<ElementExpr<'a>>, DecodeError> {
     let count = decode_u32_in_section(cursor, base_offset)?;
-    let mut exprs = Vec::with_capacity(count as usize);
+    let mut exprs = Vec::with_capacity(cursor.capacity_hint(count));
     for _ in 0..count {
         let offset = base_offset + cursor.position();
         let expr = parse_init_expr(cursor, base_offset)?;
