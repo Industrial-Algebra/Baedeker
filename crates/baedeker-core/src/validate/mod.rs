@@ -54,6 +54,7 @@ pub fn validate_module(module: &Module<'_>) -> Result<(), ValidationError> {
     validate_type_definitions(module)?;
     validate_imports(module)?;
     validate_tables(module)?;
+    validate_memories(module)?;
     validate_globals(module)?;
     validate_data_segments(module)?;
     validate_bulk_memory(module)?;
@@ -95,13 +96,13 @@ fn validate_imports(module: &Module<'_>) -> Result<(), ValidationError> {
         .unwrap_or(0);
 
     for import in module.imports() {
-        match import.desc {
+        match &import.desc {
             ImportDesc::Func(type_idx) => {
                 if module.types.get(type_idx.0 as usize).is_none() {
                     return Err(ValidationError {
                         offset: ByteOffset(offset),
                         function: None,
-                        kind: ValidationErrorKind::UnknownTypeIdx { idx: type_idx },
+                        kind: ValidationErrorKind::UnknownTypeIdx { idx: *type_idx },
                     });
                 }
             }
@@ -118,6 +119,47 @@ fn validate_imports(module: &Module<'_>) -> Result<(), ValidationError> {
     Ok(())
 }
 
+fn validate_memories(module: &Module<'_>) -> Result<(), ValidationError> {
+    let offset = module
+        .section(crate::binary::section::SectionId::Memory)
+        .map(|section| section.offset)
+        .unwrap_or(0);
+
+    // Spec limits: at most 65536 pages, and min must not exceed max.
+    for import in module.imports() {
+        if let crate::types::ImportDesc::Mem(memory) = import.desc {
+            validate_memory_limits(memory.limits, offset)?;
+        }
+    }
+    for memory in &module.memories {
+        validate_memory_limits(memory.limits, offset)?;
+    }
+
+    Ok(())
+}
+
+fn validate_memory_limits(
+    limits: crate::types::Limits,
+    offset: usize,
+) -> Result<(), ValidationError> {
+    const MAX_PAGES: u32 = 65536;
+    if limits.min > MAX_PAGES || limits.max.is_some_and(|max| max > MAX_PAGES) {
+        return Err(ValidationError {
+            offset: ByteOffset(offset),
+            function: None,
+            kind: ValidationErrorKind::MemorySizeOutOfRange,
+        });
+    }
+    if limits.max.is_some_and(|max| limits.min > max) {
+        return Err(ValidationError {
+            offset: ByteOffset(offset),
+            function: None,
+            kind: ValidationErrorKind::MemoryMinExceedsMax,
+        });
+    }
+    Ok(())
+}
+
 fn validate_tables(module: &Module<'_>) -> Result<(), ValidationError> {
     let offset = module
         .section(crate::binary::section::SectionId::Table)
@@ -126,6 +168,20 @@ fn validate_tables(module: &Module<'_>) -> Result<(), ValidationError> {
 
     for table in &module.tables {
         validate_reftype_type_indices(module, table.elem, None, offset)?;
+        if let Some(init) = &table.init {
+            // Table init exprs reference imported globals only (matching the
+            // global-init scope).
+            validate_const_expr(
+                module,
+                init,
+                offset,
+                normalize_valtype(module, ValType::Ref(table.elem)),
+                ConstExprGlobalScope::ImportedPlusDefined {
+                    defined_globals_available: 0,
+                },
+                ConstExprKind::GlobalInit,
+            )?;
+        }
     }
 
     Ok(())
@@ -584,7 +640,24 @@ fn validate_elements(module: &Module<'_>) -> Result<(), ValidationError> {
         {
             let table_type = resolve_table_type_for_module(module, *table, *offset_offset)?;
             let elem_type = normalize_reftype(module, element.elem_type);
-            if !reftype_matches(elem_type, table_type.elem) {
+            // FuncIndices segments carry only `ref.func` values, which are
+            // non-null by construction, so they fit both `funcref` and
+            // non-null `(ref func)` tables. Expression segments match on
+            // their declared type.
+            let matches = match &element.init {
+                crate::types::ElementInit::FuncIndices(_) => matches!(
+                    table_type.elem,
+                    RefType::FuncRef
+                        | RefType::Typed {
+                            heap: crate::types::HeapType::Func,
+                            ..
+                        }
+                ),
+                crate::types::ElementInit::Expressions(_) => {
+                    reftype_matches(elem_type, table_type.elem)
+                }
+            };
+            if !matches {
                 return Err(ValidationError {
                     offset: ByteOffset(*offset_offset),
                     function: None,
@@ -760,6 +833,18 @@ fn validate_instr(
                     frame.local_inits.clone(),
                 )
             };
+            // The then-body must have produced exactly the frame's result
+            // types before the stack resets for the else-body.
+            if let Err(found) = ensure_frame_end_types(state, outer_height, &end_types) {
+                return Err(ValidationError {
+                    offset: ByteOffset(offset),
+                    function: Some(function),
+                    kind: ValidationErrorKind::ControlResultTypeMismatch {
+                        expected: end_types.clone(),
+                        found,
+                    },
+                });
+            }
             pop_control_result_types(function, state, &end_types, offset)?;
             state.operands.truncate(outer_height);
             state.local_inits = local_inits;
@@ -1042,6 +1127,18 @@ fn validate_instr(
                             function: Some(function),
                             kind: ValidationErrorKind::SelectOperandTypeMismatch {
                                 expected: lhs,
+                                found: vec![lhs, rhs],
+                            },
+                        });
+                    }
+                    // Untyped select accepts number and vector operands only
+                    // (references require the typed form).
+                    if !matches!(lhs, ValType::Num(_) | ValType::Vec(_)) {
+                        return Err(ValidationError {
+                            offset: ByteOffset(offset),
+                            function: Some(function),
+                            kind: ValidationErrorKind::SelectOperandTypeMismatch {
+                                expected: ValType::Num(crate::types::NumType::I32),
                                 found: vec![lhs, rhs],
                             },
                         });
@@ -2729,6 +2826,15 @@ fn is_declared_function_ref(module: &Module<'_>, target: FuncIdx) -> bool {
         return true;
     }
 
+    if module.tables.iter().any(|table| {
+        table
+            .init
+            .as_ref()
+            .is_some_and(|init| contains_ref_func_expr(module, init, 0, target))
+    }) {
+        return true;
+    }
+
     module.elements().iter().any(|element| match &element.init {
         ElementInit::FuncIndices(funcs) => funcs.contains(&target),
         ElementInit::Expressions(exprs) => exprs
@@ -2883,16 +2989,16 @@ fn resolve_table_type_with_context(
     let imported = module
         .imports
         .iter()
-        .filter_map(|import| match import.desc {
+        .filter_map(|import| match &import.desc {
             ImportDesc::Table(table) => Some(table),
             _ => None,
         });
-    let defined = module.tables.iter().copied();
+    let defined = module.tables.iter();
 
     imported
         .chain(defined)
         .nth(idx.0 as usize)
-        .map(|table| normalize_table_type(module, table))
+        .map(|table| normalize_table_type(module, table.clone()))
         .ok_or(ValidationError {
             offset: ByteOffset(offset),
             function,
@@ -3009,7 +3115,9 @@ fn finish_frame(
         });
     }
 
-    if frame.kind == If && !frame.has_else && !frame.end_types.is_empty() {
+    // An `if` without `else` is valid only when the if's parameter and
+    // result types are identical (the implicit else is the identity).
+    if frame.kind == If && !frame.has_else && frame.start_types != frame.end_types {
         return Err(ValidationError {
             offset: ByteOffset(offset),
             function: Some(function),
@@ -3254,6 +3362,7 @@ fn normalize_table_type(
     crate::types::TableType {
         elem: normalize_reftype(module, ty.elem),
         limits: ty.limits,
+        init: ty.init.clone(),
     }
 }
 

@@ -7,7 +7,9 @@ use alloc::vec::Vec;
 
 use crate::binary::leb128::{self, Cursor};
 use crate::binary::section::RawSection;
-use crate::binary::typeparser::parse_ref_type as parse_binary_ref_type;
+use crate::binary::typeparser::{
+    parse_ref_type as parse_binary_ref_type, parse_ref_type_with_first_byte,
+};
 use crate::error::{ByteOffset, DecodeContext, DecodeError, DecodeErrorKind};
 use crate::types::{Limits, RefType, TableType};
 
@@ -35,9 +37,68 @@ pub fn parse_table_section(section: &RawSection<'_>) -> Result<Vec<TableType>, D
 }
 
 fn parse_table_type(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<TableType, DecodeError> {
-    let elem = parse_ref_type(cursor, base_offset)?;
+    // The 0x40 marker denotes a table with an initializer expression.
+    let first = cursor.read_byte().map_err(|_| DecodeError {
+        offset: ByteOffset(base_offset + cursor.position()),
+        context: DecodeContext::TableSection,
+        kind: DecodeErrorKind::UnexpectedEof,
+    })?;
+    if first == 0x40 {
+        // The 0x40 0x00 marker pair denotes a table with an initializer
+        // expression: reftype, limits, then a const expr.
+        let second = cursor.read_byte().map_err(|_| DecodeError {
+            offset: ByteOffset(base_offset + cursor.position()),
+            context: DecodeContext::TableSection,
+            kind: DecodeErrorKind::UnexpectedEof,
+        })?;
+        if second != 0x00 {
+            return Err(DecodeError {
+                offset: ByteOffset(base_offset + cursor.position() - 1),
+                context: DecodeContext::TableSection,
+                kind: DecodeErrorKind::UnknownRefType { byte: second },
+            });
+        }
+        let elem = parse_ref_type(cursor, base_offset)?;
+        let limits = parse_limits(cursor, base_offset)?;
+        // The initializer is a const expr terminated by `end` (0x0B),
+        // decoded instruction-wise so immediate payloads can't confuse the
+        // terminator scan.
+        let expr_start = cursor.position();
+        let mut block_depth = 0usize;
+        loop {
+            let instr = crate::binary::instr::decode_instr(cursor, base_offset)?;
+            match instr {
+                crate::binary::instr::Instr::Block(_)
+                | crate::binary::instr::Instr::Loop(_)
+                | crate::binary::instr::Instr::If(_) => block_depth += 1,
+                crate::binary::instr::Instr::End => {
+                    if block_depth == 0 {
+                        break;
+                    }
+                    block_depth -= 1;
+                }
+                _ => {}
+            }
+        }
+        let init = cursor.original()[expr_start..cursor.position()].to_vec();
+        return Ok(TableType {
+            elem,
+            limits,
+            init: Some(init),
+        });
+    }
+    let elem = parse_ref_type_with_first_byte(
+        cursor,
+        first,
+        base_offset + cursor.position() - 1,
+        DecodeContext::TableSection,
+    )?;
     let limits = parse_limits(cursor, base_offset)?;
-    Ok(TableType { elem, limits })
+    Ok(TableType {
+        elem,
+        limits,
+        init: None,
+    })
 }
 
 fn parse_ref_type(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<RefType, DecodeError> {

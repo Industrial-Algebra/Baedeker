@@ -334,10 +334,13 @@ pub enum ExportDesc {
 
 /// Table types.
 /// See [Spec §2.3.9](https://webassembly.github.io/spec/core/syntax/types.html#table-types).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableType {
     pub elem: RefType,
     pub limits: Limits,
+    /// Optional initializer expression filling the table at instantiation
+    /// (encoded with the `0x40` table marker).
+    pub init: Option<Vec<u8>>,
 }
 
 /// Mutability of a global variable.

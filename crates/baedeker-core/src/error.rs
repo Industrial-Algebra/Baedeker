@@ -118,6 +118,8 @@ pub enum DecodeErrorKind {
     InvalidUtf8,
     /// Function and code section counts disagree.
     FunctionCodeLengthMismatch { functions: u32, codes: u32 },
+    /// Total local count exceeds the spec maximum (2^32 - 1).
+    TooManyLocals,
     /// Unknown instruction opcode.
     UnknownOpcode { byte: u8 },
     /// Unknown SIMD-prefixed instruction opcode.
@@ -147,6 +149,7 @@ impl fmt::Display for DecodeErrorKind {
                 write!(f, "unsupported WASM version {found} (expected 1)")
             }
             DecodeErrorKind::Leb128TooLong => write!(f, "LEB128 encoding too long"),
+            DecodeErrorKind::TooManyLocals => write!(f, "too many locals"),
             DecodeErrorKind::Leb128Overflow => write!(f, "LEB128 overflow (unused bits set)"),
             DecodeErrorKind::UnknownSectionId { id } => {
                 write!(f, "unknown section ID {id:#04x}")

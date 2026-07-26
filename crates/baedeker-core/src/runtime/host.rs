@@ -76,9 +76,9 @@ pub fn link_func(
                 kind: RuntimeErrorKind::UnknownFunction { func: func_idx.0 },
             });
         };
-        let mut store = store.try_borrow_mut().map_err(|_| RuntimeError {
+        let store = store.try_borrow().map_err(|_| RuntimeError {
             kind: RuntimeErrorKind::ReentrantStore,
         })?;
-        execute_func_in(Some(&module), Some(&mut *store), func, args, 0)
+        execute_func_in(Some(&module), Some(&*store), func, args, 0)
     })
 }

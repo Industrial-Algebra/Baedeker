@@ -104,6 +104,8 @@ fn validation_kind_name(kind: &ValidationErrorKind) -> &'static str {
         ValidationErrorKind::InvalidCallIndirectTableType { .. } => "InvalidCallIndirectTableType",
         ValidationErrorKind::MissingDataCountSection { .. } => "MissingDataCountSection",
         ValidationErrorKind::DuplicateExportName { .. } => "DuplicateExportName",
+        ValidationErrorKind::MemorySizeOutOfRange => "MemorySizeOutOfRange",
+        ValidationErrorKind::MemoryMinExceedsMax => "MemoryMinExceedsMax",
     }
 }
 
@@ -113,6 +115,7 @@ fn decode_kind_name(kind: &DecodeErrorKind) -> &'static str {
         DecodeErrorKind::InvalidMagic => "InvalidMagic",
         DecodeErrorKind::UnsupportedVersion { .. } => "UnsupportedVersion",
         DecodeErrorKind::Leb128TooLong => "Leb128TooLong",
+        DecodeErrorKind::TooManyLocals => "TooManyLocals",
         DecodeErrorKind::Leb128Overflow => "Leb128Overflow",
         DecodeErrorKind::UnknownSectionId { .. } => "UnknownSectionId",
         DecodeErrorKind::SectionOverflow => "SectionOverflow",

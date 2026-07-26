@@ -169,7 +169,7 @@ mod tests {
     fn store_has_no_gpu_by_default() {
         let module = empty_module();
         let store = crate::runtime::Store::instantiate(&module).unwrap();
-        assert!(store.gpu().is_none());
+        assert!(!store.has_gpu());
     }
 
     #[test]
@@ -178,17 +178,33 @@ mod tests {
         let mut store = crate::runtime::Store::instantiate(&module).unwrap();
         let stats = alloc::rc::Rc::new(core::cell::RefCell::new(FakeStats::default()));
         store.set_gpu(Box::new(FakeBackend::new(stats.clone())));
-        assert_eq!(store.gpu().map(GpuBackend::name), Some("fake"));
+        assert!(
+            store
+                .with_gpu_mut(|gpu| gpu.name() == "fake")
+                .expect("backend installed")
+        );
 
-        let gpu = store.gpu_mut().expect("backend installed");
-        let kernel = gpu.compile("vadd_f32x4", "@compute fn vadd() {}").unwrap();
-        let buf_a = gpu.create_buffer(&[1, 2, 3, 4]).unwrap();
-        let buf_out = gpu.create_buffer_uninit(16).unwrap();
-        gpu.dispatch(kernel, &[buf_a, buf_out], [1, 1, 1]).unwrap();
-        assert_eq!(gpu.read_buffer(buf_out).unwrap(), alloc::vec![0xAA; 16]);
+        let (kernel, buf_a, buf_out) = store
+            .with_gpu_mut(|gpu| {
+                let kernel = gpu.compile("vadd_f32x4", "@compute fn vadd() {}")?;
+                let buf_a = gpu.create_buffer(&[1, 2, 3, 4])?;
+                let buf_out = gpu.create_buffer_uninit(16)?;
+                Ok::<_, GpuError>((kernel, buf_a, buf_out))
+            })
+            .expect("backend installed")
+            .unwrap();
+        store
+            .with_gpu_mut(|gpu| gpu.dispatch(kernel, &[buf_a, buf_out], [1, 1, 1]))
+            .expect("backend installed")
+            .unwrap();
+        let result = store
+            .with_gpu_mut(|gpu| gpu.read_buffer(buf_out))
+            .expect("backend installed")
+            .unwrap();
+        assert_eq!(result, alloc::vec![0xAA; 16]);
 
         store.clear_gpu();
-        assert!(store.gpu().is_none());
+        assert!(!store.has_gpu());
     }
 
     fn memory_module() -> RegModule {
