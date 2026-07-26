@@ -159,6 +159,8 @@ pub enum ValidationErrorKind {
     MissingDataCountSection {
         op: &'static str,
     },
+    MemorySizeOutOfRange,
+    MemoryMinExceedsMax,
     DuplicateExportName {
         name: alloc::string::String,
     },
@@ -411,6 +413,10 @@ impl fmt::Display for ValidationErrorKind {
             }
             ValidationErrorKind::MissingDataCountSection { op } => {
                 write!(f, "{} requires a data count section", op)
+            }
+            ValidationErrorKind::MemorySizeOutOfRange => write!(f, "memory size"),
+            ValidationErrorKind::MemoryMinExceedsMax => {
+                write!(f, "size minimum must not be greater than maximum")
             }
             ValidationErrorKind::DuplicateExportName { name } => {
                 write!(f, "duplicate export name {:?}", name)

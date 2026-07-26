@@ -51,9 +51,18 @@ fn parse_code_body<'a>(
     let local_count = decode_u32_in_code_section(&mut body_cursor, base_offset + body_offset)?;
 
     let mut locals = Vec::with_capacity(local_count as usize);
+    let mut total_locals: u64 = 0;
     for _ in 0..local_count {
         let count = decode_u32_in_code_section(&mut body_cursor, base_offset + body_offset)?;
         let val_type = parse_val_type(&mut body_cursor, base_offset + body_offset)?;
+        total_locals += u64::from(count);
+        if total_locals > u64::from(u32::MAX) {
+            return Err(DecodeError {
+                offset: ByteOffset(base_offset + body_offset),
+                context: DecodeContext::CodeSection,
+                kind: DecodeErrorKind::TooManyLocals,
+            });
+        }
         locals.push(LocalDecl { count, val_type });
     }
 

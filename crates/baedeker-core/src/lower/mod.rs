@@ -13,7 +13,7 @@ use crate::error::{ByteOffset, DecodeContext, DecodeErrorKind};
 use crate::types::{
     BlockType, CodeBody, DataMode, ElemIdx, ElementInit, ElementMode, ExportDesc, FuncIdx,
     FuncType, GlobalIdx, ImportDesc, LabelIdx, LocalDecl, LocalIdx, MemArg, MemIdx, MemType,
-    Mutability, NumType, TableIdx, TableType, TypeIdx, ValType,
+    Mutability, NumType, RefType, TableIdx, TableType, TypeIdx, ValType,
 };
 use crate::validate;
 use crate::validate::error::{ValidationError, ValidationErrorKind};
@@ -96,6 +96,8 @@ pub enum RegElementMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegElemValue {
     FuncRef(FuncIdx),
+    /// A `global.get` of a funcref global, resolved at instantiation.
+    GlobalGet(GlobalIdx),
     Null,
 }
 
@@ -137,6 +139,8 @@ pub enum RegConstInstr {
     F32Const(u32),
     F64Const(u64),
     GlobalGet(GlobalIdx),
+    RefNull,
+    RefFunc(FuncIdx),
     I32Add,
     I32Sub,
     I32Mul,
@@ -494,9 +498,10 @@ pub enum RegOp {
     ElemDrop {
         elem: ElemIdx,
     },
-    /// `ref.null`: produce a null reference.
+    /// `ref.null`: produce a null reference of the given reference type.
     RefNull {
         dst: Reg,
+        ref_type: RefType,
     },
     /// `ref.func`: produce a function reference.
     RefFunc {
@@ -784,6 +789,8 @@ pub enum BinaryOp {
     F32Sub,
     F32Mul,
     F32Div,
+    F32Copysign,
+    F64Copysign,
     F32Min,
     F32Max,
     F64Add,
@@ -1057,6 +1064,8 @@ impl BinaryOp {
             BinaryOp::I64GeS => "i64.ge_s",
             BinaryOp::I64GeU => "i64.ge_u",
             BinaryOp::F32Add => "f32.add",
+            BinaryOp::F32Copysign => "f32.copysign",
+            BinaryOp::F64Copysign => "f64.copysign",
             BinaryOp::F32Sub => "f32.sub",
             BinaryOp::F32Mul => "f32.mul",
             BinaryOp::F32Div => "f32.div",
@@ -1139,6 +1148,7 @@ impl BinaryOp {
             | BinaryOp::F32Sub
             | BinaryOp::F32Mul
             | BinaryOp::F32Div
+            | BinaryOp::F32Copysign
             | BinaryOp::F32Min
             | BinaryOp::F32Max
             | BinaryOp::F32Eq
@@ -1151,6 +1161,7 @@ impl BinaryOp {
             | BinaryOp::F64Sub
             | BinaryOp::F64Mul
             | BinaryOp::F64Div
+            | BinaryOp::F64Copysign
             | BinaryOp::F64Min
             | BinaryOp::F64Max
             | BinaryOp::F64Eq
@@ -1218,12 +1229,14 @@ impl BinaryOp {
             | BinaryOp::F32Sub
             | BinaryOp::F32Mul
             | BinaryOp::F32Div
+            | BinaryOp::F32Copysign
             | BinaryOp::F32Min
             | BinaryOp::F32Max => ValType::Num(NumType::F32),
             BinaryOp::F64Add
             | BinaryOp::F64Sub
             | BinaryOp::F64Mul
             | BinaryOp::F64Div
+            | BinaryOp::F64Copysign
             | BinaryOp::F64Min
             | BinaryOp::F64Max => ValType::Num(NumType::F64),
             BinaryOp::F32Eq
@@ -1316,7 +1329,7 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
     let table_elem_types: Vec<crate::types::RefType> = module
         .imports()
         .iter()
-        .filter_map(|import| match import.desc {
+        .filter_map(|import| match &import.desc {
             ImportDesc::Table(table) => Some(table.elem),
             _ => None,
         })
@@ -1426,11 +1439,11 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
     let imported_tables = module
         .imports()
         .iter()
-        .filter_map(|import| match import.desc {
+        .filter_map(|import| match &import.desc {
             ImportDesc::Table(ty) => Some(RegTableImport {
                 module: import.module.clone(),
                 name: import.name.clone(),
-                ty,
+                ty: ty.clone(),
             }),
             _ => None,
         })
@@ -1521,6 +1534,7 @@ fn lower_element_expr(expr: &crate::types::ElementExpr<'_>) -> Result<RegElemVal
         [first, last] if matches!(last.instr, Instr::End) => match first.instr {
             Instr::RefFunc(func) => Ok(RegElemValue::FuncRef(func)),
             Instr::RefNull(_) => Ok(RegElemValue::Null),
+            Instr::GlobalGet(global) => Ok(RegElemValue::GlobalGet(global)),
             ref other => Err(LowerError {
                 offset: first.offset,
                 function: None,
@@ -1542,7 +1556,10 @@ fn lower_element_expr(expr: &crate::types::ElementExpr<'_>) -> Result<RegElemVal
 /// Lower a constant expression (global initializer, data segment offset)
 /// into owned form. Supports the const instructions plus the
 /// extended-const integer arithmetic the validator accepts.
-fn lower_const_expr(expr: &[u8], offset: usize) -> Result<Vec<RegConstInstr>, LowerError> {
+pub(crate) fn lower_const_expr(
+    expr: &[u8],
+    offset: usize,
+) -> Result<Vec<RegConstInstr>, LowerError> {
     let instrs = decode_instr_sequence_with_offsets(expr, offset).map_err(|error| LowerError {
         offset: error.offset,
         function: None,
@@ -1560,6 +1577,8 @@ fn lower_const_expr(expr: &[u8], offset: usize) -> Result<Vec<RegConstInstr>, Lo
             Instr::F32Const(value) => RegConstInstr::F32Const(value.to_bits()),
             Instr::F64Const(value) => RegConstInstr::F64Const(value.to_bits()),
             Instr::GlobalGet(global) => RegConstInstr::GlobalGet(global),
+            Instr::RefNull(_) => RegConstInstr::RefNull,
+            Instr::RefFunc(func) => RegConstInstr::RefFunc(func),
             Instr::I32Add => RegConstInstr::I32Add,
             Instr::I32Sub => RegConstInstr::I32Sub,
             Instr::I32Mul => RegConstInstr::I32Mul,
@@ -2113,6 +2132,45 @@ impl<'b> FuncBuilder<'b> {
                 if self.label_stack.len() == 1 {
                     let values = self.pop_results(offset)?;
                     self.label_stack.pop();
+                    // Finish the body block, then patch branches targeting
+                    // the function frame (`br 0`) to a continuation block
+                    // that returns — delivering their values into the
+                    // return registers via copies, like any other frame.
+                    self.finish_block(RegTerm::Fallthrough);
+                    let continuation_idx = self.blocks.len() as u32;
+                    for pending in core::mem::take(&mut self.pending_branches) {
+                        match &mut self.blocks[pending.block].term {
+                            RegTerm::Br { target_block, .. }
+                            | RegTerm::BrIf { target_block, .. } => {
+                                *target_block = continuation_idx;
+                            }
+                            RegTerm::BrTable {
+                                targets, default, ..
+                            } => {
+                                if let BranchSlot::Table(slot) = pending.slot {
+                                    if slot < targets.len() {
+                                        targets[slot] = continuation_idx;
+                                    } else {
+                                        *default = continuation_idx;
+                                    }
+                                }
+                            }
+                            other => unreachable!(
+                                "pending branch block has non-branch terminator: {other:?}"
+                            ),
+                        }
+                        for (dst, src) in values.iter().zip(pending.values.iter()) {
+                            if dst != src {
+                                self.blocks[pending.block].instrs.push(RegInstr {
+                                    offset,
+                                    op: RegOp::Copy {
+                                        dst: *dst,
+                                        src: *src,
+                                    },
+                                });
+                            }
+                        }
+                    }
                     self.finish_block(RegTerm::Return { values });
                     return Ok(true);
                 }
@@ -2149,11 +2207,47 @@ impl<'b> FuncBuilder<'b> {
                 // Finish the body block.
                 self.finish_block(RegTerm::Fallthrough);
                 // The continuation block will be at self.blocks.len().
+                // For an `if` without `else` that takes parameters, the
+                // IfFork's else edge is the identity: deliver the params into
+                // the continuation's registers via a trampoline inserted
+                // before the continuation (the else path never computed the
+                // result registers). Branches target the continuation after
+                // the trampoline; the else edge targets the trampoline.
+                let frame_pos = self.label_stack.len(); // position of the popped frame
+                let mut else_trampoline: Option<(usize, u32, usize)> = None;
+                if let FrameKind::If {
+                    cond_block,
+                    else_seen: false,
+                } = frame.kind
+                    && !frame.param_regs.is_empty()
+                {
+                    // The then-body must branch over the trampoline (it
+                    // would otherwise fall through it).
+                    let body_end_idx = self.blocks.len() - 1;
+                    let trampoline_idx = self.blocks.len() as u32;
+                    let instrs = values
+                        .iter()
+                        .zip(frame.param_regs.iter())
+                        .filter(|(dst, src)| dst != src)
+                        .map(|(dst, src)| RegInstr {
+                            offset,
+                            op: RegOp::Copy {
+                                dst: *dst,
+                                src: *src,
+                            },
+                        })
+                        .collect();
+                    self.blocks.push(RegBlock::new(
+                        LabelIdx(trampoline_idx),
+                        instrs,
+                        RegTerm::Fallthrough,
+                    ));
+                    else_trampoline = Some((cond_block, trampoline_idx, body_end_idx));
+                }
                 // Back-patch all pending branches targeting this frame,
                 // preserving each terminator's kind (Br vs BrIf), and append
                 // copies delivering each branch's values into the registers
                 // the continuation expects.
-                let frame_pos = self.label_stack.len(); // position of the popped frame
                 let continuation_idx = self.blocks.len() as u32;
                 let mut remaining = Vec::with_capacity(self.pending_branches.len());
                 for pending in core::mem::take(&mut self.pending_branches) {
@@ -2203,15 +2297,26 @@ impl<'b> FuncBuilder<'b> {
                     }
                 }
                 self.pending_branches = remaining;
-                // For an `if` without `else`, the IfFork's else edge targets
-                // the continuation directly.
+                // For an `if` without `else`, patch the IfFork's else edge to
+                // the identity trampoline (when params exist) and retarget
+                // the then-body's end to branch over it to the continuation.
                 if let FrameKind::If {
                     cond_block,
                     else_seen: false,
                 } = frame.kind
-                    && let RegTerm::IfFork { else_block, .. } = &mut self.blocks[cond_block].term
                 {
-                    *else_block = continuation_idx;
+                    if let RegTerm::IfFork { else_block, .. } = &mut self.blocks[cond_block].term {
+                        *else_block = match else_trampoline {
+                            Some((_, trampoline_idx, _)) => trampoline_idx,
+                            None => continuation_idx,
+                        };
+                    }
+                    if let Some((_, _, body_end_idx)) = else_trampoline {
+                        self.blocks[body_end_idx].term = RegTerm::Br {
+                            target_block: continuation_idx,
+                            values: Vec::new(),
+                        };
+                    }
                 }
                 // Start a new continuation block (content will be filled by
                 // subsequent instructions).
@@ -2617,7 +2722,7 @@ impl<'b> FuncBuilder<'b> {
                 let ty = ValType::Ref(ref_type);
                 let dst = self.alloc_reg(ty);
                 self.stack.push(RegValue { reg: dst, ty });
-                self.emit(offset, RegOp::RefNull { dst });
+                self.emit(offset, RegOp::RefNull { dst, ref_type });
             }
             Instr::RefFunc(func) => {
                 // Lowered as the nullable funcref type; the validator has
@@ -3326,6 +3431,8 @@ fn binary_op(instr: &Instr) -> Option<BinaryOp> {
         Instr::I64GeS => Some(BinaryOp::I64GeS),
         Instr::I64GeU => Some(BinaryOp::I64GeU),
         Instr::F32Add => Some(BinaryOp::F32Add),
+        Instr::F32Copysign => Some(BinaryOp::F32Copysign),
+        Instr::F64Copysign => Some(BinaryOp::F64Copysign),
         Instr::F32Sub => Some(BinaryOp::F32Sub),
         Instr::F32Mul => Some(BinaryOp::F32Mul),
         Instr::F32Div => Some(BinaryOp::F32Div),
@@ -3438,8 +3545,13 @@ mod tests {
         let module = Module::decode(&bytes).unwrap();
         let reg_module = module.lower().unwrap();
         let func = &reg_module.funcs[0];
-        assert_eq!(func.blocks.len(), 4);
+        // Body-end fallthrough into a continuation block ending in Return.
+        assert_eq!(func.blocks.len(), 5);
         assert!(matches!(func.blocks[0].term, RegTerm::Fallthrough));
+        assert!(matches!(
+            func.blocks[func.blocks.len() - 2].term,
+            RegTerm::Fallthrough
+        ));
         assert!(matches!(
             func.blocks.last().unwrap().term,
             RegTerm::Return { .. }
@@ -4060,8 +4172,8 @@ mod tests {
         args: &[crate::runtime::Value],
     ) -> Result<Vec<crate::runtime::Value>, crate::runtime::RuntimeError> {
         let reg_module = lower_wat(source);
-        let mut store = crate::runtime::Store::instantiate(&reg_module).unwrap();
-        crate::runtime::execute_export(&reg_module, &mut store, name, args)
+        let store = crate::runtime::Store::instantiate(&reg_module).unwrap();
+        crate::runtime::execute_export(&reg_module, &store, name, args)
     }
 
     #[test]
@@ -4139,12 +4251,21 @@ mod tests {
 
     #[test]
     fn execute_call_exhaustion_traps() {
-        let error = run_wat_export(
-            "(module (func $boom (export \"boom\") call $boom))",
-            "boom",
-            &[],
-        )
-        .unwrap_err();
+        // Deep recursion needs a larger host stack than the default test
+        // thread provides at this call depth.
+        let error = std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                run_wat_export(
+                    "(module (func $boom (export \"boom\") call $boom))",
+                    "boom",
+                    &[],
+                )
+            })
+            .expect("spawn exhaustion test thread")
+            .join()
+            .expect("exhaustion test thread panicked")
+            .unwrap_err();
         assert_eq!(
             error.kind,
             crate::runtime::RuntimeErrorKind::Trap(crate::runtime::RuntimeTrap::CallStackExhausted)
@@ -4462,15 +4583,15 @@ mod tests {
               table.size))";
         // After setup: [null, f, f] (grow 2, fill 2 from 1, copy [1..2] to 2).
         let reg_module = lower_wat(source);
-        let mut store = crate::runtime::Store::instantiate(&reg_module).unwrap();
+        let store = crate::runtime::Store::instantiate(&reg_module).unwrap();
         assert_eq!(
-            crate::runtime::execute_export(&reg_module, &mut store, "setup", &[]),
+            crate::runtime::execute_export(&reg_module, &store, "setup", &[]),
             Ok(vec![crate::runtime::Value::I32(3)])
         );
         assert_eq!(
             crate::runtime::execute_export(
                 &reg_module,
-                &mut store,
+                &store,
                 "go",
                 &[crate::runtime::Value::I32(2)],
             ),
@@ -4681,7 +4802,7 @@ mod tests {
             )
             .unwrap();
 
-        let result = crate::runtime::execute_export(&reg_module, &mut store, "main", &[]);
+        let result = crate::runtime::execute_export(&reg_module, &store, "main", &[]);
         assert_eq!(result, Ok(vec![]));
         assert_eq!(
             recorded.borrow().as_slice(),
@@ -4722,7 +4843,7 @@ mod tests {
         assert_eq!(
             crate::runtime::execute_export(
                 &reg_module,
-                &mut store,
+                &store,
                 "go",
                 &[crate::runtime::Value::I32(20)],
             ),
@@ -4738,8 +4859,8 @@ mod tests {
               call $missing))";
         let reg_module = lower_wat(source);
         // Instantiation succeeds (lazy resolution).
-        let mut store = crate::runtime::Store::instantiate(&reg_module).unwrap();
-        let error = crate::runtime::execute_export(&reg_module, &mut store, "go", &[])
+        let store = crate::runtime::Store::instantiate(&reg_module).unwrap();
+        let error = crate::runtime::execute_export(&reg_module, &store, "go", &[])
             .expect_err("expected UnknownImport on call");
         assert_eq!(
             error.kind,
@@ -4823,13 +4944,12 @@ mod tests {
                 },
             },
         );
-        let mut store =
-            crate::runtime::Store::instantiate_with_imports(&reg_module, &imports).unwrap();
+        let store = crate::runtime::Store::instantiate_with_imports(&reg_module, &imports).unwrap();
 
         assert_eq!(
             crate::runtime::execute_export(
                 &reg_module,
-                &mut store,
+                &store,
                 "roundtrip",
                 &[
                     crate::runtime::Value::I32(8),
@@ -4842,7 +4962,7 @@ mod tests {
         assert_eq!(
             crate::runtime::execute_export(
                 &reg_module,
-                &mut store,
+                &store,
                 "grow",
                 &[crate::runtime::Value::I32(1)],
             ),
@@ -4851,7 +4971,7 @@ mod tests {
         assert_eq!(
             crate::runtime::execute_export(
                 &reg_module,
-                &mut store,
+                &store,
                 "grow",
                 &[crate::runtime::Value::I32(1)],
             ),
@@ -4876,12 +4996,11 @@ mod tests {
             },
             crate::runtime::Value::I32(42),
         );
-        let mut store =
-            crate::runtime::Store::instantiate_with_imports(&reg_module, &imports).unwrap();
+        let store = crate::runtime::Store::instantiate_with_imports(&reg_module, &imports).unwrap();
 
         // The init expr read the imported global's value at instantiation.
         assert_eq!(
-            crate::runtime::execute_export(&reg_module, &mut store, "get_derived", &[]),
+            crate::runtime::execute_export(&reg_module, &store, "get_derived", &[]),
             Ok(vec![crate::runtime::Value::I32(50)])
         );
     }
@@ -4906,10 +5025,9 @@ mod tests {
             },
             crate::runtime::Value::I32(41),
         );
-        let mut store =
-            crate::runtime::Store::instantiate_with_imports(&reg_module, &imports).unwrap();
+        let store = crate::runtime::Store::instantiate_with_imports(&reg_module, &imports).unwrap();
         assert_eq!(
-            crate::runtime::execute_export(&reg_module, &mut store, "bump", &[]),
+            crate::runtime::execute_export(&reg_module, &store, "bump", &[]),
             Ok(vec![crate::runtime::Value::I32(42)])
         );
     }
@@ -4935,16 +5053,16 @@ mod tests {
             crate::types::TableType {
                 elem: crate::types::RefType::FuncRef,
                 limits: crate::types::Limits { min: 2, max: None },
+                init: None,
             },
         );
-        let mut store =
-            crate::runtime::Store::instantiate_with_imports(&reg_module, &imports).unwrap();
+        let store = crate::runtime::Store::instantiate_with_imports(&reg_module, &imports).unwrap();
 
-        crate::runtime::execute_export(&reg_module, &mut store, "seed", &[]).unwrap();
+        crate::runtime::execute_export(&reg_module, &store, "seed", &[]).unwrap();
         assert_eq!(
             crate::runtime::execute_export(
                 &reg_module,
-                &mut store,
+                &store,
                 "go",
                 &[crate::runtime::Value::I32(1)],
             ),
@@ -4964,8 +5082,9 @@ mod tests {
             (start $init))";
         let reg_module = lower_wat(source);
         let mut store = crate::runtime::Store::instantiate(&reg_module).unwrap();
+        store.run_start(&reg_module).unwrap();
         assert_eq!(
-            crate::runtime::execute_export(&reg_module, &mut store, "get", &[]),
+            crate::runtime::execute_export(&reg_module, &store, "get", &[]),
             Ok(vec![crate::runtime::Value::I32(42)])
         );
     }
@@ -5047,7 +5166,7 @@ mod tests {
         assert_eq!(
             crate::runtime::execute_export(
                 &module_b,
-                &mut store_b,
+                &store_b,
                 "go",
                 &[
                     crate::runtime::Value::I32(20),
@@ -5080,12 +5199,11 @@ mod tests {
                  local.get 0 local.get 1 i32.store))",
         );
         let imports = crate::runtime::Imports::new().shared_memory("a", "mem", mem_ty, shared_mem);
-        let mut store_b =
-            crate::runtime::Store::instantiate_with_imports(&module_b, &imports).unwrap();
+        let store_b = crate::runtime::Store::instantiate_with_imports(&module_b, &imports).unwrap();
 
         crate::runtime::execute_export(
             &module_b,
-            &mut store_b,
+            &store_b,
             "store",
             &[
                 crate::runtime::Value::I32(16),
@@ -5095,11 +5213,11 @@ mod tests {
         .unwrap();
 
         // A reads the value B wrote into the shared memory.
-        let mut store_a_mut = store_a.borrow_mut();
+        let store_a_mut = store_a.borrow_mut();
         assert_eq!(
             crate::runtime::execute_export(
                 &module_a,
-                &mut store_a_mut,
+                &store_a_mut,
                 "load",
                 &[crate::runtime::Value::I32(16)],
             ),
@@ -5131,14 +5249,13 @@ mod tests {
         );
         let imports =
             crate::runtime::Imports::new().shared_global("a", "counter", global_ty, shared_global);
-        let mut store_b =
-            crate::runtime::Store::instantiate_with_imports(&module_b, &imports).unwrap();
+        let store_b = crate::runtime::Store::instantiate_with_imports(&module_b, &imports).unwrap();
 
-        crate::runtime::execute_export(&module_b, &mut store_b, "bump", &[]).unwrap();
+        crate::runtime::execute_export(&module_b, &store_b, "bump", &[]).unwrap();
 
-        let mut store_a_mut = store_a.borrow_mut();
+        let store_a_mut = store_a.borrow_mut();
         assert_eq!(
-            crate::runtime::execute_export(&module_a, &mut store_a_mut, "get", &[]),
+            crate::runtime::execute_export(&module_a, &store_a_mut, "get", &[]),
             Ok(vec![crate::runtime::Value::I32(42)])
         );
     }

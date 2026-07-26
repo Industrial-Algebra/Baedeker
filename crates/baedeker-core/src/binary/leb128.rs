@@ -193,10 +193,11 @@ pub fn decode_i32(cursor: &mut Cursor<'_>) -> Result<i32, DecodeError> {
             // On the final byte, check that the unused high bits are consistent
             // with the sign bit (either all 0s or all 1s).
             if i == 4 {
-                // For 5th byte at shift=28, only bits 0-3 carry data.
-                // Bits 4-6 must be sign-extended from bit 3.
-                let sign_and_unused = byte & 0x70;
-                if sign_and_unused != 0 && sign_and_unused != 0x70 {
+                // 5th byte at shift=28: bits 0-3 carry data (bit 3 = the
+                // i32 sign bit); bits 4-6 must sign-extend bit 3 exactly.
+                let sign = byte & 0x08;
+                let extension = byte & 0x70;
+                if (sign == 0 && extension != 0) || (sign != 0 && extension != 0x70) {
                     return Err(DecodeError {
                         offset: ByteOffset(start),
                         context: DecodeContext::Leb128,
@@ -239,9 +240,11 @@ pub fn decode_i64(cursor: &mut Cursor<'_>) -> Result<i64, DecodeError> {
 
         if byte & 0x80 == 0 {
             if i == 9 {
-                // 10th byte at shift=63: only bit 0 carries data, bit 6 is sign.
-                let sign_and_unused = byte & 0x7E;
-                if sign_and_unused != 0 && sign_and_unused != 0x7E {
+                // 10th byte at shift=63: bit 0 carries data (the i64 sign
+                // bit); bits 1-6 must sign-extend bit 0 exactly.
+                let sign = byte & 0x01;
+                let extension = byte & 0x7E;
+                if (sign == 0 && extension != 0) || (sign != 0 && extension != 0x7E) {
                     return Err(DecodeError {
                         offset: ByteOffset(start),
                         context: DecodeContext::Leb128,

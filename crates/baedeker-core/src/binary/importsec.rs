@@ -75,7 +75,11 @@ fn parse_import_desc(
 fn parse_table_type(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<TableType, DecodeError> {
     let elem = parse_ref_type(cursor, base_offset)?;
     let limits = parse_limits(cursor, base_offset)?;
-    Ok(TableType { elem, limits })
+    Ok(TableType {
+        elem,
+        limits,
+        init: None,
+    })
 }
 
 fn parse_global_type(

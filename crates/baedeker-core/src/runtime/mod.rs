@@ -12,7 +12,7 @@ pub mod gpu;
 pub mod host;
 
 pub use host::{HostFunction, link_func};
-pub use store::{Imports, PAGE_SIZE, Store};
+pub use store::{Imports, LinkGroup, PAGE_SIZE, Store};
 
 use crate::lower::{
     BinaryOp, LaneShape, Reg, RegFunc, RegInstr, RegModule, RegOp, RegTerm, UnaryOp, V128BinaryKind,
@@ -26,10 +26,14 @@ pub enum Value {
     I64(i64),
     F32(f32),
     F64(f64),
-    /// A reference value: either null or a function index. Until host
-    /// support lands, null also represents every `externref` value (the
-    /// runtime cannot produce non-null externrefs yet).
-    FuncRef(Option<u32>),
+    /// A reference value: either null or an `(instance, function)` pair
+    /// identifying a function in some instance. Instance identity makes
+    /// funcref values meaningful across linked modules; instance 0 is the
+    /// default for unlinked execution.
+    FuncRef(Option<(u32, u32)>),
+    /// An external reference value from the host: either null or a
+    /// host-assigned index.
+    ExternRef(Option<u32>),
     /// A 128-bit vector, stored as raw little-endian bytes; lane
     /// interpretation happens per operation.
     V128([u8; 16]),
@@ -43,6 +47,7 @@ impl Value {
             Value::F32(_) => ValType::Num(NumType::F32),
             Value::F64(_) => ValType::Num(NumType::F64),
             Value::FuncRef(_) => ValType::Ref(RefType::FuncRef),
+            Value::ExternRef(_) => ValType::Ref(RefType::ExternRef),
             Value::V128(_) => ValType::Vec(crate::types::VecType::V128),
         }
     }
@@ -69,6 +74,8 @@ pub enum RuntimeErrorKind {
     UnknownImport { module: String, name: String },
     ImportTypeMismatch { module: String, name: String },
     ReentrantStore,
+    UnknownInstance { instance: u32 },
+    ResourceLimitExceeded { what: &'static str },
     ImportedFunctionCallUnsupported { func: u32 },
     UnknownMemory { memory: u32 },
     UnknownDataSegment { data: u32 },
@@ -122,7 +129,7 @@ impl RuntimeTrap {
 /// Execute an exported lowered function by name.
 pub fn execute_export(
     module: &RegModule,
-    store: &mut Store,
+    store: &Store,
     name: &str,
     args: &[Value],
 ) -> Result<Vec<Value>, RuntimeError> {
@@ -142,6 +149,11 @@ pub fn execute_export(
             });
         }
     };
+    // Re-exported imported functions dispatch to the registered host
+    // function; defined functions execute in the interpreter.
+    if func_idx.0 < module.imported_func_count {
+        return store.call_host(func_idx.0, args);
+    }
     let func = module
         .funcs
         .iter()
@@ -156,7 +168,7 @@ pub fn execute_export(
 /// Resolve and invoke a direct call target.
 fn execute_call(
     module: Option<&RegModule>,
-    store: Option<&mut Store>,
+    store: Option<&Store>,
     callee_idx: &FuncIdx,
     call_args: &[Value],
     depth: usize,
@@ -186,7 +198,7 @@ fn execute_call(
 #[allow(clippy::too_many_arguments)]
 fn execute_call_indirect(
     module: Option<&RegModule>,
-    store: Option<&mut Store>,
+    store: Option<&Store>,
     type_idx: &crate::types::TypeIdx,
     table: &TableIdx,
     idx: u32,
@@ -213,13 +225,103 @@ fn execute_call_indirect(
             },
         });
     };
-    let Some(func_idx) = func_idx else {
+    let Some((instance_id, func_idx)) = func_idx else {
         return Err(trap(RuntimeTrap::UninitializedElement));
     };
+    if instance_id != store.instance_id() {
+        // Cross-instance funcref: resolve through the link group and execute
+        // against the owning instance (structural type check against the
+        // remote module's type entries).
+        let (module, target_store) = {
+            let group = store.link_group().ok_or(RuntimeError {
+                kind: RuntimeErrorKind::UnknownInstance {
+                    instance: instance_id,
+                },
+            })?;
+            let group = group.borrow();
+            let Some((module, store)) = group.get(&instance_id) else {
+                return Err(RuntimeError {
+                    kind: RuntimeErrorKind::UnknownInstance {
+                        instance: instance_id,
+                    },
+                });
+            };
+            (module.clone(), store.clone())
+        };
+        let expected = module.types.get(type_idx.0 as usize).ok_or(RuntimeError {
+            kind: RuntimeErrorKind::UnknownType {
+                type_idx: type_idx.0,
+            },
+        })?;
+        let actual = if func_idx < module.imported_func_count {
+            &module
+                .imported_funcs
+                .get(func_idx as usize)
+                .ok_or(RuntimeError {
+                    kind: RuntimeErrorKind::UnknownFunction { func: func_idx },
+                })?
+                .ty
+        } else {
+            let callee = module
+                .funcs
+                .iter()
+                .find(|func| func.idx.0 == func_idx)
+                .ok_or(RuntimeError {
+                    kind: RuntimeErrorKind::UnknownFunction { func: func_idx },
+                })?;
+            module
+                .types
+                .get(callee.type_idx.0 as usize)
+                .ok_or(RuntimeError {
+                    kind: RuntimeErrorKind::UnknownType {
+                        type_idx: callee.type_idx.0,
+                    },
+                })?
+        };
+        if expected != actual {
+            return Err(trap(RuntimeTrap::IndirectCallTypeMismatch));
+        }
+        let target_store = target_store.borrow();
+        if func_idx < module.imported_func_count {
+            return target_store.call_host(func_idx, call_args);
+        }
+        let callee = module
+            .funcs
+            .iter()
+            .find(|func| func.idx.0 == func_idx)
+            .ok_or(RuntimeError {
+                kind: RuntimeErrorKind::UnknownFunction { func: func_idx },
+            })?;
+        return execute_func_in(
+            Some(&module),
+            Some(&*target_store),
+            callee,
+            call_args,
+            depth + 1,
+        );
+    }
+    // Same-instance resolution below.
+    // Structural type check: the callee's type must match the declared
+    // one — for imported targets, the import declaration's type; for
+    // defined targets, the function's type entry.
+    let expected = module.types.get(type_idx.0 as usize).ok_or(RuntimeError {
+        kind: RuntimeErrorKind::UnknownType {
+            type_idx: type_idx.0,
+        },
+    })?;
     if func_idx < module.imported_func_count {
-        return Err(RuntimeError {
-            kind: RuntimeErrorKind::ImportedFunctionCallUnsupported { func: func_idx },
-        });
+        let import_ty = &module
+            .imported_funcs
+            .get(func_idx as usize)
+            .ok_or(RuntimeError {
+                kind: RuntimeErrorKind::UnknownFunction { func: func_idx },
+            })?
+            .ty;
+        if expected != import_ty {
+            return Err(trap(RuntimeTrap::IndirectCallTypeMismatch));
+        }
+        // Indirect call targeting an imported function: host dispatch.
+        return store.call_host(func_idx, call_args);
     }
     let callee = module
         .funcs
@@ -228,12 +330,6 @@ fn execute_call_indirect(
         .ok_or(RuntimeError {
             kind: RuntimeErrorKind::UnknownFunction { func: func_idx },
         })?;
-    // Structural type check: the callee's type must match the declared one.
-    let expected = module.types.get(type_idx.0 as usize).ok_or(RuntimeError {
-        kind: RuntimeErrorKind::UnknownType {
-            type_idx: type_idx.0,
-        },
-    })?;
     let actual = module
         .types
         .get(callee.type_idx.0 as usize)
@@ -251,7 +347,7 @@ fn execute_call_indirect(
 /// Maximum call depth before the interpreter traps with stack exhaustion.
 /// Bounded so that unbounded recursion exhausts the interpreter before the
 /// host thread's stack does (test threads run with small stacks).
-const MAX_CALL_DEPTH: usize = 128;
+const MAX_CALL_DEPTH: usize = 512;
 
 /// Execute a single lowered function with positional arguments.
 ///
@@ -267,7 +363,7 @@ pub fn execute_func(func: &RegFunc, args: &[Value]) -> Result<Vec<Value>, Runtim
 /// recursion depth for stack exhaustion.
 pub(crate) fn execute_func_in(
     module: Option<&RegModule>,
-    mut store: Option<&mut Store>,
+    store: Option<&Store>,
     func: &RegFunc,
     args: &[Value],
     depth: usize,
@@ -285,10 +381,12 @@ pub(crate) fn execute_func_in(
     }
 
     for (&arg, &expected) in args.iter().zip(func.params.iter()) {
-        let found = arg.val_type();
-        if found != expected {
+        if !value_satisfies(expected, arg) {
             return Err(RuntimeError {
-                kind: RuntimeErrorKind::TypeMismatch { expected, found },
+                kind: RuntimeErrorKind::TypeMismatch {
+                    expected,
+                    found: arg.val_type(),
+                },
             });
         }
     }
@@ -306,7 +404,9 @@ pub(crate) fn execute_func_in(
                 ValType::Num(NumType::I64) => Some(Value::I64(0)),
                 ValType::Num(NumType::F32) => Some(Value::F32(0.0)),
                 ValType::Num(NumType::F64) => Some(Value::F64(0.0)),
-                ValType::Ref(ref_type) if ref_nullable(&ref_type) => Some(Value::FuncRef(None)),
+                ValType::Ref(ref_type) if ref_nullable(&ref_type) => {
+                    Some(ref_null_value(&ref_type))
+                }
                 ValType::Vec(_) => Some(Value::V128([0; 16])),
                 _ => None,
             };
@@ -350,8 +450,7 @@ pub(crate) fn execute_func_in(
                     .iter()
                     .map(|&reg| get_reg(&registers, reg))
                     .collect::<Result<Vec<_>, _>>()?;
-                let returned =
-                    execute_call(module, store.as_deref_mut(), callee_idx, &call_args, depth)?;
+                let returned = execute_call(module, store, callee_idx, &call_args, depth)?;
                 for (&dst, value) in results.iter().zip(returned) {
                     set_reg(&mut registers, dst, value)?;
                 }
@@ -368,20 +467,13 @@ pub(crate) fn execute_func_in(
                     .iter()
                     .map(|&reg| get_reg(&registers, reg))
                     .collect::<Result<Vec<_>, _>>()?;
-                let returned = execute_call_indirect(
-                    module,
-                    store.as_deref_mut(),
-                    type_idx,
-                    table,
-                    idx,
-                    &call_args,
-                    depth,
-                )?;
+                let returned =
+                    execute_call_indirect(module, store, type_idx, table, idx, &call_args, depth)?;
                 for (&dst, value) in results.iter().zip(returned) {
                     set_reg(&mut registers, dst, value)?;
                 }
             } else {
-                execute_reg_op(store.as_deref_mut(), &mut registers, &mut locals, instr)?;
+                execute_reg_op(store, &mut registers, &mut locals, instr)?;
             }
         }
 
@@ -462,7 +554,7 @@ pub(crate) fn execute_func_in(
 }
 
 fn execute_reg_op(
-    store: Option<&mut Store>,
+    store: Option<&Store>,
     registers: &mut [Option<Value>],
     locals: &mut [Option<Value>],
     instr: &RegInstr,
@@ -675,8 +767,9 @@ fn execute_reg_op(
                 let mut mem = mem.borrow_mut();
                 let old_pages = mem.len() / PAGE_SIZE;
                 match old_pages.checked_add(delta as usize) {
-                    Some(new_pages) if new_pages <= max_pages => {
-                        mem.resize(new_pages * PAGE_SIZE, 0);
+                    Some(new_pages)
+                        if new_pages <= max_pages && grow_memory_fallible(&mut mem, new_pages) =>
+                    {
                         old_pages as i32
                     }
                     _ => -1,
@@ -698,12 +791,12 @@ fn execute_reg_op(
             // Bounds-check and copy the segment range before borrowing memory.
             let (bytes, dst_end) = {
                 let segment = store
-                    .data(data.0)
+                    .with_data(data.0, |segment| segment.cloned())
                     .ok_or(RuntimeError {
                         kind: RuntimeErrorKind::UnknownDataSegment { data: data.0 },
                     })?
-                    .as_ref()
                     .ok_or(trap(RuntimeTrap::OutOfBoundsMemoryAccess))?;
+                let segment = &segment;
                 let (Some(src_end), Some(dst_end)) =
                     (src.checked_add(count), dst.checked_add(count))
                 else {
@@ -869,8 +962,7 @@ fn execute_reg_op(
                 let mut tbl = tbl.borrow_mut();
                 let old = tbl.len();
                 match old.checked_add(delta as usize) {
-                    Some(new) if new <= max => {
-                        tbl.resize(new, value);
+                    Some(new) if new <= max && grow_table_fallible(&mut tbl, new, value) => {
                         old as i32
                     }
                     _ => -1,
@@ -960,12 +1052,12 @@ fn execute_reg_op(
             let src = expect_addr(get_reg(registers, *src)?)? as usize;
             let count = expect_addr(get_reg(registers, *count)?)? as usize;
             let segment = store
-                .elem(elem.0)
+                .with_elem(elem.0, |segment| segment.cloned())
                 .ok_or(RuntimeError {
                     kind: RuntimeErrorKind::UnknownElem { elem: elem.0 },
                 })?
-                .as_ref()
                 .ok_or(trap(RuntimeTrap::OutOfBoundsTableAccess))?;
+            let segment = &segment;
             let table_len = store
                 .with_table(table.0, |table| table.len())
                 .ok_or(RuntimeError {
@@ -993,11 +1085,16 @@ fn execute_reg_op(
                 kind: RuntimeErrorKind::UnknownElem { elem: elem.0 },
             })?;
         }
-        RegOp::RefNull { dst } => {
-            set_reg(registers, *dst, Value::FuncRef(None))?;
+        RegOp::RefNull { dst, ref_type } => {
+            set_reg(registers, *dst, ref_null_value(ref_type))?;
         }
         RegOp::RefFunc { dst, func } => {
-            set_reg(registers, *dst, Value::FuncRef(Some(func.0)))?;
+            let store = require_store(store)?;
+            set_reg(
+                registers,
+                *dst,
+                Value::FuncRef(Some((store.instance_id(), func.0))),
+            )?;
         }
         RegOp::RefIsNull { dst, value } => {
             let value = get_reg(registers, *value)?;
@@ -1093,10 +1190,119 @@ fn execute_reg_op(
     Ok(())
 }
 
-fn require_store(store: Option<&mut Store>) -> Result<&mut Store, RuntimeError> {
+fn require_store(store: Option<&Store>) -> Result<&Store, RuntimeError> {
     store.ok_or(RuntimeError {
         kind: RuntimeErrorKind::MissingStore,
     })
+}
+
+/// Whether a runtime value satisfies a value type at the boundary: exact
+/// for numerics/vectors, nullable-aware subtyping for references (a
+/// non-null value satisfies `(ref T)`; abstract funcref/externref accept
+/// matching heap families at any nullability).
+fn value_satisfies(expected: ValType, value: Value) -> bool {
+    use crate::types::HeapType;
+    match (expected, value) {
+        (ValType::Ref(expected_ref), value) => match (expected_ref, value) {
+            (RefType::FuncRef, Value::FuncRef(_)) => true,
+            (RefType::ExternRef, Value::ExternRef(_)) => true,
+            (RefType::Typed { nullable, heap }, value) => {
+                let non_null = match value {
+                    Value::FuncRef(inner) => inner.is_some(),
+                    Value::ExternRef(inner) => inner.is_some(),
+                    _ => return false,
+                };
+                if !nullable && !non_null {
+                    return false;
+                }
+                matches!(
+                    (heap, value),
+                    (HeapType::Func | HeapType::Type(_), Value::FuncRef(_))
+                        | (HeapType::Extern, Value::ExternRef(_))
+                )
+            }
+            _ => false,
+        },
+        (expected, value) => expected == value.val_type(),
+    }
+}
+
+/// WASM min: NaN propagates as the canonical NaN; -0 is smaller than +0.
+fn wasm_f32_min(a: f32, b: f32) -> f32 {
+    if a.is_nan() || b.is_nan() {
+        return f32::from_bits(0x7fc0_0000);
+    }
+    if a == b {
+        if a == 0.0 && (a.is_sign_negative() || b.is_sign_negative()) {
+            return -0.0;
+        }
+        return a;
+    }
+    if a < b { a } else { b }
+}
+
+/// WASM max: NaN propagates as the canonical NaN; +0 is larger than -0.
+fn wasm_f32_max(a: f32, b: f32) -> f32 {
+    if a.is_nan() || b.is_nan() {
+        return f32::from_bits(0x7fc0_0000);
+    }
+    if a == b {
+        if a == 0.0 && (a.is_sign_positive() || b.is_sign_positive()) {
+            return 0.0;
+        }
+        return a;
+    }
+    if a > b { a } else { b }
+}
+
+fn wasm_f64_min(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        return f64::from_bits(0x7ff8_0000_0000_0000);
+    }
+    if a == b {
+        if a == 0.0 && (a.is_sign_negative() || b.is_sign_negative()) {
+            return -0.0;
+        }
+        return a;
+    }
+    if a < b { a } else { b }
+}
+
+fn wasm_f64_max(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        return f64::from_bits(0x7ff8_0000_0000_0000);
+    }
+    if a == b {
+        if a == 0.0 && (a.is_sign_positive() || b.is_sign_positive()) {
+            return 0.0;
+        }
+        return a;
+    }
+    if a > b { a } else { b }
+}
+
+/// Grow a memory to `new_pages`, returning `false` when the allocation
+/// fails (huge growth must yield -1, not abort the process).
+fn grow_memory_fallible(mem: &mut Vec<u8>, new_pages: usize) -> bool {
+    let additional = new_pages
+        .saturating_mul(PAGE_SIZE)
+        .saturating_sub(mem.len());
+    if mem.try_reserve(additional).is_err() {
+        return false;
+    }
+    mem.resize(new_pages * PAGE_SIZE, 0);
+    true
+}
+
+/// Grow a table to `new` entries, returning `false` when the allocation
+/// fails.
+fn grow_table_fallible(tbl: &mut Vec<Value>, new: usize, value: Value) -> bool {
+    let additional = new.saturating_sub(tbl.len());
+    if tbl.try_reserve(additional).is_err() {
+        return false;
+    }
+    tbl.resize(new, value);
+    true
 }
 
 /// Bounds-check `addr + memarg.offset` over `width` bytes against a memory,
@@ -1135,6 +1341,18 @@ fn ref_nullable(ref_type: &RefType) -> bool {
     match ref_type {
         RefType::FuncRef | RefType::ExternRef => true,
         RefType::Typed { nullable, .. } => *nullable,
+    }
+}
+
+/// The null value for a reference type (funcref null vs externref null).
+fn ref_null_value(ref_type: &RefType) -> Value {
+    match ref_type {
+        RefType::ExternRef
+        | RefType::Typed {
+            heap: crate::types::HeapType::Extern,
+            ..
+        } => Value::ExternRef(None),
+        _ => Value::FuncRef(None),
     }
 }
 
@@ -1397,14 +1615,14 @@ fn execute_unary_op(
         UnaryOp::F32Ceil => execute_f32_unary(registers, dst, value, libm::ceilf),
         UnaryOp::F32Floor => execute_f32_unary(registers, dst, value, libm::floorf),
         UnaryOp::F32Trunc => execute_f32_unary(registers, dst, value, libm::truncf),
-        UnaryOp::F32Nearest => execute_f32_unary(registers, dst, value, libm::roundf),
+        UnaryOp::F32Nearest => execute_f32_unary(registers, dst, value, libm::rintf),
         UnaryOp::F64Neg => execute_f64_unary(registers, dst, value, |value| -value),
         UnaryOp::F64Abs => execute_f64_unary(registers, dst, value, libm::fabs),
         UnaryOp::F64Sqrt => execute_f64_unary(registers, dst, value, libm::sqrt),
         UnaryOp::F64Ceil => execute_f64_unary(registers, dst, value, libm::ceil),
         UnaryOp::F64Floor => execute_f64_unary(registers, dst, value, libm::floor),
         UnaryOp::F64Trunc => execute_f64_unary(registers, dst, value, libm::trunc),
-        UnaryOp::F64Nearest => execute_f64_unary(registers, dst, value, libm::round),
+        UnaryOp::F64Nearest => execute_f64_unary(registers, dst, value, libm::rint),
         UnaryOp::I32TruncF32S => {
             execute_f32_to_i32_checked(registers, dst, value, |v| v as i32, false)
         }
@@ -1669,17 +1887,19 @@ fn execute_binary_op(
             (lhs as u64) >= (rhs as u64)
         }),
         BinaryOp::F32Add => execute_f32_binary(registers, dst, lhs, rhs, |lhs, rhs| lhs + rhs),
+        BinaryOp::F32Copysign => execute_f32_binary(registers, dst, lhs, rhs, libm::copysignf),
         BinaryOp::F32Sub => execute_f32_binary(registers, dst, lhs, rhs, |lhs, rhs| lhs - rhs),
         BinaryOp::F32Mul => execute_f32_binary(registers, dst, lhs, rhs, |lhs, rhs| lhs * rhs),
         BinaryOp::F32Div => execute_f32_binary(registers, dst, lhs, rhs, |lhs, rhs| lhs / rhs),
-        BinaryOp::F32Min => execute_f32_binary(registers, dst, lhs, rhs, libm::fminf),
-        BinaryOp::F32Max => execute_f32_binary(registers, dst, lhs, rhs, libm::fmaxf),
+        BinaryOp::F32Min => execute_f32_binary(registers, dst, lhs, rhs, wasm_f32_min),
+        BinaryOp::F32Max => execute_f32_binary(registers, dst, lhs, rhs, wasm_f32_max),
         BinaryOp::F64Add => execute_f64_binary(registers, dst, lhs, rhs, |lhs, rhs| lhs + rhs),
+        BinaryOp::F64Copysign => execute_f64_binary(registers, dst, lhs, rhs, libm::copysign),
         BinaryOp::F64Sub => execute_f64_binary(registers, dst, lhs, rhs, |lhs, rhs| lhs - rhs),
         BinaryOp::F64Mul => execute_f64_binary(registers, dst, lhs, rhs, |lhs, rhs| lhs * rhs),
         BinaryOp::F64Div => execute_f64_binary(registers, dst, lhs, rhs, |lhs, rhs| lhs / rhs),
-        BinaryOp::F64Min => execute_f64_binary(registers, dst, lhs, rhs, libm::fmin),
-        BinaryOp::F64Max => execute_f64_binary(registers, dst, lhs, rhs, libm::fmax),
+        BinaryOp::F64Min => execute_f64_binary(registers, dst, lhs, rhs, wasm_f64_min),
+        BinaryOp::F64Max => execute_f64_binary(registers, dst, lhs, rhs, wasm_f64_max),
         BinaryOp::F32Eq => execute_f32_compare(registers, dst, lhs, rhs, |lhs, rhs| lhs == rhs),
         BinaryOp::F32Ne => execute_f32_compare(registers, dst, lhs, rhs, |lhs, rhs| lhs != rhs),
         BinaryOp::F32Lt => execute_f32_compare(registers, dst, lhs, rhs, |lhs, rhs| lhs < rhs),
@@ -2039,10 +2259,10 @@ fn execute_f32_to_i32_checked(
         return Err(trap(RuntimeTrap::InvalidConversionToInteger));
     }
     if unsigned {
-        if value <= -1.0 || value >= (u32::MAX as f32) + 0.5 {
+        if value <= -1.0 || value >= (u32::MAX as f32) {
             return Err(trap(RuntimeTrap::IntegerOverflow));
         }
-    } else if value >= (i32::MAX as f32) + 0.5 || value < (i32::MIN as f32) - 0.5 {
+    } else if value >= (i32::MAX as f32) || value < (i32::MIN as f32) {
         return Err(trap(RuntimeTrap::IntegerOverflow));
     }
     set_reg(registers, dst, Value::I32(op(value)))
@@ -2060,10 +2280,10 @@ fn execute_f64_to_i32_checked(
         return Err(trap(RuntimeTrap::InvalidConversionToInteger));
     }
     if unsigned {
-        if value <= -1.0 || value >= (u32::MAX as f64) + 0.5 {
+        if value <= -1.0 || value >= 4294967296.0 {
             return Err(trap(RuntimeTrap::IntegerOverflow));
         }
-    } else if value >= (i32::MAX as f64) + 0.5 || value < (i32::MIN as f64) - 0.5 {
+    } else if value >= 2147483648.0 || value <= -2147483649.0 {
         return Err(trap(RuntimeTrap::IntegerOverflow));
     }
     set_reg(registers, dst, Value::I32(op(value)))
@@ -2081,10 +2301,10 @@ fn execute_f32_to_i64_checked(
         return Err(trap(RuntimeTrap::InvalidConversionToInteger));
     }
     if unsigned {
-        if value <= -1.0 || value >= (u64::MAX as f32) + 0.5 {
+        if value <= -1.0 || value >= (u64::MAX as f32) {
             return Err(trap(RuntimeTrap::IntegerOverflow));
         }
-    } else if value >= (i64::MAX as f32) + 0.5 || value < (i64::MIN as f32) - 0.5 {
+    } else if value >= (i64::MAX as f32) || value < (i64::MIN as f32) {
         return Err(trap(RuntimeTrap::IntegerOverflow));
     }
     set_reg(registers, dst, Value::I64(op(value)))
@@ -2102,10 +2322,10 @@ fn execute_f64_to_i64_checked(
         return Err(trap(RuntimeTrap::InvalidConversionToInteger));
     }
     if unsigned {
-        if value <= -1.0 || value >= (u64::MAX as f64) + 0.5 {
+        if value <= -1.0 || value >= (u64::MAX as f64) {
             return Err(trap(RuntimeTrap::IntegerOverflow));
         }
-    } else if value >= (i64::MAX as f64) + 0.5 || value < (i64::MIN as f64) - 0.5 {
+    } else if value >= (i64::MAX as f64) || value < (i64::MIN as f64) {
         return Err(trap(RuntimeTrap::IntegerOverflow));
     }
     set_reg(registers, dst, Value::I64(op(value)))
@@ -2208,10 +2428,10 @@ mod tests {
     fn execute_exported_add_by_name() {
         let reg_module = lowered_add_module();
 
-        let mut store = Store::instantiate(&reg_module).unwrap();
+        let store = Store::instantiate(&reg_module).unwrap();
         let result = execute_export(
             &reg_module,
-            &mut store,
+            &store,
             "add",
             &[Value::I32(20), Value::I32(22)],
         )
@@ -2224,8 +2444,8 @@ mod tests {
     fn reject_unknown_export_name() {
         let reg_module = lowered_add_module();
 
-        let mut store = Store::instantiate(&reg_module).unwrap();
-        let err = execute_export(&reg_module, &mut store, "missing", &[]).unwrap_err();
+        let store = Store::instantiate(&reg_module).unwrap();
+        let err = execute_export(&reg_module, &store, "missing", &[]).unwrap_err();
 
         assert_eq!(
             err.kind,
@@ -2239,8 +2459,8 @@ mod tests {
     fn reject_export_call_with_missing_arg() {
         let reg_module = lowered_add_module();
 
-        let mut store = Store::instantiate(&reg_module).unwrap();
-        let err = execute_export(&reg_module, &mut store, "add", &[Value::I32(20)]).unwrap_err();
+        let store = Store::instantiate(&reg_module).unwrap();
+        let err = execute_export(&reg_module, &store, "add", &[Value::I32(20)]).unwrap_err();
 
         assert_eq!(
             err.kind,
@@ -2255,10 +2475,10 @@ mod tests {
     fn reject_export_call_with_extra_arg() {
         let reg_module = lowered_add_module();
 
-        let mut store = Store::instantiate(&reg_module).unwrap();
+        let store = Store::instantiate(&reg_module).unwrap();
         let err = execute_export(
             &reg_module,
-            &mut store,
+            &store,
             "add",
             &[Value::I32(20), Value::I32(22), Value::I32(1)],
         )
@@ -2277,10 +2497,10 @@ mod tests {
     fn reject_export_call_with_wrong_arg_type() {
         let reg_module = lowered_add_module();
 
-        let mut store = Store::instantiate(&reg_module).unwrap();
+        let store = Store::instantiate(&reg_module).unwrap();
         let err = execute_export(
             &reg_module,
-            &mut store,
+            &store,
             "add",
             &[Value::I64(20), Value::I32(22)],
         )

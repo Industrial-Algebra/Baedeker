@@ -282,7 +282,7 @@ fn nan_pattern_matches_f32(
     pattern: &wast::core::NanPattern<wast::token::F32>,
 ) -> bool {
     match pattern {
-        wast::core::NanPattern::Value(expected) => actual == f32::from_bits(expected.bits),
+        wast::core::NanPattern::Value(expected) => actual.to_bits() == expected.bits,
         wast::core::NanPattern::CanonicalNan => actual.to_bits() & 0x7fff_ffff == 0x7fc0_0000,
         wast::core::NanPattern::ArithmeticNan => actual.is_nan(),
     }
@@ -293,7 +293,7 @@ fn nan_pattern_matches_f64(
     pattern: &wast::core::NanPattern<wast::token::F64>,
 ) -> bool {
     match pattern {
-        wast::core::NanPattern::Value(expected) => actual == f64::from_bits(expected.bits),
+        wast::core::NanPattern::Value(expected) => actual.to_bits() == expected.bits,
         wast::core::NanPattern::CanonicalNan => {
             actual.to_bits() & 0x7fff_ffff_ffff_ffff == 0x7ff8_0000_0000_0000
         }
@@ -450,6 +450,17 @@ fn directive_name(directive: &WastDirective<'_>) -> &'static str {
 
 #[test]
 fn runtime_wast_cases() {
+    // Deep recursion in fixtures needs a larger host stack than the default
+    // test thread provides.
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(runtime_wast_cases_inner)
+        .expect("spawn runtime wast thread")
+        .join()
+        .expect("runtime wast thread panicked");
+}
+
+fn runtime_wast_cases_inner() {
     let stats = run_runtime_wast_dir("runtime");
     assert!(stats.files > 0, "expected runtime WAST fixtures to run");
     assert!(

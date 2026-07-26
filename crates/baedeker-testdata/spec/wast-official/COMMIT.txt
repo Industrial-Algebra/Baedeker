@@ -1,0 +1,2 @@
+upstream: https://github.com/WebAssembly/spec
+commit: dfa3f32a881aecc60a8c792da3c25787ccb15572
