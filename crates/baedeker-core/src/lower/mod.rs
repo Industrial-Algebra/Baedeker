@@ -233,6 +233,19 @@ pub enum RegTerm {
         target_block: u32,
         values: Vec<Reg>,
     },
+    /// `br_on_null`: branch when the reference value is null.
+    BrIfNull {
+        value: Reg,
+        target_block: u32,
+        values: Vec<Reg>,
+    },
+    /// `br_on_non_null`: branch when the reference value is non-null,
+    /// forwarding it (as the last branch value) to the target.
+    BrIfNonNull {
+        value: Reg,
+        target_block: u32,
+        values: Vec<Reg>,
+    },
     /// Two-way fork: if cond is non-zero, go to then_block; else to else_block.
     IfFork {
         cond: Reg,
@@ -446,6 +459,13 @@ pub enum RegOp {
         args: Vec<Reg>,
         results: Vec<Reg>,
     },
+    /// Direct call through a function reference (`call_ref`).
+    CallRef {
+        type_idx: TypeIdx,
+        func: Reg,
+        args: Vec<Reg>,
+        results: Vec<Reg>,
+    },
     /// `table.get`: dst = table[index].
     TableGet {
         dst: Reg,
@@ -510,6 +530,11 @@ pub enum RegOp {
     },
     /// `ref.is_null`: dst = 1 when the reference is null, else 0.
     RefIsNull {
+        dst: Reg,
+        value: Reg,
+    },
+    /// `ref.as_non_null`: trap on null, otherwise copy the reference.
+    RefAsNonNull {
         dst: Reg,
         value: Reg,
     },
@@ -1727,6 +1752,15 @@ struct LoopTarget {
     param_regs: Vec<Reg>,
 }
 
+/// Which conditional reference branch is being lowered.
+enum RefBranchKind {
+    /// `br_on_null`: taken when the reference is null.
+    OnNull,
+    /// `br_on_non_null`: taken when the reference is non-null (the ref is
+    /// forwarded as the last branch value).
+    OnNonNull,
+}
+
 /// A request for a back-edge trampoline block: a conditional branch to a
 /// loop with parameters cannot copy values into the loop's parameter
 /// registers in its own block (the copies would clobber the registers on
@@ -1780,6 +1814,31 @@ struct LabelFrame {
     unreachable: bool,
 }
 
+/// Coarse reference compatibility for lowering's operand checks.
+///
+/// Lowering tracks types only for register allocation; the validator has
+/// already proven precise ref types (nullability, concrete type indices,
+/// subtyping). Here we only need to keep function references and external
+/// references from crossing kinds.
+fn ref_compatible(found: ValType, expected: ValType) -> bool {
+    fn kind(ty: &crate::types::RefType) -> u8 {
+        match ty {
+            crate::types::RefType::FuncRef => 0,
+            crate::types::RefType::ExternRef => 1,
+            crate::types::RefType::Typed { heap, .. } => match heap {
+                crate::types::HeapType::Func | crate::types::HeapType::Type(_) => 0,
+                crate::types::HeapType::Extern => 1,
+            },
+        }
+    }
+    match (found, expected) {
+        (ValType::Ref(found), ValType::Ref(expected)) => kind(&found) == kind(&expected),
+        _ => false,
+    }
+}
+
+/// function types, global types, the type section, and table element
+/// types (all imported-first where an index space applies).
 /// Module-level index-space tables shared by every function lowering:
 /// function types, global types, the type section, and table element
 /// types (all imported-first where an index space applies).
@@ -1846,6 +1905,52 @@ impl<'b> FuncBuilder<'b> {
         self.finish_block_with_label(label, term);
     }
 
+    /// Finish a conditional reference branch (`br_on_null` /
+    /// `br_on_non_null`), mirroring the `br_if` discipline: loop back-edges
+    /// get a copy trampoline; other targets are back-patched at frame `end`.
+    fn finish_cond_ref_branch(
+        &mut self,
+        offset: ByteOffset,
+        frame_pos: usize,
+        loop_header: Option<LoopTarget>,
+        values: Vec<Reg>,
+        value_reg: Reg,
+        kind: RefBranchKind,
+    ) {
+        let make_term = |target_block: u32, values: Vec<Reg>| match kind {
+            RefBranchKind::OnNull => RegTerm::BrIfNull {
+                value: value_reg,
+                target_block,
+                values,
+            },
+            RefBranchKind::OnNonNull => RegTerm::BrIfNonNull {
+                value: value_reg,
+                target_block,
+                values,
+            },
+        };
+        let br_block_idx = self.blocks.len();
+        if let Some(loop_target) = loop_header {
+            self.pending_trampolines.push(TrampolineReq {
+                block: br_block_idx,
+                slot: BranchSlot::Single,
+                param_regs: loop_target.param_regs,
+                values: values.clone(),
+                header: loop_target.header,
+                offset,
+            });
+            self.finish_block(make_term(0, values));
+        } else {
+            self.pending_branches.push(PendingBranch {
+                block: br_block_idx,
+                frame_pos,
+                values: values.clone(),
+                slot: BranchSlot::Single,
+            });
+            self.finish_block(make_term(0, values));
+        }
+    }
+
     fn finish(mut self) -> RegFunc {
         // If there are pending instructions without a terminator, add Fallthrough
         if !self.current_instrs.is_empty() || self.blocks.is_empty() {
@@ -1879,7 +1984,12 @@ impl<'b> FuncBuilder<'b> {
                 },
             ));
             match (req.slot, &mut self.blocks[req.block].term) {
-                (BranchSlot::Single, RegTerm::BrIf { target_block, .. }) => {
+                (
+                    BranchSlot::Single,
+                    RegTerm::BrIf { target_block, .. }
+                    | RegTerm::BrIfNull { target_block, .. }
+                    | RegTerm::BrIfNonNull { target_block, .. },
+                ) => {
                     *target_block = trampoline_idx;
                 }
                 (
@@ -2141,7 +2251,9 @@ impl<'b> FuncBuilder<'b> {
                     for pending in core::mem::take(&mut self.pending_branches) {
                         match &mut self.blocks[pending.block].term {
                             RegTerm::Br { target_block, .. }
-                            | RegTerm::BrIf { target_block, .. } => {
+                            | RegTerm::BrIf { target_block, .. }
+                            | RegTerm::BrIfNull { target_block, .. }
+                            | RegTerm::BrIfNonNull { target_block, .. } => {
                                 *target_block = continuation_idx;
                             }
                             RegTerm::BrTable {
@@ -2259,7 +2371,9 @@ impl<'b> FuncBuilder<'b> {
                     match pending.slot {
                         BranchSlot::Single => match term {
                             RegTerm::Br { target_block, .. }
-                            | RegTerm::BrIf { target_block, .. } => {
+                            | RegTerm::BrIf { target_block, .. }
+                            | RegTerm::BrIfNull { target_block, .. }
+                            | RegTerm::BrIfNonNull { target_block, .. } => {
                                 *target_block = continuation_idx;
                             }
                             other => unreachable!(
@@ -2456,6 +2570,62 @@ impl<'b> FuncBuilder<'b> {
                 });
                 self.set_unreachable();
             }
+            Instr::BrOnNull(label) => {
+                let value = self.pop_any(offset, "br_on_null")?;
+                let frame_pos = self.label_position(offset, label)?;
+                let (branch_types, loop_header) = self.branch_types_at(frame_pos);
+                let mut values = Vec::with_capacity(branch_types.len());
+                for &expected in branch_types.iter().rev() {
+                    let found = self.pop_expect(offset, "br_on_null", expected)?;
+                    values.push(found.reg);
+                }
+                values.reverse();
+                // Not-taken path: branch values stay, plus the ref (non-null
+                // on this path by definition).
+                for (&reg, &ty) in values.iter().zip(branch_types.iter()) {
+                    self.stack.push(RegValue { reg, ty });
+                }
+                self.stack.push(value);
+                self.finish_cond_ref_branch(
+                    offset,
+                    frame_pos,
+                    loop_header,
+                    values,
+                    value.reg,
+                    RefBranchKind::OnNull,
+                );
+            }
+            Instr::BrOnNonNull(label) => {
+                let value = self.pop_any(offset, "br_on_non_null")?;
+                let frame_pos = self.label_position(offset, label)?;
+                let (branch_types, loop_header) = self.branch_types_at(frame_pos);
+                // The label's last value is the forwarded non-null ref; only
+                // the leading types come from the stack.
+                let leading_types = match branch_types.split_last() {
+                    Some((_, leading)) => leading,
+                    None => &[][..],
+                };
+                let mut values = Vec::with_capacity(branch_types.len());
+                for &expected in leading_types.iter().rev() {
+                    let found = self.pop_expect(offset, "br_on_non_null", expected)?;
+                    values.push(found.reg);
+                }
+                values.reverse();
+                // Not-taken path: leading values stay; the ref is consumed.
+                for (&reg, &ty) in values.iter().zip(leading_types.iter()) {
+                    self.stack.push(RegValue { reg, ty });
+                }
+                // Taken path forwards the ref as the last branch value.
+                values.push(value.reg);
+                self.finish_cond_ref_branch(
+                    offset,
+                    frame_pos,
+                    loop_header,
+                    values,
+                    value.reg,
+                    RefBranchKind::OnNonNull,
+                );
+            }
             Instr::Return => {
                 let values = self.pop_results(offset)?;
                 self.finish_block(RegTerm::Return { values });
@@ -2463,6 +2633,40 @@ impl<'b> FuncBuilder<'b> {
                 // instructions up to the function's final `end` must still be
                 // processed (under polymorphic stack discipline).
                 self.set_unreachable();
+            }
+            Instr::CallRef(type_idx) => {
+                let Some(ty) = self.tables.types.get(type_idx.0 as usize) else {
+                    return Err(LowerError {
+                        offset,
+                        function: Some(self.func_idx),
+                        kind: LowerErrorKind::InvalidType {
+                            type_idx: type_idx.0,
+                        },
+                    });
+                };
+                // Stack order: [args..., funcref] — the reference is on top.
+                let func = self.pop_any(offset, "call_ref")?;
+                let mut args = Vec::with_capacity(ty.params.len());
+                for &expected in ty.params.iter().rev() {
+                    let found = self.pop_expect(offset, "call_ref", expected)?;
+                    args.push(found.reg);
+                }
+                args.reverse();
+                let mut results = Vec::with_capacity(ty.results.len());
+                for &ty in ty.results.iter() {
+                    let dst = self.alloc_reg(ty);
+                    self.stack.push(RegValue { reg: dst, ty });
+                    results.push(dst);
+                }
+                self.emit(
+                    offset,
+                    RegOp::CallRef {
+                        type_idx,
+                        func: func.reg,
+                        args,
+                        results,
+                    },
+                );
             }
             Instr::Call(func) => {
                 let Some(callee_ty) = self.tables.func_types.get(func.0 as usize) else {
@@ -2740,6 +2944,25 @@ impl<'b> FuncBuilder<'b> {
                 self.emit(
                     offset,
                     RegOp::RefIsNull {
+                        dst,
+                        value: value.reg,
+                    },
+                );
+            }
+            Instr::RefAsNonNull => {
+                let value = self.pop_any(offset, "ref.as_non_null")?;
+                // In unreachable code the synthesized operand has a default
+                // type; the result must still be a reference for downstream
+                // consumers.
+                let ty = match value.ty {
+                    ValType::Ref(_) => value.ty,
+                    _ => ValType::Ref(crate::types::RefType::FuncRef),
+                };
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(
+                    offset,
+                    RegOp::RefAsNonNull {
                         dst,
                         value: value.reg,
                     },
@@ -3246,7 +3469,13 @@ impl<'b> FuncBuilder<'b> {
 
         let found = self.stack.pop().expect("stack height checked");
 
-        if found.ty != expected {
+        // In unreachable code every value is a polymorphic undef; precise
+        // types were proven by the validator, and the undef registers
+        // lowering synthesizes cannot represent bottom.
+        if found.ty != expected
+            && !ref_compatible(found.ty, expected)
+            && !self.current_frame_unreachable()
+        {
             return Err(LowerError {
                 offset,
                 function: Some(self.func_idx),
@@ -4247,6 +4476,105 @@ mod tests {
             ],
         );
         assert_eq!(rem, Ok(vec![crate::runtime::Value::I32(2)]));
+    }
+
+    #[test]
+    fn execute_call_ref_and_null_trap() {
+        // Direct call through a funcref value.
+        let result = run_wat_export(
+            "(module (type $ii (func (param i32) (result i32)))\
+             (elem declare func $dbl)\
+             (func $dbl (type $ii) local.get 0 i32.const 2 i32.mul)\
+             (func (export \"go\") (param i32) (result i32)\
+             local.get 0 ref.func $dbl call_ref $ii))",
+            "go",
+            &[crate::runtime::Value::I32(21)],
+        )
+        .unwrap();
+        assert_eq!(result, vec![crate::runtime::Value::I32(42)]);
+
+        // Null funcref traps with the canonical message.
+        let error = run_wat_export(
+            "(module (type $ii (func (param i32) (result i32)))\
+             (func (export \"go\") (param i32) (result i32)\
+             local.get 0 ref.null $ii call_ref $ii))",
+            "go",
+            &[crate::runtime::Value::I32(1)],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.kind,
+            crate::runtime::RuntimeErrorKind::Trap(
+                crate::runtime::RuntimeTrap::NullFunctionReference
+            )
+        );
+    }
+
+    #[test]
+    fn execute_br_on_null_paths() {
+        // Null ref takes the branch; non-null falls through keeping the ref.
+        let source = "(module (type $ii (func (result i32)))\
+             (elem declare func $f)\
+             (func $f (type $ii) i32.const 7)\
+             (func (export \"null\") (result i32)\
+             (block ref.null $ii br_on_null 0 call_ref $ii return)\
+             i32.const 99)\
+             (func (export \"nonnull\") (result i32)\
+             (block ref.func $f br_on_null 0 call_ref $ii return)\
+             i32.const 99))";
+        let result = run_wat_export(source, "null", &[]).unwrap();
+        assert_eq!(result, vec![crate::runtime::Value::I32(99)]);
+        let result = run_wat_export(source, "nonnull", &[]).unwrap();
+        assert_eq!(result, vec![crate::runtime::Value::I32(7)]);
+    }
+
+    #[test]
+    fn execute_br_on_non_null_forwards_ref() {
+        // Non-null ref branches and is forwarded to the label; null falls
+        // through with the ref consumed.
+        let result = run_wat_export(
+            "(module (type $ii (func (result i32)))\
+             (elem declare func $f)\
+             (func $f (type $ii) i32.const 7)\
+             (func (export \"nonnull\") (result i32)\
+             (block (result (ref $ii)) ref.func $f br_on_non_null 0 unreachable)\
+             call_ref $ii)\
+             (func (export \"null\") (result i32)\
+             (block (result (ref $ii)) ref.null $ii br_on_non_null 0 unreachable)\
+             call_ref $ii))",
+            "nonnull",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(result, vec![crate::runtime::Value::I32(7)]);
+    }
+
+    #[test]
+    fn execute_ref_as_non_null_trap_and_passthrough() {
+        let error = run_wat_export(
+            "(module (type $ii (func))\
+             (func (export \"go\") (result i32)\
+             ref.null $ii ref.as_non_null drop i32.const 0))",
+            "go",
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.kind,
+            crate::runtime::RuntimeErrorKind::Trap(crate::runtime::RuntimeTrap::NullReference)
+        );
+
+        let result = run_wat_export(
+            "(module (type $ii (func (result i32)))\
+             (elem declare func $f)\
+             (func $f (type $ii) i32.const 7)\
+             (func (export \"go\") (result i32)\
+             ref.func $f ref.as_non_null call_ref $ii))",
+            "go",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(result, vec![crate::runtime::Value::I32(7)]);
     }
 
     #[test]

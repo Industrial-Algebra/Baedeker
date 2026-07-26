@@ -106,6 +106,8 @@ pub enum RuntimeTrap {
     IntegerDivideByZero,
     IntegerOverflow,
     InvalidConversionToInteger,
+    NullFunctionReference,
+    NullReference,
 }
 
 impl RuntimeTrap {
@@ -122,6 +124,8 @@ impl RuntimeTrap {
             RuntimeTrap::IntegerDivideByZero => "integer divide by zero",
             RuntimeTrap::IntegerOverflow => "integer overflow",
             RuntimeTrap::InvalidConversionToInteger => "invalid conversion to integer",
+            RuntimeTrap::NullFunctionReference => "null function reference",
+            RuntimeTrap::NullReference => "null reference",
         }
     }
 }
@@ -228,6 +232,67 @@ fn execute_call_indirect(
     let Some((instance_id, func_idx)) = func_idx else {
         return Err(trap(RuntimeTrap::UninitializedElement));
     };
+    execute_funcref(
+        module,
+        store,
+        type_idx,
+        instance_id,
+        func_idx,
+        call_args,
+        depth,
+    )
+}
+
+/// Execute a `call_ref`: the function reference comes from the stack.
+fn execute_call_ref(
+    module: Option<&RegModule>,
+    store: Option<&Store>,
+    type_idx: &crate::types::TypeIdx,
+    target: Value,
+    call_args: &[Value],
+    depth: usize,
+) -> Result<Vec<Value>, RuntimeError> {
+    let module = module.ok_or(RuntimeError {
+        kind: RuntimeErrorKind::UnknownFunction { func: 0 },
+    })?;
+    let store = store.ok_or(RuntimeError {
+        kind: RuntimeErrorKind::MissingStore,
+    })?;
+    let Value::FuncRef(func_idx) = target else {
+        return Err(RuntimeError {
+            kind: RuntimeErrorKind::TypeMismatch {
+                expected: ValType::Ref(RefType::FuncRef),
+                found: target.val_type(),
+            },
+        });
+    };
+    let Some((instance_id, func_idx)) = func_idx else {
+        return Err(trap(RuntimeTrap::NullFunctionReference));
+    };
+    execute_funcref(
+        module,
+        store,
+        type_idx,
+        instance_id,
+        func_idx,
+        call_args,
+        depth,
+    )
+}
+
+/// Shared tail of `call_indirect`/`call_ref`: resolve `(instance_id,
+/// func_idx)` against the current instance or its link group, check the
+/// structural type, and execute (host dispatch for imported targets).
+#[allow(clippy::too_many_arguments)]
+fn execute_funcref(
+    module: &RegModule,
+    store: &Store,
+    type_idx: &crate::types::TypeIdx,
+    instance_id: u32,
+    func_idx: u32,
+    call_args: &[Value],
+    depth: usize,
+) -> Result<Vec<Value>, RuntimeError> {
     if instance_id != store.instance_id() {
         // Cross-instance funcref: resolve through the link group and execute
         // against the owning instance (structural type check against the
@@ -472,6 +537,23 @@ pub(crate) fn execute_func_in(
                 for (&dst, value) in results.iter().zip(returned) {
                     set_reg(&mut registers, dst, value)?;
                 }
+            } else if let RegOp::CallRef {
+                type_idx,
+                func,
+                args: arg_regs,
+                results,
+            } = &instr.op
+            {
+                let target = get_reg(&registers, *func)?;
+                let call_args = arg_regs
+                    .iter()
+                    .map(|&reg| get_reg(&registers, reg))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let returned =
+                    execute_call_ref(module, store, type_idx, target, &call_args, depth)?;
+                for (&dst, value) in results.iter().zip(returned) {
+                    set_reg(&mut registers, dst, value)?;
+                }
             } else {
                 execute_reg_op(store, &mut registers, &mut locals, instr)?;
             }
@@ -517,6 +599,30 @@ pub(crate) fn execute_func_in(
                     }
                 } else {
                     block_idx += 1;
+                }
+            }
+            RegTerm::BrIfNull {
+                value,
+                target_block,
+                ..
+            } => {
+                let val = get_reg(&registers, *value)?;
+                if is_null_ref(&val) {
+                    block_idx = *target_block;
+                } else {
+                    block_idx += 1;
+                }
+            }
+            RegTerm::BrIfNonNull {
+                value,
+                target_block,
+                ..
+            } => {
+                let val = get_reg(&registers, *value)?;
+                if is_null_ref(&val) {
+                    block_idx += 1;
+                } else {
+                    block_idx = *target_block;
                 }
             }
             RegTerm::BrTable {
@@ -615,6 +721,19 @@ fn execute_reg_op(
             return Err(RuntimeError {
                 kind: RuntimeErrorKind::UnknownFunction { func: 0 },
             });
+        }
+        RegOp::CallRef { .. } => {
+            // Same: needs module context from `execute_func_in`.
+            return Err(RuntimeError {
+                kind: RuntimeErrorKind::UnknownFunction { func: 0 },
+            });
+        }
+        RegOp::RefAsNonNull { dst, value } => {
+            let val = get_reg(registers, *value)?;
+            if is_null_ref(&val) {
+                return Err(trap(RuntimeTrap::NullReference));
+            }
+            set_reg(registers, *dst, val)?;
         }
         RegOp::Load {
             op,
@@ -1098,8 +1217,7 @@ fn execute_reg_op(
         }
         RegOp::RefIsNull { dst, value } => {
             let value = get_reg(registers, *value)?;
-            let is_null = matches!(value, Value::FuncRef(None));
-            set_reg(registers, *dst, Value::I32(is_null as i32))?;
+            set_reg(registers, *dst, Value::I32(is_null_ref(&value) as i32))?;
         }
         RegOp::V128Const { dst, value } => {
             set_reg(registers, *dst, Value::V128(*value))?;
@@ -1321,6 +1439,11 @@ fn memory_bounds(
         return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
     }
     Ok(ea as usize..end as usize)
+}
+
+/// Whether a reference value is null (`ref.null`).
+fn is_null_ref(value: &Value) -> bool {
+    matches!(value, Value::FuncRef(None) | Value::ExternRef(None))
 }
 
 /// Extract an i32 memory address operand as u32.

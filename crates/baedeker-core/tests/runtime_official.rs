@@ -32,21 +32,7 @@ const DEFERRED_FILES: &[(&str, &str)] = &[
     ("return_call_indirect.wast", "tail calls not implemented"),
     ("return_call_ref.wast", "tail calls not implemented"),
     // Function-references / GC-era references.
-    ("ref.wast", "typed references not implemented"),
-    ("ref_as_non_null.wast", "typed references not implemented"),
-    ("ref_func.wast", "typed references not implemented"),
-    (
-        "ref_is_null.wast",
-        "typed reference nullability not implemented",
-    ),
-    ("ref_null.wast", "typed references not implemented"),
-    ("br_on_null.wast", "br_on_null not implemented"),
-    ("br_on_non_null.wast", "br_on_non_null not implemented"),
-    ("call_ref.wast", "call_ref not implemented"),
-    (
-        "func_ptrs.wast",
-        "typed function references not implemented",
-    ),
+    ("ref_null.wast", "GC heap types (anyref) not implemented"),
     (
         "type-canon.wast",
         "GC type canonicalization not implemented",
@@ -73,10 +59,6 @@ const DEFERRED_FILES: &[(&str, &str)] = &[
     (
         "br_table.wast",
         "validator ref-type branch joins not implemented",
-    ),
-    (
-        "unreached-valid.wast",
-        "call_ref not implemented (function references era)",
     ),
     (
         "unreached-invalid.wast",
