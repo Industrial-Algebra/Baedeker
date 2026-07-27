@@ -129,7 +129,7 @@ impl Imports {
         module: &str,
         name: &str,
         ty: TableType,
-        shared: alloc::rc::Rc<core::cell::RefCell<Vec<Value>>>,
+        shared: alloc::rc::Rc<core::cell::RefCell<crate::runtime::Table>>,
     ) -> Self {
         self.tables.push(TableProvider {
             module: module.into(),
@@ -169,7 +169,7 @@ struct TableProvider {
     name: String,
     ty: TableType,
     /// Shared handle when the table is linked from another module.
-    shared: Option<alloc::rc::Rc<core::cell::RefCell<Vec<Value>>>>,
+    shared: Option<alloc::rc::Rc<core::cell::RefCell<crate::runtime::Table>>>,
 }
 
 /// The null value for a table's element type.
@@ -291,7 +291,7 @@ pub struct Store {
     memory_types: Vec<MemType>,
     globals: Vec<alloc::rc::Rc<core::cell::Cell<Value>>>,
     global_types: Vec<GlobalType>,
-    tables: Vec<alloc::rc::Rc<core::cell::RefCell<Vec<Value>>>>,
+    tables: Vec<alloc::rc::Rc<core::cell::RefCell<crate::runtime::Table>>>,
     table_types: Vec<TableType>,
     /// Element segment storage; `None` after the segment is dropped (or was
     /// active/declarative at instantiation).
@@ -322,7 +322,7 @@ pub struct Store {
     imported_memory_types: Vec<MemType>,
     imported_global_values: Vec<alloc::rc::Rc<core::cell::Cell<Value>>>,
     imported_global_types: Vec<GlobalType>,
-    imported_tables: Vec<alloc::rc::Rc<core::cell::RefCell<Vec<Value>>>>,
+    imported_tables: Vec<alloc::rc::Rc<core::cell::RefCell<crate::runtime::Table>>>,
     imported_table_types: Vec<TableType>,
     imported_memory_count: u32,
     imported_global_count: u32,
@@ -461,7 +461,7 @@ impl Store {
                 .ok_or_else(|| unknown_import(&declared.module, &declared.name))?;
             let provided_limits = match &provider.shared {
                 Some(shared) => Limits {
-                    min: shared.borrow().len() as u32,
+                    min: shared.borrow().len(),
                     max: provider.ty.limits.max,
                 },
                 None => provider.ty.limits,
@@ -474,8 +474,8 @@ impl Store {
             let entity = match provider.shared.clone() {
                 Some(shared) => shared,
                 None => {
-                    let values = try_alloc_n(
-                        provider.ty.limits.min as usize,
+                    let values = crate::runtime::Table::new(
+                        provider.ty.clone(),
                         table_null(provider.ty.clone()),
                     )
                     .ok_or_else(|| allocation_failed("imported table"))?;
@@ -540,7 +540,7 @@ impl Store {
                 }
                 None => table_null(table.clone()),
             };
-            let values = try_alloc_n(table.limits.min as usize, fill)
+            let values = crate::runtime::Table::new(table.clone(), fill)
                 .ok_or_else(|| allocation_failed("table"))?;
             tables.push(alloc::rc::Rc::new(core::cell::RefCell::new(values)));
         }
@@ -632,15 +632,11 @@ impl Store {
                     };
                     let applied = store
                         .with_table_mut(table.0, |target| {
-                            let start = offset as usize;
-                            let Some(end) = start.checked_add(values.len()) else {
-                                return Err(trap(RuntimeTrap::OutOfBoundsTableAccess));
-                            };
-                            if end > target.len() {
-                                return Err(trap(RuntimeTrap::OutOfBoundsTableAccess));
+                            if target.write_slice(offset as u32, &values) {
+                                Ok(())
+                            } else {
+                                Err(trap(RuntimeTrap::OutOfBoundsTableAccess))
                             }
-                            target[start..end].copy_from_slice(&values);
-                            Ok(())
                         })
                         .ok_or(RuntimeError {
                             kind: RuntimeErrorKind::UnknownTable { table: table.0 },
@@ -800,7 +796,11 @@ impl Store {
     }
 
     /// Read a table by index-space index (imported first) via closure.
-    pub(crate) fn with_table<R>(&self, idx: u32, f: impl FnOnce(&[Value]) -> R) -> Option<R> {
+    pub(crate) fn with_table<R>(
+        &self,
+        idx: u32,
+        f: impl FnOnce(&crate::runtime::Table) -> R,
+    ) -> Option<R> {
         let shared = self.shared_table(idx)?;
         let table = shared.borrow();
         Some(f(&table))
@@ -810,7 +810,7 @@ impl Store {
     pub(crate) fn with_table_mut<R>(
         &self,
         idx: u32,
-        f: impl FnOnce(&mut [Value]) -> R,
+        f: impl FnOnce(&mut crate::runtime::Table) -> R,
     ) -> Option<R> {
         let shared = self.shared_table(idx)?;
         let mut table = shared.borrow_mut();
@@ -821,7 +821,7 @@ impl Store {
     pub(crate) fn shared_table(
         &self,
         idx: u32,
-    ) -> Option<alloc::rc::Rc<core::cell::RefCell<Vec<Value>>>> {
+    ) -> Option<alloc::rc::Rc<core::cell::RefCell<crate::runtime::Table>>> {
         let idx = idx as usize;
         if idx < self.imported_table_count as usize {
             return self.imported_tables.get(idx).cloned();
@@ -877,7 +877,10 @@ impl Store {
     pub fn export_table(
         &self,
         name: &str,
-    ) -> Option<(TableType, alloc::rc::Rc<core::cell::RefCell<Vec<Value>>>)> {
+    ) -> Option<(
+        TableType,
+        alloc::rc::Rc<core::cell::RefCell<crate::runtime::Table>>,
+    )> {
         let idx = self.exports.iter().find_map(|export| match export.desc {
             crate::lower::RegExportDesc::Table(idx) if export.name == name => Some(idx),
             _ => None,

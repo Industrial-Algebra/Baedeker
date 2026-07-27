@@ -7,9 +7,12 @@
 use alloc::{string::String, vec::Vec};
 
 mod store;
+mod table;
 
 pub mod gpu;
 pub mod host;
+
+pub use table::Table;
 
 pub use host::{HostFunction, link_func};
 pub use store::{Imports, LinkGroup, PAGE_SIZE, Store};
@@ -216,7 +219,7 @@ fn execute_call_indirect(
         kind: RuntimeErrorKind::MissingStore,
     })?;
     let target = store
-        .with_table(table.0, |table| table.get(idx as usize).copied())
+        .with_table(table.0, |table| table.get(idx))
         .ok_or(RuntimeError {
             kind: RuntimeErrorKind::UnknownTable { table: table.0 },
         })?
@@ -1024,7 +1027,7 @@ fn execute_reg_op(
             let store = require_store(store)?;
             let idx = expect_addr(get_reg(registers, *index)?)?;
             let value = store
-                .with_table(table.0, |table| table.get(idx as usize).copied())
+                .with_table(table.0, |table| table.get(idx))
                 .ok_or(RuntimeError {
                     kind: RuntimeErrorKind::UnknownTable { table: table.0 },
                 })?
@@ -1041,11 +1044,11 @@ fn execute_reg_op(
             let value = get_reg(registers, *value)?;
             store
                 .with_table_mut(table.0, |table| {
-                    let slot = table
-                        .get_mut(idx as usize)
-                        .ok_or(trap(RuntimeTrap::OutOfBoundsTableAccess))?;
-                    *slot = value;
-                    Ok(())
+                    if table.set(idx, value) {
+                        Ok(())
+                    } else {
+                        Err(trap(RuntimeTrap::OutOfBoundsTableAccess))
+                    }
                 })
                 .ok_or(RuntimeError {
                     kind: RuntimeErrorKind::UnknownTable { table: table.0 },
@@ -1069,22 +1072,14 @@ fn execute_reg_op(
             let store = require_store(store)?;
             let delta = expect_addr(get_reg(registers, *delta)?)?;
             let value = get_reg(registers, *value)?;
-            let max = store
-                .table_type(table.0)
-                .and_then(|ty| ty.limits.max)
-                .map(|max| max as usize)
-                .unwrap_or(usize::MAX);
             let tbl = store.shared_table(table.0).ok_or(RuntimeError {
                 kind: RuntimeErrorKind::UnknownTable { table: table.0 },
             })?;
             let result = {
                 let mut tbl = tbl.borrow_mut();
-                let old = tbl.len();
-                match old.checked_add(delta as usize) {
-                    Some(new) if new <= max && grow_table_fallible(&mut tbl, new, value) => {
-                        old as i32
-                    }
-                    _ => -1,
+                match tbl.grow(delta, value) {
+                    Some(old) => old as i32,
+                    None => -1,
                 }
             };
             set_reg(registers, *dst, Value::I32(result))?;
@@ -1096,19 +1091,16 @@ fn execute_reg_op(
             count,
         } => {
             let store = require_store(store)?;
-            let dst = expect_addr(get_reg(registers, *dst)?)? as usize;
-            let count = expect_addr(get_reg(registers, *count)?)? as usize;
+            let dst = expect_addr(get_reg(registers, *dst)?)?;
+            let count = expect_addr(get_reg(registers, *count)?)?;
             let value = get_reg(registers, *value)?;
             store
                 .with_table_mut(table.0, |tbl| {
-                    let Some(end) = dst.checked_add(count) else {
-                        return Err(trap(RuntimeTrap::OutOfBoundsTableAccess));
-                    };
-                    if end > tbl.len() {
-                        return Err(trap(RuntimeTrap::OutOfBoundsTableAccess));
+                    if tbl.fill(dst, value, count) {
+                        Ok(())
+                    } else {
+                        Err(trap(RuntimeTrap::OutOfBoundsTableAccess))
                     }
-                    tbl[dst..end].fill(value);
-                    Ok(())
                 })
                 .ok_or(RuntimeError {
                     kind: RuntimeErrorKind::UnknownTable { table: table.0 },
@@ -1122,42 +1114,24 @@ fn execute_reg_op(
             count,
         } => {
             let store = require_store(store)?;
-            let dst = expect_addr(get_reg(registers, *dst)?)? as usize;
-            let src = expect_addr(get_reg(registers, *src)?)? as usize;
-            let count = expect_addr(get_reg(registers, *count)?)? as usize;
+            let dst = expect_addr(get_reg(registers, *dst)?)?;
+            let src = expect_addr(get_reg(registers, *src)?)?;
+            let count = expect_addr(get_reg(registers, *count)?)?;
             // Bounds-check both ranges before copying (via a temporary, so
             // overlapping copies within one table behave per spec).
-            let src_len =
-                store
-                    .with_table(src_table.0, |table| table.len())
-                    .ok_or(RuntimeError {
-                        kind: RuntimeErrorKind::UnknownTable { table: src_table.0 },
-                    })?;
-            let dst_len =
-                store
-                    .with_table(dst_table.0, |table| table.len())
-                    .ok_or(RuntimeError {
-                        kind: RuntimeErrorKind::UnknownTable { table: dst_table.0 },
-                    })?;
-            let (Some(src_end), Some(dst_end)) = (src.checked_add(count), dst.checked_add(count))
-            else {
-                return Err(trap(RuntimeTrap::OutOfBoundsTableAccess));
-            };
-            if src_end > src_len || dst_end > dst_len {
-                return Err(trap(RuntimeTrap::OutOfBoundsTableAccess));
-            }
             let temp: Vec<Value> = store
-                .with_table(src_table.0, |table| table[src..src_end].to_vec())
+                .with_table(src_table.0, |table| table.read_slice(src, count))
                 .ok_or(RuntimeError {
                     kind: RuntimeErrorKind::UnknownTable { table: src_table.0 },
-                })?;
+                })?
+                .ok_or(trap(RuntimeTrap::OutOfBoundsTableAccess))?;
             store
-                .with_table_mut(dst_table.0, |table| {
-                    table[dst..dst_end].copy_from_slice(&temp);
-                })
+                .with_table_mut(dst_table.0, |table| table.write_slice(dst, &temp))
                 .ok_or(RuntimeError {
                     kind: RuntimeErrorKind::UnknownTable { table: dst_table.0 },
-                })?;
+                })?
+                .then_some(())
+                .ok_or(trap(RuntimeTrap::OutOfBoundsTableAccess))?;
         }
         RegOp::TableInit {
             table,
@@ -1186,17 +1160,21 @@ fn execute_reg_op(
             else {
                 return Err(trap(RuntimeTrap::OutOfBoundsTableAccess));
             };
-            if src_end > segment.len() || dst_end > table_len {
+            if src_end > segment.len() || dst_end as u32 > table_len {
                 return Err(trap(RuntimeTrap::OutOfBoundsTableAccess));
             }
             let temp: Vec<Value> = segment[src..src_end].to_vec();
             store
                 .with_table_mut(table.0, |table| {
-                    table[dst..dst_end].copy_from_slice(&temp);
+                    if table.write_slice(dst as u32, &temp) {
+                        Ok(())
+                    } else {
+                        Err(trap(RuntimeTrap::OutOfBoundsTableAccess))
+                    }
                 })
                 .ok_or(RuntimeError {
                     kind: RuntimeErrorKind::UnknownTable { table: table.0 },
-                })?;
+                })??;
         }
         RegOp::ElemDrop { elem } => {
             let store = require_store(store)?;
@@ -1414,15 +1392,6 @@ fn grow_memory_fallible(mem: &mut Vec<u8>, new_pages: usize) -> bool {
 
 /// Grow a table to `new` entries, returning `false` when the allocation
 /// fails.
-fn grow_table_fallible(tbl: &mut Vec<Value>, new: usize, value: Value) -> bool {
-    let additional = new.saturating_sub(tbl.len());
-    if tbl.try_reserve(additional).is_err() {
-        return false;
-    }
-    tbl.resize(new, value);
-    true
-}
-
 /// Bounds-check `addr + memarg.offset` over `width` bytes against a memory,
 /// returning the valid byte range.
 fn memory_bounds(

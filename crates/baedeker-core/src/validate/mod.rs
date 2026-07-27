@@ -168,6 +168,31 @@ fn validate_tables(module: &Module<'_>) -> Result<(), ValidationError> {
 
     for table in &module.tables {
         validate_reftype_type_indices(module, table.elem, None, offset)?;
+        // Limits: min must not exceed max.
+        if table.limits.max.is_some_and(|max| table.limits.min > max) {
+            return Err(ValidationError {
+                offset: ByteOffset(offset),
+                function: None,
+                kind: ValidationErrorKind::MemoryMinExceedsMax,
+            });
+        }
+        // A table with a non-nullable element type needs an initializer —
+        // there is no default value to fill with.
+        if table.init.is_none()
+            && matches!(
+                table.elem,
+                crate::types::RefType::Typed {
+                    nullable: false,
+                    ..
+                }
+            )
+        {
+            return Err(ValidationError {
+                offset: ByteOffset(offset),
+                function: None,
+                kind: ValidationErrorKind::TableTypeMismatch,
+            });
+        }
         if let Some(init) = &table.init {
             // Table init exprs reference imported globals only (matching the
             // global-init scope).
@@ -8874,7 +8899,7 @@ mod tests {
         );
         let module = Module::decode(bytes).unwrap();
         let err = module.validate().unwrap_err();
-        assert_eq!(err.offset, ByteOffset(62));
+        assert_eq!(err.offset, ByteOffset(67));
         assert!(matches!(
             err.kind,
             ValidationErrorKind::TypeMismatch { op, expected, found }
@@ -8940,7 +8965,7 @@ mod tests {
         );
         let module = Module::decode(bytes).unwrap();
         let err = module.validate().unwrap_err();
-        assert_eq!(err.offset, ByteOffset(71));
+        assert_eq!(err.offset, ByteOffset(76));
         assert!(matches!(
             err.kind,
             ValidationErrorKind::ElementTableTypeMismatch { expected, found }
@@ -9027,13 +9052,16 @@ mod tests {
         );
         let module = Module::decode(bytes).unwrap();
         let err = module.validate().unwrap_err();
-        assert_eq!(err.offset, ByteOffset(74));
+        assert_eq!(err.offset, ByteOffset(79));
+        // The table's element type is (ref $t1) (its init expr references
+        // the module's only function, of type 1); the passive segment
+        // provides (ref null $t0) values — still a mismatch.
         assert!(matches!(
             err.kind,
             ValidationErrorKind::ElementTableTypeMismatch { expected, found }
                 if expected == RefType::Typed {
                     nullable: false,
-                    heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    heap: crate::types::HeapType::Type(TypeIdx(1)),
                 }
                     && found == RefType::Typed {
                         nullable: true,
