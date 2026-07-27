@@ -28,6 +28,16 @@ impl<'a> Cursor<'a> {
         &self.data[self.pos..]
     }
 
+    /// Pre-allocation capacity for `count` entries yet to be parsed.
+    ///
+    /// Malformed binaries can declare counts in the billions; blindly
+    /// trusting them in `Vec::with_capacity` turns a tiny input into a
+    /// multi-gigabyte allocation. Every entry needs at least one byte in
+    /// the stream, so the remaining input length is a sound upper bound.
+    pub fn capacity_hint(&self, count: u32) -> usize {
+        (count as usize).min(self.remaining().len())
+    }
+
     /// Original backing slice.
     pub fn original(&self) -> &'a [u8] {
         self.data

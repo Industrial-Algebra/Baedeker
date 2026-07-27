@@ -16,7 +16,7 @@ pub fn parse_data_section<'a>(
     let mut cursor = Cursor::new(section.data);
     let count = decode_u32_in_section(&mut cursor, section.offset)?;
 
-    let mut segments = Vec::with_capacity(count as usize);
+    let mut segments = Vec::with_capacity(cursor.capacity_hint(count));
     for _ in 0..count {
         segments.push(parse_data_segment(&mut cursor, section.offset)?);
     }

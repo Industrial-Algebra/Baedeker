@@ -22,7 +22,7 @@ pub fn parse_type_section(section: &RawSection<'_>) -> Result<Vec<FuncType>, Dec
         e
     })?;
 
-    let mut types = Vec::with_capacity(count as usize);
+    let mut types = Vec::with_capacity(cursor.capacity_hint(count));
     for _ in 0..count {
         types.push(parse_func_type(&mut cursor, section.offset)?);
     }
@@ -76,7 +76,7 @@ fn parse_valtype_vec(
         e
     })?;
 
-    let mut types = Vec::with_capacity(count as usize);
+    let mut types = Vec::with_capacity(cursor.capacity_hint(count));
     for _ in 0..count {
         types.push(parse_val_type(
             cursor,

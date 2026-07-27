@@ -13,6 +13,11 @@
 
 extern crate alloc;
 
+// Unit tests may use std (threads for deep-recursion stack headroom, etc.)
+// even when the crate itself is built no_std.
+#[cfg(all(test, not(feature = "std")))]
+extern crate std;
+
 pub mod binary;
 pub mod error;
 pub mod lower;

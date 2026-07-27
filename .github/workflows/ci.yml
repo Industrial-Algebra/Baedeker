@@ -34,3 +34,32 @@ jobs:
 
       - name: Tests
         run: cargo test
+
+  fuzz-smoke:
+    name: Fuzz smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+
+      - name: Seed corpus
+        run: fuzz/seed.sh
+
+      # Short deterministic bursts: catches panic/OOM regressions in the
+      # decode/validate/lower pipeline without a long fuzzing session.
+      # `+nightly` is explicit: rust-toolchain.toml pins stable, which
+      # overrides the toolchain action's default through rustup proxies.
+      - name: Fuzz decode
+        run: cargo +nightly fuzz run decode -- -runs=50000
+
+      - name: Fuzz validate_lower
+        run: cargo +nightly fuzz run validate_lower -- -runs=50000
+
+      - name: Fuzz smith_module
+        run: cargo +nightly fuzz run smith_module -- -runs=5000

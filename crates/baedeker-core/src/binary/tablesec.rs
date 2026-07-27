@@ -17,7 +17,7 @@ pub fn parse_table_section(section: &RawSection<'_>) -> Result<Vec<TableType>, D
     let mut cursor = Cursor::new(section.data);
     let count = decode_u32_in_section(&mut cursor, section.offset)?;
 
-    let mut tables = Vec::with_capacity(count as usize);
+    let mut tables = Vec::with_capacity(cursor.capacity_hint(count));
     for _ in 0..count {
         tables.push(parse_table_type(&mut cursor, section.offset)?);
     }

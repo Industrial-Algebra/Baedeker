@@ -15,7 +15,7 @@ pub fn parse_global_section<'a>(section: &RawSection<'a>) -> Result<Vec<Global<'
     let mut cursor = Cursor::new(section.data);
     let count = decode_u32_in_section(&mut cursor, section.offset)?;
 
-    let mut globals = Vec::with_capacity(count as usize);
+    let mut globals = Vec::with_capacity(cursor.capacity_hint(count));
     for _ in 0..count {
         let global_type = parse_global_type(&mut cursor, section.offset)?;
         let init_offset = section.offset + cursor.position();
