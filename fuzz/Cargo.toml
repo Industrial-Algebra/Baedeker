@@ -41,3 +41,9 @@ path = "fuzz_targets/smith_module.rs"
 test = false
 doc = false
 required-features = ["wasm-smith"]
+
+[[bin]]
+name = "trap_edges"
+path = "fuzz_targets/trap_edges.rs"
+test = false
+doc = false

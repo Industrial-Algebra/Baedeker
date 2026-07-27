@@ -303,6 +303,10 @@ pub struct Store {
     exports: Vec<crate::lower::RegExport>,
     /// This instance's id within its link group (0 when unlinked).
     instance_id: u32,
+    /// Remaining instruction fuel; `None` = unlimited (default). Embedders
+    /// running untrusted modules set a budget via `set_fuel`; the
+    /// interpreter errors with `FuelExhausted` at zero.
+    fuel: core::cell::Cell<Option<u64>>,
     /// The start function, deferred until [`Store::run_start`] is called
     /// (host functions must be registered before it runs).
     pending_start: Option<crate::types::FuncIdx>,
@@ -557,6 +561,7 @@ impl Store {
             data: core::cell::RefCell::new(Vec::new()),
             exports: module.exports.clone(),
             instance_id,
+            fuel: core::cell::Cell::new(None),
             pending_start: None,
             link_group: None,
             gpu: core::cell::RefCell::new(None),
@@ -1005,6 +1010,33 @@ impl Store {
     /// This instance's id within its link group (0 when unlinked).
     pub(crate) fn instance_id(&self) -> u32 {
         self.instance_id
+    }
+
+    /// Set the instruction fuel budget (`None` = unlimited, the default).
+    ///
+    /// Fuel is charged per executed instruction (and per block dispatch)
+    /// across all calls made from this store. Cross-instance calls charge
+    /// the callee's store, not the caller's — each instance has its own
+    /// budget.
+    pub fn set_fuel(&self, fuel: Option<u64>) {
+        self.fuel.set(fuel);
+    }
+
+    /// Remaining fuel, or `None` when unlimited.
+    pub fn fuel(&self) -> Option<u64> {
+        self.fuel.get()
+    }
+
+    /// Charge one unit of fuel; `false` when the budget is exhausted.
+    pub(crate) fn charge_fuel(&self) -> bool {
+        let Some(remaining) = self.fuel.get() else {
+            return true;
+        };
+        if remaining == 0 {
+            return false;
+        }
+        self.fuel.set(Some(remaining - 1));
+        true
     }
 
     /// The link group this instance belongs to, if any.

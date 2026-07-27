@@ -62,32 +62,84 @@ pub struct RuntimeError {
 /// Specific runtime execution failures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeErrorKind {
-    ArityMismatch { expected: usize, found: usize },
-    TypeMismatch { expected: ValType, found: ValType },
+    ArityMismatch {
+        expected: usize,
+        found: usize,
+    },
+    TypeMismatch {
+        expected: ValType,
+        found: ValType,
+    },
     Trap(RuntimeTrap),
-    UninitializedLocal { local: u32 },
-    UninitializedRegister { reg: Reg },
-    UnknownRegister { reg: Reg },
-    UnknownExport { name: String },
-    ExportedFunctionNotLowered { func: u32 },
-    UnknownFunction { func: u32 },
-    UnknownImport { module: String, name: String },
-    ImportTypeMismatch { module: String, name: String },
+    UninitializedLocal {
+        local: u32,
+    },
+    UninitializedRegister {
+        reg: Reg,
+    },
+    UnknownRegister {
+        reg: Reg,
+    },
+    UnknownExport {
+        name: String,
+    },
+    ExportedFunctionNotLowered {
+        func: u32,
+    },
+    UnknownFunction {
+        func: u32,
+    },
+    UnknownImport {
+        module: String,
+        name: String,
+    },
+    ImportTypeMismatch {
+        module: String,
+        name: String,
+    },
     ReentrantStore,
-    UnknownInstance { instance: u32 },
-    ResourceLimitExceeded { what: &'static str },
-    ImportedFunctionCallUnsupported { func: u32 },
-    UnknownMemory { memory: u32 },
-    UnknownDataSegment { data: u32 },
-    UnknownGlobal { global: u32 },
-    UnknownTable { table: u32 },
-    UnknownElem { elem: u32 },
-    UnknownType { type_idx: u32 },
-    ImportedMemoryAccessUnsupported { memory: u32 },
-    ImportedGlobalAccessUnsupported { global: u32 },
-    ImportedTableAccessUnsupported { table: u32 },
+    UnknownInstance {
+        instance: u32,
+    },
+    ResourceLimitExceeded {
+        what: &'static str,
+    },
+    /// The store's instruction fuel budget ran out (see `Store::set_fuel`).
+    FuelExhausted,
+    ImportedFunctionCallUnsupported {
+        func: u32,
+    },
+    UnknownMemory {
+        memory: u32,
+    },
+    UnknownDataSegment {
+        data: u32,
+    },
+    UnknownGlobal {
+        global: u32,
+    },
+    UnknownTable {
+        table: u32,
+    },
+    UnknownElem {
+        elem: u32,
+    },
+    UnknownType {
+        type_idx: u32,
+    },
+    ImportedMemoryAccessUnsupported {
+        memory: u32,
+    },
+    ImportedGlobalAccessUnsupported {
+        global: u32,
+    },
+    ImportedTableAccessUnsupported {
+        table: u32,
+    },
     InvalidConstExpr,
-    InvalidLaneIndex { lane: u8 },
+    InvalidLaneIndex {
+        lane: u8,
+    },
     Gpu(crate::runtime::gpu::GpuError),
     MissingStore,
     MissingReturn,
@@ -487,9 +539,9 @@ pub(crate) fn execute_func_in(
     }
 
     let mut block_idx: u32 = 0;
-    // Coarse fuel guard against infinite loops. Loops consume one unit per
-    // back-edge, so this must be generous; a configurable fuel mechanism is
-    // future work.
+    // Backstop against true infinite loops when no fuel budget is set (the
+    // coarse guard predates configurable fuel; with fuel, exhaustion is the
+    // honest `FuelExhausted` error instead of `MissingReturn`).
     let max_iterations = 10_000_000;
     let mut iteration: usize = 0;
     loop {
@@ -499,12 +551,26 @@ pub(crate) fn execute_func_in(
                 kind: RuntimeErrorKind::MissingReturn,
             });
         }
+        if let Some(store) = store
+            && !store.charge_fuel()
+        {
+            return Err(RuntimeError {
+                kind: RuntimeErrorKind::FuelExhausted,
+            });
+        }
         let block = func.blocks.get(block_idx as usize).ok_or(RuntimeError {
             kind: RuntimeErrorKind::MissingReturn,
         })?;
 
         // Execute straight-line instructions in this block
         for instr in &block.instrs {
+            if let Some(store) = store
+                && !store.charge_fuel()
+            {
+                return Err(RuntimeError {
+                    kind: RuntimeErrorKind::FuelExhausted,
+                });
+            }
             if let RegOp::Call {
                 func: callee_idx,
                 args: arg_regs,
