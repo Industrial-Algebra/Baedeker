@@ -955,44 +955,41 @@ fn validate_instr(
                 "br_table",
             )?;
             let default_types = validate_label(function, state, *default, offset)?.to_vec();
-            if state.reachability == Reachability::Reachable {
-                for label in targets {
-                    let label_types = validate_label(function, state, *label, offset)?;
-                    if label_types != default_types.as_slice() {
-                        return Err(ValidationError {
-                            offset: ByteOffset(offset),
-                            function: Some(function),
-                            kind: ValidationErrorKind::InconsistentBranchTypes {
-                                expected: default_types.clone(),
-                                found: label_types.to_vec(),
-                            },
-                        });
-                    }
+            // Every target must agree on arity; the operand must be a
+            // subtype of each target's label types (they need not be
+            // identical — the join is the operand's own type).
+            for label in targets {
+                let label_types = validate_label(function, state, *label, offset)?;
+                if label_types.len() != default_types.len() {
+                    return Err(ValidationError {
+                        offset: ByteOffset(offset),
+                        function: Some(function),
+                        kind: ValidationErrorKind::InconsistentBranchTypes {
+                            expected: default_types.clone(),
+                            found: label_types.to_vec(),
+                        },
+                    });
                 }
-            } else {
-                ensure_stack_types(state, &default_types).map_err(|found| ValidationError {
+                ensure_stack_types(state, label_types).map_err(|found| ValidationError {
                     offset: ByteOffset(offset),
                     function: Some(function),
                     kind: ValidationErrorKind::BranchTypeMismatch {
-                        label: *default,
-                        expected: default_types.clone(),
+                        label: *label,
+                        expected: label_types.to_vec(),
                         found,
                     },
                 })?;
-                for label in targets {
-                    let label_types = validate_label(function, state, *label, offset)?;
-                    ensure_stack_types(state, label_types).map_err(|found| ValidationError {
-                        offset: ByteOffset(offset),
-                        function: Some(function),
-                        kind: ValidationErrorKind::BranchTypeMismatch {
-                            label: *label,
-                            expected: label_types.to_vec(),
-                            found,
-                        },
-                    })?;
-                }
             }
-            pop_branch_types(function, state, *default, &default_types, offset)?;
+            ensure_stack_types(state, &default_types).map_err(|found| ValidationError {
+                offset: ByteOffset(offset),
+                function: Some(function),
+                kind: ValidationErrorKind::BranchTypeMismatch {
+                    label: *default,
+                    expected: default_types.clone(),
+                    found,
+                },
+            })?;
+            pop_exact(function, state, &default_types, offset)?;
             state.enter_unreachable();
         }
         Instr::Return => {
@@ -6626,25 +6623,16 @@ mod tests {
         ));
     }
 
+    /// Nullability-differing br_table targets are VALID when the operand is
+    /// a subtype of both: (ref $t0) branches to (ref $t0) and
+    /// (ref null $t0) labels alike (the join is the operand's own type).
     #[test]
-    fn reject_typed_br_table_nullability_targets_mismatch() {
+    fn validate_typed_br_table_nullability_targets_join() {
         let bytes = include_bytes!(
-            "../../../baedeker-testdata/spec/invalid-validate/typed-br-table-nullability-targets-mismatch.wasm",
+            "../../../baedeker-testdata/spec/valid/typed-br-table-nullability-targets-join.wasm",
         );
         let module = Module::decode(bytes).unwrap();
-        let err = module.validate().unwrap_err();
-        assert_eq!(err.offset, ByteOffset(54));
-        assert!(matches!(
-            err.kind,
-            ValidationErrorKind::InconsistentBranchTypes { expected, found }
-                if expected == vec![ValType::Ref(RefType::Typed {
-                    nullable: true,
-                    heap: crate::types::HeapType::Type(TypeIdx(0)),
-                })] && found == vec![ValType::Ref(RefType::Typed {
-                    nullable: false,
-                    heap: crate::types::HeapType::Type(TypeIdx(0)),
-                })]
-        ));
+        module.validate().unwrap();
     }
 
     #[test]
@@ -6917,11 +6905,14 @@ mod tests {
         let module = Module::decode(&bytes).unwrap();
         let err = module.validate().unwrap_err();
         assert_eq!(err.offset, ByteOffset(29));
+        // Label types may differ under the join rule, but the (empty) stack
+        // cannot supply an i64 to label 0.
         assert!(matches!(
             err.kind,
-            ValidationErrorKind::InconsistentBranchTypes { expected, found }
-                if expected == vec![ValType::Num(crate::types::NumType::I32)]
-                    && found == vec![ValType::Num(crate::types::NumType::I64)]
+            ValidationErrorKind::BranchTypeMismatch { label, expected, found }
+                if label == crate::types::LabelIdx(0)
+                    && expected == vec![ValType::Num(crate::types::NumType::I64)]
+                    && found.is_empty()
         ));
     }
 
@@ -6950,16 +6941,20 @@ mod tests {
         let module = Module::decode(&bytes).unwrap();
         let err = module.validate().unwrap_err();
         assert_eq!(err.offset, ByteOffset(59));
+        // The (ref $t0) operand satisfies label 0 (ref null $t0) but not
+        // label 1 (ref null $t1).
         assert!(matches!(
             err.kind,
-            ValidationErrorKind::InconsistentBranchTypes { expected, found }
-                if expected == vec![ValType::Ref(RefType::Typed {
-                    nullable: true,
-                    heap: crate::types::HeapType::Type(TypeIdx(1)),
-                })] && found == vec![ValType::Ref(RefType::Typed {
-                    nullable: true,
-                    heap: crate::types::HeapType::Type(TypeIdx(0)),
-                })]
+            ValidationErrorKind::BranchTypeMismatch { label, expected, found }
+                if label == crate::types::LabelIdx(1)
+                    && expected == vec![ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(1)),
+                    })]
+                    && found == vec![ValType::Ref(RefType::Typed {
+                        nullable: false,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })]
         ));
     }
 
@@ -6990,16 +6985,20 @@ mod tests {
         let module = Module::decode(&bytes).unwrap();
         let err = module.validate().unwrap_err();
         assert_eq!(err.offset, ByteOffset(68));
+        // The (ref $t0) operand satisfies the loop's (ref null $t0) param
+        // but not the block's (ref null $t1) result.
         assert!(matches!(
             err.kind,
-            ValidationErrorKind::InconsistentBranchTypes { expected, found }
-                if expected == vec![ValType::Ref(RefType::Typed {
-                    nullable: true,
-                    heap: crate::types::HeapType::Type(TypeIdx(1)),
-                })] && found == vec![ValType::Ref(RefType::Typed {
-                    nullable: true,
-                    heap: crate::types::HeapType::Type(TypeIdx(0)),
-                })]
+            ValidationErrorKind::BranchTypeMismatch { label, expected, found }
+                if label == crate::types::LabelIdx(1)
+                    && expected == vec![ValType::Ref(RefType::Typed {
+                        nullable: true,
+                        heap: crate::types::HeapType::Type(TypeIdx(1)),
+                    })]
+                    && found == vec![ValType::Ref(RefType::Typed {
+                        nullable: false,
+                        heap: crate::types::HeapType::Type(TypeIdx(0)),
+                    })]
         ));
     }
 
