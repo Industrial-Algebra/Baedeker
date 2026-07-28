@@ -1,0 +1,12 @@
+[package]
+name = "baedeker-cli"
+description = "Baedeker WebAssembly runtime — command-line test harness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+baedeker-core = { path = "../baedeker-core", features = ["std"] }
+
+[dev-dependencies]
+baedeker-testdata = { path = "../baedeker-testdata" }

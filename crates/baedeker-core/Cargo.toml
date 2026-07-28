@@ -1,0 +1,28 @@
+[package]
+name = "baedeker-core"
+description = "WebAssembly runtime core — decode, validate, execute (no_std)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+std = []
+
+[dependencies]
+libm = "0.2"
+
+[dev-dependencies]
+baedeker-testdata = { path = "../baedeker-testdata" }
+wast = "240"
+wasm-smith = "0.254"
+arbitrary = "1"
+
+# Differential oracle: Pulley-interpreter build (no cranelift) keeps CI
+# compile times reasonable.
+wasmtime = { version = "47", default-features = false, features = [
+    "runtime",
+    "std",
+    "wat",
+    "winch",
+] }

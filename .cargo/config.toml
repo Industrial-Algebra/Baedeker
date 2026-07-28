@@ -1,0 +1,8 @@
+[build]
+# Incremental compilation for faster dev builds
+incremental = true
+
+[target.'cfg(all())']
+rustflags = [
+    "-W", "rust-2024-compatibility",
+]

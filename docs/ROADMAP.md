@@ -1,0 +1,1204 @@
+# Baedeker — Roadmap
+
+> A WASM runtime built in Rust, named for the most cautious and methodical of Pierson's Puppeteers.
+> Like its namesake, Baedeker proceeds carefully through unknown territory — but gets there.
+
+## Tracking
+
+**Roadmap phases and checkpoints are tracked as GitHub Issues.**
+
+- **Epics:** [Phase 0](https://github.com/Industrial-Algebra/Baedeker/issues/8) ·
+  [Phase 1](https://github.com/Industrial-Algebra/Baedeker/issues/9) ·
+  [Phase 2](https://github.com/Industrial-Algebra/Baedeker/issues/10) ·
+  [Phase 3](https://github.com/Industrial-Algebra/Baedeker/issues/11) ·
+  [Phase 4](https://github.com/Industrial-Algebra/Baedeker/issues/12) ·
+  [Phase 5](https://github.com/Industrial-Algebra/Baedeker/issues/13) ·
+  [Phase 6](https://github.com/Industrial-Algebra/Baedeker/issues/14) ·
+  [Deferred](https://github.com/Industrial-Algebra/Baedeker/issues/15)
+- **Phase 2 Checkpoints:**
+  [C1](https://github.com/Industrial-Algebra/Baedeker/issues/16) ·
+  [C2](https://github.com/Industrial-Algebra/Baedeker/issues/17) ·
+  [C3](https://github.com/Industrial-Algebra/Baedeker/issues/18) ·
+  [C4](https://github.com/Industrial-Algebra/Baedeker/issues/19)
+- **Cross-cutting:** [Spec Compliance](https://github.com/Industrial-Algebra/Baedeker/issues/20) ·
+  [Fuzzing](https://github.com/Industrial-Algebra/Baedeker/issues/21) ·
+  [Creusot Contracts](https://github.com/Industrial-Algebra/Baedeker/issues/22)
+
+The document below remains as the authoritative prose description of each phase's goals
+and design rationale. For current status, check the linked issues.
+
+## Philosophy
+
+Baedeker is a language-runtime and systems project: its binary decoding, validation, malformed-input
+handling, and future robustness testing are all in service of standards-compliant WebAssembly
+execution, portability, and implementation quality. This roadmap is therefore framed around spec
+compliance, safe execution, and embedding ergonomics rather than offensive security use cases.
+
+This roadmap is structured as a bottom-up traversal of the WebAssembly abstraction stack.
+Each phase builds expertise in a specific layer before moving upward. Phases are designed to
+produce a working (if incomplete) artifact at each boundary, so the project is always runnable
+and testable — never in a state where three more layers need to exist before anything executes.
+
+The target spec is full WebAssembly 3.0 validation, with execution support growing in phases on
+top of that semantic front-end. Deployment targets are everywhere Rust compiles — Linux, macOS,
+iOS, Android — with host integration via a C-compatible FFI (idiomatic Swift on Apple platforms)
+and GPU acceleration via Vulkan-based compute. JIT compilation is explicitly out of scope for
+the initial architecture; the engine is interpreter-first with AOT as a future layer.
+
+---
+
+## Phase 0 — Foundation
+
+**Focus:** Project structure, spec familiarity, binary format fundamentals.
+
+- Set up workspace: `baedeker` (top-level), `baedeker-core` (no_std engine), `baedeker-cli`
+  (test harness), `baedeker-wasm` (meta — Baedeker compiled to WASM, for bootstrapping tests later).
+- Implement LEB128 encoder/decoder with exhaustive edge case handling (overlong encodings,
+  unsigned vs signed, maximum bit widths). This is your first contact with the spec's pedantry —
+  treat it as calibration for the rigor the rest demands.
+- Build the section parser: magic number, version, section IDs, section byte lengths.
+  Parse but don't yet interpret section contents — just segment the binary into labeled byte spans.
+- Implement a `Module` AST type that represents the parsed-but-not-validated structure.
+- **Milestone:** Can ingest any `.wasm` binary and report its section layout without crashing.
+
+### Spec sections to internalize
+- [Binary Format](https://webassembly.github.io/spec/core/binary/index.html) — all of it.
+- [Values](https://webassembly.github.io/spec/core/binary/values.html) — LEB128 specifics.
+
+---
+
+## Phase 1 — Type System & Validation
+
+**Focus:** The WASM type system, structured control flow, and the validation algorithm.
+
+### Progress checklist
+
+#### Done
+- [x] Parse the Type section: function signatures (`functype`), with the current decoded subset of
+  WASM 2.0 value types used by Baedeker so far.
+- [x] Parse Import and Function sections to build the function index space.
+- [x] Parse the Code section and decode a growing instruction subset on demand.
+- [x] Parse the Global section, including defined globals and raw initializer expressions.
+- [x] Parse the Memory section, including defined memory limits.
+- [x] Implement a first substantial slice of the **validation algorithm** for instruction
+  sequences, including:
+  - [x] stack polymorphism after unconditional branches
+  - [x] block signature matching for `block`, `loop`, `if`
+  - [x] correct label indexing for `br`, `br_if`, `br_table`
+  - [x] type-correct `select` with explicit type annotations (2.0)
+  - [x] function type index resolution
+  - [x] call target resolution across imported and defined functions
+  - [x] local index validation
+  - [x] global index validation across imported and defined globals
+  - [x] memory index validation across imported and defined memories
+  - [x] final function result stack checking
+- [x] Validate a useful current instruction subset including structured control flow, locals,
+  calls, globals, `memory.size`, `memory.grow`, `select`, typed `select`, `i32.add`, `i64.add`,
+  `i32.eqz`, and a small constant/comparison subset.
+- [x] Validate defined global initializer expressions for the current const-expression subset:
+  `i32.const`, `i64.const`, `f32.const`, `f64.const`, and `global.get` of imported immutable
+  globals.
+- [x] Build a validation error type that produces genuinely useful diagnostics, including:
+  - [x] precise byte offsets for failing instructions
+  - [x] decode-preserving validation errors
+  - [x] operation-aware stack underflow diagnostics
+  - [x] operation-aware type mismatch diagnostics
+  - [x] richer branch/control result mismatch diagnostics
+  - [x] final result mismatch diagnostics with full stack context
+  - [x] index-space diagnostics with available-count context for globals and memories
+
+#### In progress / partial
+- [~] Expand instruction coverage from the current strong subset toward full WebAssembly 3.0
+  validation.
+  - Current support now includes structured control flow, direct calls and `call_indirect`,
+    locals, globals, multi-memory / multi-table module validation, scalar memory load/store
+    families, SIMD/vector memory operations and lane checks, explicit nonzero memory-index
+    validation across `memory.size` / `memory.grow`, bulk-memory instructions, scalar memory
+    ops, and SIMD memory ops, typed `select`, `br_table`, a substantially broader numeric
+    operator subset across i32/i64/f32/f64 comparisons and arithmetic, the core conversion /
+    reinterpretation families, integer sign-extension operators, saturating float-to-int
+    truncation variants, and an expanded reference/const-expression subset including `ref.null`,
+    `ref.func`, `ref.is_null`, imported immutable `global.get` in more const-expression
+    positions, and declared-function-reference checking for `ref.func` in function bodies with
+    declaration sources currently grounded in exports, global initializer `ref.func`, and
+    element segments.
+  - Major remaining gaps are now broader reference-type-driven validation paths beyond the
+    current subset, additional proposal-era completeness, and external spec-suite
+    integration/backfill rather than the main scalar numeric families.
+- [~] Enrich module-level validation toward full spec-shaped coverage.
+  - Type/import/function/code/global/memory/data/data-count/export/table/start/element sections are
+    now parsed and validated in a useful Phase 1 base.
+  - Remaining work is mostly semantic breadth and proposal-era completeness rather than missing the
+    core module skeleton.
+- [~] Run the growing validator against a disciplined external corpus rather than only crate-local
+  tests.
+  - Baedeker now has a filesystem-backed spec fixture harness with `valid`, `invalid-decode`, and
+    `invalid-validate` buckets plus optional `.meta` files for exact error `kind`/`offset`
+    assertions, plus `context=` and `decode_kind=` for cases where validation intentionally
+    preserves an underlying body-decode failure as `ValidationErrorKind::Decode`.
+  - Baedeker also now has a separate `wast` integration path with curated local files plus a broad
+    `wast-upstream/` directory of small upstream-derived official-spec subsets.
+  - Upstream-derived `.wast` coverage now uses sibling `.meta` files with `skip=...` to record
+    intentionally deferred or currently mismatched cases explicitly, so the harness acts as both a
+    runner and a lightweight support ledger for spec-suite friction points.
+  - There are currently no explicitly deferred upstream-derived cases in the support matrix.
+
+  - Active upstream-derived subsets now include:
+    - `wast-upstream/labels-invalid-subset.wast`
+    - `wast-upstream/labels-invalid-folded-syntax-subset.wast`
+    - `wast-upstream/ref-null-subset.wast`
+    - `wast-upstream/ref-as-non-null-subset.wast`
+    - `wast-upstream/ref-select-subset.wast`
+    - `wast-upstream/ref-control-subset.wast`
+    - `wast-upstream/ref-func-undeclared-reference-subset.wast`
+    - `wast-upstream/imports-unknown-type-subset.wast`
+    - `wast-upstream/global-subset.wast`
+    - `wast-upstream/global-ref-init-subset.wast`
+    - `wast-upstream/data-subset.wast`
+    - `wast-upstream/data-memory-subset.wast`
+    - `wast-upstream/elem-subset.wast`
+    - `wast-upstream/elem-table-init-subset.wast`
+    - `wast-upstream/local-get-subset.wast`
+    - `wast-upstream/local-set-subset.wast`
+    - `wast-upstream/local-tee-subset.wast`
+    - `wast-upstream/load-subset.wast`
+    - `wast-upstream/store-subset.wast`
+    - `wast-upstream/align-subset.wast`
+    - `wast-upstream/integer-numeric-subset.wast`
+    - `wast-upstream/float-numeric-subset.wast`
+    - `wast-upstream/proposal-conversions-subset.wast`
+    - `wast-upstream/simd-const-subset.wast`
+    - `wast-upstream/simd-memory-subset.wast`
+    - `wast-upstream/simd-lane-subset.wast`
+    - `wast-upstream/simd-memory-multi-subset.wast`
+    - `wast-upstream/memory-init-subset.wast`
+    - `wast-upstream/data-drop-subset.wast`
+    - `wast-upstream/memory-copy-subset.wast`
+    - `wast-upstream/memory-fill-subset.wast`
+    - `wast-upstream/call-subset.wast`
+    - `wast-upstream/call-indirect-subset.wast`
+    - `wast-upstream/call-ref-subset.wast`
+    - `wast-upstream/typed-call-ref-subset.wast`
+    - `wast-upstream/return-call-subset.wast`
+    - `wast-upstream/return-call-indirect-subset.wast`
+    - `wast-upstream/return-call-ref-subset.wast`
+    - `wast-upstream/typed-return-call-ref-subset.wast`
+    - `wast-upstream/br-on-null-subset.wast`
+    - `wast-upstream/br-on-non-null-subset.wast`
+    - `wast-upstream/return-subset.wast`
+    - `wast-upstream/block-subset.wast`
+    - `wast-upstream/if-subset.wast`
+    - `wast-upstream/loop-subset.wast`
+    - `wast-upstream/unreachable-subset.wast`
+    - `wast-upstream/switch-subset.wast`
+    - `wast-upstream/select-subset.wast`
+    - `wast-upstream/br-if-subset.wast`
+    - `wast-upstream/br-table-subset.wast`
+    - `wast-upstream/table-get-subset.wast`
+    - `wast-upstream/table-set-subset.wast`
+    - `wast-upstream/table-grow-subset.wast`
+    - `wast-upstream/table-size-subset.wast`
+    - `wast-upstream/table-ref-flow-subset.wast`
+    - `wast-upstream/table-grow-ref-subset.wast`
+    - `wast-upstream/ref-func-table-call-subset.wast`
+    - `wast-upstream/typed-table-ref-subset.wast`
+    - `wast-upstream/typed-reference-types-subset.wast`
+    - `wast-upstream/table-init-subset.wast`
+    - `wast-upstream/table-copy-subset.wast`
+    - `wast-upstream/table-fill-subset.wast`
+    - `wast-upstream/utf8-custom-section-id-subset.wast`
+
+  - Historical active upstream files have been normalized to `-subset.wast` names; no active
+    upstream-derived coverage currently retains the old `-skip` suffix.
+
+  - Remaining work is to continue integrating official `wast`/spec-suite cases while tightening the
+    support/defer boundary and tracking unsupported areas explicitly.
+  - Recent upstream grounding has strengthened scalar memory structure/alignment coverage across
+    `memory-subset`, `load-subset`, `store-subset`, and `align-subset`.
+  - Recent upstream grounding has also broadened bulk memory coverage via new
+    `memory-init-subset`, `data-drop-subset`, `memory-copy-subset`, and `memory-fill-subset`
+    files, including explicit nonzero memory selection, active/passive data-segment use, same-
+    memory and cross-memory copies, and representative unknown-index / missing-data-count /
+    operand-type invalid cases.
+  - Recent upstream grounding has also broadened direct/indirect call argument-flow coverage via
+    `call-subset` and an expanded `call-indirect-subset`.
+  - Recent upstream grounding has also broadened global / const-expression coverage via expanded
+    `global-subset`, `data-subset`, and `elem-subset` files, including imported-const-global
+    offsets, reference-valued constant initializers, immutable-global writes, and representative
+    invalid constant-expression forms.
+  - Const-expression / initialization / extended-const hardening now also accepts defined immutable
+    globals in later constant-expression contexts where the spec allows them and supports the
+    current extended-const arithmetic subset used by the official tests (`i32.add/sub/mul`,
+    `i64.add/sub/mul`). Grounding now includes additional valid raw fixtures for defined-global and
+    arithmetic-based global initializers, data offsets, and element offsets, while upstream-derived
+    `global-subset`, `data-subset`, and `elem-subset` now include representative defined-global and
+    arithmetic constant-expression cases.
+  - Recent upstream grounding has also broadened const-expression / initialization coverage via new
+    `global-ref-init-subset`, `data-memory-subset`, and `elem-table-init-subset` files, including
+    imported immutable ref globals in global initializers, explicit memory selection in active data
+    segments, and nonzero-table element initialization with imported-global offsets and ref-valued
+    expressions.
+  - Recent upstream grounding has also broadened reference-type / table-const-expression coverage
+    via expanded `table-subset` and `elem-subset` cases, including inline table element syntax,
+    `ref.func` / `ref.null` table initializers in supported sugar forms, imported `externref` /
+    `funcref` globals as constant element expressions, and corresponding mismatch / non-constant
+    invalid cases.
+  - Recent upstream grounding has also broadened direct table-instruction coverage via expanded
+    `table-get-subset`, `table-set-subset`, and `table-grow-subset` files plus new
+    `table-size-subset` coverage, including multi-table index selection, ref-typed operand/result
+    flow, and representative wrong-arity / wrong-type / wrong-result invalid cases.
+  - Recent upstream grounding has also broadened return / block / if result-flow coverage via
+    expanded `return-subset`, `block-subset`, and `if-subset` files, including nested result
+    propagation through structured control, `return` flowing through block/loop/if/call contexts,
+    and representative empty-vs-valued / void-vs-valued / malformed inline-type invalid cases.
+  - Recent upstream grounding has also broadened select / `br_if` / `br_table` expression-position
+    coverage via expanded `select-subset`, `br-if-subset`, and `br-table-subset` files, including
+    use inside loop/if/branch contexts and representative arity / operand-type / label-result
+    mismatch invalid cases.
+  - Recent upstream grounding has also broadened control-expression saturation via new
+    `loop-subset`, `unreachable-subset`, and `switch-subset` files, including loop-valued
+    expression positions, stack-polymorphic unreachable use in control/call/memory contexts, and
+    additional `br_table`-driven structured-control nesting.
+  - Recent upstream grounding has also broadened bulk table-op coverage via new
+    `table-init-subset`, `table-copy-subset`, and `table-fill-subset` files, including nonzero
+    table/element indices, `elem.drop`, same-table and cross-table copies, and representative
+    unknown-index / operand-type / result-shape invalid cases.
+  - Recent upstream grounding has also broadened `call_indirect` / table interaction coverage via
+    an expanded `call-indirect-subset` with multi-table valid modules, explicit nonzero table
+    selection, and representative no-table / wrong-result / wrong-argument invalid cases.
+  - Recent upstream grounding has also broadened call / table / reference interaction coverage via
+    new `table-ref-flow-subset`, `table-grow-ref-subset`, and `ref-func-table-call-subset` files,
+    including `table.get -> table.set` round-trips, `table.grow` with `ref.null` / `ref.func`,
+    `ref.func`-driven `call_indirect` through mutable/global/table flows, and representative
+    ref-type mismatch invalid cases.
+  - Recent upstream grounding has also broadened numeric / SIMD / proposal-surface completeness via
+    new `integer-numeric-subset`, `float-numeric-subset`, `proposal-conversions-subset`,
+    `simd-const-subset`, `simd-memory-subset`, `simd-lane-subset`, and
+    `simd-memory-multi-subset` files, including integer unary/binary/compare/sign-extension
+    operators, float compare/unary/binary families, saturating truncations, reinterpretation and
+    conversion paths, `v128.const`, SIMD load/store/alignment/lane validation, and nonzero-memory
+    SIMD lane syntax.
+  - Recent upstream grounding has also broadened reference/control proposal-edge coverage via new
+    `ref-null-subset`, `ref-as-non-null-subset`, `ref-select-subset`, and `ref-control-subset`
+    files, including `ref.null` in function/global/control positions, `ref.as_non_null` over
+    nullable and already-non-null references, typed `select` over `funcref`/`externref`,
+    `ref.func` / `ref.null` joins, and reference-valued block/if result flow with representative
+    ref-type mismatch invalid cases.
+  - Tail-call mini-cluster support now also includes `return_call` and `return_call_indirect`
+    decoding plus validation grounding via new `return-call-subset` and
+    `return-call-indirect-subset` upstream files, new raw valid fixtures
+    `valid/return-call-minimal.wasm` and `valid/return-call-indirect-funcref-table.wasm`, and new
+    raw invalid fixtures for result-mismatch and non-`funcref`-table cases.
+  - Function-reference call support now also includes `call_ref` and `return_call_ref` decoding
+    plus the first typed-reference groundwork pass: `RefType` now models nullable vs non-null
+    references and concrete function type indices, binary parsing accepts typed-reference encodings
+    across types/tables/globals/locals/block results, and validation accepts concrete function refs
+    as subtypes of abstract `funcref` where appropriate. Validation now also canonicalizes
+    structurally equivalent concrete function types for the currently supported typed-function-
+    reference surface, so equivalent signatures no longer mismatch solely because their raw
+    `TypeIdx` values differ. Grounding now includes new `call-ref-subset`,
+    `return-call-ref-subset`, `typed-call-ref-subset`, `typed-return-call-ref-subset`,
+    `typed-table-ref-subset`, and `typed-reference-types-subset` upstream files, new raw valid
+    fixtures `valid/call-ref-minimal.wasm`, `valid/return-call-ref-minimal.wasm`,
+    `valid/typed-ref-global-init-from-ref-func.wasm`, `valid/typed-call-ref-null-concrete.wasm`,
+    `valid/typed-table-set-get-concrete.wasm`, `valid/typed-call-ref-equivalent-signature.wasm`,
+    `valid/typed-return-call-ref-equivalent-signature.wasm`,
+    `valid/typed-table-set-get-equivalent-signature.wasm`, and
+    `valid/typed-ref-global-init-equivalent-signature.wasm`, plus raw invalid fixtures for
+    non-`funcref` references, concrete-type mismatches, and result-mismatch cases.
+  - Typed-reference / const-init / table-element saturation now also covers typed `global.get`
+    flows in constant initializers, typed element expressions sourced from typed globals and
+    `ref.func`, and typed `table.init` against passive typed element segments. Validation now
+    normalizes element-segment reference types during `table.init`, so structurally equivalent
+    concrete function signatures no longer mismatch there solely because their raw `TypeIdx`
+    values differ. Grounding expanded `typed-reference-types-subset`, `elem-subset`, and
+    `table-init-subset`, and added raw fixtures for imported/defined typed-global initializers,
+    typed element/global flows, passive typed element segments, and typed `table.init`
+    equivalent-signature and wrong-concrete-type boundaries.
+  - Typed-reference index-validity / malformed-boundary saturation now also validates concrete
+    typed-reference `TypeIdx` operands across the bounded Phase 1 surface: function-type params /
+    results, imported typed globals, defined tables, defined globals, element segment types,
+    locals, `ref.null` immediates, and reference-valued block results. New raw invalid fixtures pin
+    `UnknownTypeIdx` at these boundaries. Malformed-boundary coverage also now includes raw
+    unknown-heaptype bytes in import/global/element/local decoding plus decode-preserving body
+    cases for `ref.null` and block-result immediates. Because Node/V8 supports a broader GC-era
+    heap-type space than Baedeker currently models, those raw unknown-ref-type byte fixtures are
+    explicitly skipped in strict Node parity while remaining active Baedeker boundary assertions.
+    Official grounding expanded via new `typed-invalid-typeidx-subset.wast`.
+  - Typed-reference proposal-surface saturation now also broadens three adjacent supported areas:
+    typed `select`, table/global import mixes, and additional block/control/result forms.
+    Grounding expanded `ref-select-subset`, `ref-control-subset`, `typed-table-ref-subset`, and
+    `typed-reference-types-subset` with representative equivalent-signature typed-reference cases:
+    typed `select` over concrete function refs, imported typed-global -> defined/imported typed-
+    table flows, `ref.func` -> imported mutable typed-global flows, and typed block/if result
+    propagation. New raw valid fixtures cover those equivalent-signature cases, and new raw invalid
+    fixtures pin representative wrong-concrete-type boundaries for typed `select`, imported typed-
+    global -> imported typed-table flow, and typed `if` result propagation.
+  - Typed-reference table/control saturation now also covers `br_if`, `br_table`, and typed
+    loop-result forms. Grounding expanded `br-if-subset`, `br-table-subset`, and `loop-subset`
+    with representative equivalent-signature typed-function-reference branches/results plus wrong-
+    concrete-type invalids. New raw valid fixtures cover typed `br_if`, typed `br_table`, and
+    typed loop-result equivalent-signature flows, and new raw invalid fixtures pin
+    `BranchTypeMismatch` / `ControlResultTypeMismatch` boundaries for wrong-concrete-type branch
+    operands and loop fallthrough results.
+  - Typed branch-target consistency is now also grounded across broader multi-target `br_table`
+    combinations. `br-table-subset` now includes equivalent-signature and wrong-concrete-type
+    cases for nested block/block targets and mixed loop/block targets, and new raw fixtures pin
+    `InconsistentBranchTypes` for mismatched typed multi-target label sets.
+  - Typed control-signature interaction is now also grounded as a broader campaign across block /
+    loop parameter-result composition and branch-to-loop targets. Grounding expanded
+    `block-subset`, `loop-subset`, `br-subset`, and `br-if-subset` with representative
+    equivalent-signature typed function-reference cases for block-result -> loop-param flow,
+    loop-result -> block-result flow, `br` to param-bearing loops, and `br_if` to param-bearing
+    loops. New raw valid fixtures cover those composed control-signature flows, and new raw
+    invalid fixtures pin `TypeMismatch`, `BranchTypeMismatch`, and
+    `ControlResultTypeMismatch` boundaries for wrong-concrete-type loop entry, branch targets, and
+    enclosing block/result joins.
+  - Typed branch/control closure under reachability is now also grounded across `unreachable`,
+    `return`, dead code after `br`, and control joins with early `return` inside typed `if`.
+    Grounding expanded `unreachable-subset`, `return-subset`, `ref-control-subset`, and
+    `br-subset` with representative equivalent-signature typed-function-reference cases for
+    unreachable block ends, direct typed returns, typed dead-code tails after `br`, and typed
+    `if` joins where one arm exits via `return`. New raw valid fixtures cover those reachability
+    closures, and new raw invalid fixtures pin `ControlResultTypeMismatch` boundaries for wrong-
+    concrete-type dead-code tails, wrong-concrete-type returns, and mismatched typed joins after
+    early exit.
+  - Typed call/control convergence is now also grounded across control-produced typed-function-
+    references flowing into `call_ref`, `return_call_ref`, `call_indirect`, and
+    `return_call_indirect`. Grounding expanded `typed-call-ref-subset`,
+    `typed-return-call-ref-subset`, `call-indirect-subset`, and
+    `return-call-indirect-subset` with representative equivalent-signature typed cases where
+    block/if results feed direct reference calls and typed indirect-call parameters. New raw valid
+    fixtures cover block-result -> `call_ref`, if-result -> `return_call_ref`, block-result ->
+    typed `call_indirect` parameter, and if-result -> typed `return_call_indirect` parameter.
+    New raw invalid fixtures pin `TypeMismatch` boundaries for wrong-concrete-type call-site
+    convergence rather than earlier control-frame failure.
+  - Typed table/global/element flow closure is now also grounded across typed table reads feeding
+    mutable typed globals and typed globals feeding passive element segments that later initialize
+    typed tables. Grounding expanded `typed-reference-types-subset`, `typed-table-ref-subset`,
+    `elem-subset`, and `table-init-subset` with representative equivalent-signature cases for
+    defined/imported typed `table.get -> global.set` flows plus defined/imported typed
+    `global.get -> passive elem -> table.init -> table.get` chains. New raw valid fixtures cover
+    those composed storage/dataflow paths, and new raw invalid fixtures pin `TypeMismatch` on
+    `global.set` plus `ElementExprTypeMismatch` on wrong-concrete-type passive element
+    expressions.
+  - Typed nullability-flow saturation is now also grounded across `br_on_null`,
+    `br_on_non_null`, `ref.as_non_null`, and typed nullable joins. Grounding expanded
+    `br-on-null-subset`, `br-on-non-null-subset`, `ref-as-non-null-subset`, and
+    `ref-control-subset` with representative equivalent-signature typed-function-reference cases
+    for `br_on_null` fallthrough feeding `call_ref`, `br_on_non_null` taken branches feeding typed
+    block results and `call_ref`, `ref.as_non_null` feeding mutable typed globals, and typed `if`
+    joins combining `ref.as_non_null` with `ref.null`. New raw valid fixtures cover those
+    nullability-flow compositions, and new raw invalid fixtures pin `TypeMismatch` at
+    `call_ref`, `br_on_non_null`, and `global.set` plus `ControlResultTypeMismatch` at typed null
+    joins with wrong concrete function types.
+  - Malformed/decode boundary completion for typed control/reference encodings is now also
+    grounded across truncated `call_ref` / `return_call_ref` type immediates, truncated
+    `br_on_null` / `br_on_non_null` label immediates, truncated `ref.null` heap types, and
+    truncated typed block-result heap types. Grounding added a new upstream-derived
+    `typed-malformed-control-subset` plus raw invalid fixtures pinning decode-preserving
+    `ValidationErrorKind::Decode` with exact `CodeSection` / `UnexpectedEof` metadata at the
+    instruction boundary offsets for these typed control/reference body-decode failures.
+  - Official spec grounding is now also broadened across additional upstream validation-only and
+    malformed-binary files that fit Baedeker’s current supported surface. Grounding added new
+    upstream-derived `forward-subset`, `unreached-invalid-subset`, `func-ptrs-invalid-subset`,
+    `binary-leb128-subset`, `utf8-import-module-subset`, and `utf8-import-field-subset` files.
+    These expand coverage for forward mutual recursion, unreachable-code invalids, classic
+    function-pointer/table/type invalids, non-minimal vs malformed LEB128 encodings, and malformed
+    UTF-8 import names. Raw fixtures and unit tests now also pin valid `forward-mutual-recursion`
+    and `unreached-call-ref` acceptance plus unreachable unknown-local/global/function/label
+    failures with exact offsets.
+  - Non-defaultable local initialization tracking is now implemented for function validation.
+    Parameters and defaultable locals start initialized, non-defaultable locals must be initialized
+    before `local.get`, and initialization established inside structured control does not escape
+    the enclosing block/if/loop frame. Grounding added new upstream-derived
+    `local-init-subset` plus raw valid fixtures for `local.set` / `local.tee` / block-internal
+    flows and raw invalid fixtures pinning `UninitializedLocal` for direct use, post-block use,
+    `else`-arm use, and post-`if` use of non-defaultable locals.
+  - Bottom-type / stack-polymorphic unreachable closure is now materially broader across
+    representative official `unreached-valid.wast` shapes. The validator now carries explicit
+    bottom operands through unreachable validation so instructions like `select` and
+    `ref.as_non_null` can consume stack-polymorphic inputs without spuriously underflowing, while
+    frame-end checks still reject concrete stray or mismatched values that survive in dead code.
+    Grounding added new upstream-derived `unreached-valid-subset` plus raw valid fixtures for
+    select-heavy unreachable flows, bottom-heap `ref.as_non_null` / `br_on_null` cases, and a
+    meet-bottom `br_table` join, along with raw invalid fixtures pinning function-end mismatches
+    for concrete unreachable select/result leakage.
+  - Official grounding expansion has resumed now that the concrete post-audit semantic blockers are
+    closed. Curated official additions broadened active coverage in `local-init-subset`,
+    `unreached-valid-subset`, `ref-as-non-null-subset`, `select-subset`, and `br-table-subset`,
+    including extra `local_init.wast` tee-init grounding, additional unreachable-valid select
+    shapes, an official unreachable `ref.as_non_null` case, richer select placement coverage, and
+    additional numeric `br_table` value forms. Representative raw valid fixtures and unit tests now
+    also pin those official shapes directly.
+  - To avoid drifting back into tiny one-off expansions, the next official zero-skip batch widened a
+    denser `select.wast` control-consumer slice in one pass. `select-subset` now covers broader
+    official placement shapes including loop-first/last, if-condition, call-indirect operand
+    positions, store operands, memory.grow, call/return/branch/local/global consumers, load,
+    unary/binary/test/compare, and conversion contexts. Representative raw valid fixtures and unit
+    tests now pin `select-as-call-indirect-last`, `select-as-memory-grow-value`,
+    `select-as-global-set-value`, `select-as-convert-operand`, and `select-as-if-condition`.
+  - The next official sweep kept that denser cadence by broadening `br-table-subset` across a much
+    larger official branch-consumer slice rather than a single placement. Active coverage now spans
+    block/loop placements, branch consumers (`br`, `br_if`, nested `br_table`), if/select/call /
+    call_indirect positions, local/global consumers, memory address/value consumers, arithmetic /
+    compare / conversion consumers, and `memory.grow`. Representative raw valid fixtures and unit
+    tests now pin `br-table-as-br-if-value-cond`, `br-table-as-call-indirect-func`,
+    `br-table-as-local-set-value`, `br-table-as-load-address`, `br-table-as-store-value`,
+    `br-table-as-compare-left`, and `br-table-as-memory-grow-size`.
+  - A comparable branch-adjacent sweep then broadened `br-if-subset` rather than starting another
+    tiny file. Active official coverage now spans `br_if` result typing, block/loop placements,
+    nested branch consumers, if/select/call/call_indirect consumers, local/global consumers,
+    memory address/value consumers, arithmetic/compare consumers, and `memory.grow`. Representative
+    raw valid fixtures and unit tests now pin `br-if-as-br-if-value-cond`, `br-if-as-select-cond`,
+    `br-if-as-call-indirect-last`, `br-if-as-local-tee-value`, `br-if-as-load-address`,
+    `br-if-as-storeN-value`, and `br-if-as-memory-grow-size`.
+  - The next comparable densification broadened `br-subset` across a much larger official direct-
+    branch consumer slice. Active official coverage now spans result typing, block/loop placements,
+    nested branch consumers (`br`, `br_if`, `br_table`), if/select/call/call_indirect consumers,
+    local/global consumers, memory address/value consumers, arithmetic/compare/conversion
+    consumers, and `memory.grow`, while retaining the existing typed-reference branch grounding in
+    the same file. Representative raw valid fixtures and unit tests now pin `br-as-br-if-value-cond`,
+    `br-as-select-all`, `br-as-call-indirect-all`, `br-as-local-tee-value`, `br-as-load-address`,
+    `br-as-storeN-value`, and `br-as-memory-grow-size`.
+  - A follow-on control-consumer closure sweep then widened the remaining smaller structured-control
+    subsets rather than opening another narrow lane. `if-subset`, `block-subset`, `loop-subset`,
+    and `return-subset` now cover additional consumer placements spanning `call_indirect`,
+    `memory.grow`, `select`, loads, `local.tee`, direct calls, and nested branch values. This
+    closes more of the official expression-position surface around structured control without new
+    validator algorithms. Representative raw valid fixtures and unit tests now pin
+    `if-as-call-indirect-last`, `if-as-memory-grow-size`, `block-as-select-cond`,
+    `block-as-load-address`, `loop-as-local-tee-value`, `loop-as-memory-grow-size`,
+    `return-as-call-value`, and `return-as-br-value`.
+  - The next broader official audit pass selected `call-subset` as the best dense zero-skip target,
+    and the follow-on batch widened it aggressively inside a single existing file. Active official
+    direct-call grounding now spans richer type/result cases plus a broad producer/consumer slice
+    across `select`, `if`, `br_if`, `br_table`, `call_indirect`, stores, `memory.grow`, `return`,
+    `drop`, `br`, local/global writes, loads, unary/binary/test/compare operators, and conversion
+    contexts, alongside additional representative invalid arity/type cases. Representative raw
+    valid fixtures and unit tests now pin `call-as-call-all-operands`, `call-as-br-table-last`,
+    `call-as-call-indirect-last`, `call-as-memory-grow-value`, `call-as-local-tee-value`,
+    `call-as-load-operand`, `call-as-compare-right`, and `call-as-convert-operand`.
+  - A comparable dense follow-on then broadened `call-indirect-subset` across its own official
+    producer/consumer surface rather than leaving indirect-call coverage comparatively sparse.
+    Active official indirect-call grounding now spans richer type/result cases plus placement
+    coverage across `select`, `if`, `br_if`, `br_table`, stores, `memory.grow`, `return`, `drop`,
+    `br`, local/global writes, loads, unary/binary/test/compare operators, and conversion
+    contexts, while preserving the existing multi-table / explicit-table-index and typed-reference
+    call-indirect grounding already present in the file. The invalid slice also broadened with more
+    representative official arity/type mismatches. Representative raw valid fixtures and unit tests
+    now pin `call-indirect-as-select-last`, `call-indirect-as-br-if-first`,
+    `call-indirect-as-store-last`, `call-indirect-as-memory-grow-value`,
+    `call-indirect-as-local-tee-value`, `call-indirect-as-load-operand`,
+    `call-indirect-as-compare-right`, and `call-indirect-as-convert-operand`.
+  - The next dense sweep then expanded `unreachable-subset` itself rather than leaving the
+    stack-polymorphic lane represented by only a handful of official placements. Active official
+    unreachable grounding now spans result typing, function/block/loop placements, branch/branch-
+    table positions, `if`/`select` consumers, direct and indirect calls, local/global writes,
+    load/store address and value positions, unary/binary/test/compare/conversion consumers, and
+    `memory.grow`, while keeping the typed-reference unreachable join case already grounded in the
+    same file. Representative raw valid fixtures and unit tests now pin
+    `unreachable-as-func-mid`, `unreachable-as-block-value`,
+    `unreachable-as-br-table-value-index`, `unreachable-as-if-then-no-else`,
+    `unreachable-as-call-indirect-first`, `unreachable-as-local-tee-value`,
+    `unreachable-as-storeN-value`, and `unreachable-as-convert-operand`.
+  - A follow-on typed/control adjacency sweep then densified the typed reference/control frontier
+    around those now-broader call/branch/unreachable lanes instead of leaving `call_ref`,
+    `return_call_ref`, `br_on_null`, `br_on_non_null`, and `ref.as_non_null` coverage relatively
+    isolated. Active official grounding now includes nested and recursive `call_ref`, recursive
+    `return_call_ref` under `if`, explicit unreachable typing around `call_ref`, `br_on_null`, and
+    `br_on_non_null`, `br_on_non_null` + `ref.as_non_null` joins, and direct-call-to-typed-ref
+    producer/consumer flow in `ref-as-non-null-subset`. Representative raw valid fixtures and unit
+    tests now pin `call-ref-run-nested`, `call-ref-unreachable-ref-func`,
+    `call-ref-unreachable-call-drop`, `return-call-ref-count`, `br-on-null-unreachable`,
+    `br-on-non-null-ref-as-non-null`, `br-on-non-null-unreachable`, and
+    `ref-as-non-null-direct-call-ref-func`.
+  - The next invalid-pressure pass then deepened the same typed/control frontier rather than only
+    adding more happy-path official grounding. Active official invalid coverage now includes extra
+    `call_ref` / `return_call_ref` non-funcref cases, `return_call_ref` result-arity pressure, and
+    broader raw exact-offset regression fixtures for `call_ref`, `return_call_ref`,
+    `br_on_null`, `br_on_non_null`, and `ref.as_non_null` consumer/stack-shape failures.
+    Representative raw invalid fixtures and unit tests now pin
+    `call-ref-non-funcref-externref`, `call-ref-non-funcref-funcref`,
+    `return-call-ref-non-funcref-externref`, `return-call-ref-non-funcref-funcref`,
+    `return-call-ref-multi-result`, `br-on-null-stack-mismatch`,
+    `br-on-non-null-stack-mismatch`, and `ref-as-non-null-null-to-nonnull-call`.
+  - A follow-on typed result-lattice pressure pass then focused specifically on reference-result
+    subtyping and nullability joins around `call_ref`, `return_call_ref`, and structured-control
+    result boundaries. Active official invalid grounding now includes the broader
+    `return_call_ref` result-lattice slice from upstream (`ref $t` vs `ref null $t`, `ref func`,
+    and `ref null func` result interactions), while new raw exact-offset fixtures pin
+    `call_ref`-produced wrong-concrete-type failures at function, block, and `if` result
+    boundaries plus `return_call_ref` wrong-concrete-type and nullability result mismatches.
+    Representative raw invalid fixtures and unit tests now pin
+    `typed-call-ref-function-result-wrong-concrete-type`,
+    `typed-call-ref-block-result-wrong-concrete-type`,
+    `typed-call-ref-if-result-wrong-concrete-type`,
+    `typed-return-call-ref-result-wrong-concrete-type`, and
+    `typed-return-call-ref-result-nullability-mismatch`.
+  - The next typed select / ref-control result-pressure pass then widened the same result-boundary
+    scrutiny across `select`, `ref.as_non_null`, `br_on_null`, and `br_on_non_null` rather than
+    leaving that lattice pressure concentrated only around `call_ref` / `return_call_ref`.
+    Active official invalid grounding now includes additional result-boundary failures in
+    `ref-select-subset`, `ref-as-non-null-subset`, `br-on-null-subset`, and
+    `br-on-non-null-subset`, while new raw exact-offset fixtures pin typed-select function/block/
+    `if` result mismatches, typed-select nullability-result mismatch, `ref.as_non_null`
+    function-result mismatch, and `br_on_null` / `br_on_non_null` block-result mismatches.
+    Representative raw invalid fixtures and unit tests now pin
+    `typed-select-function-result-wrong-concrete-type`,
+    `typed-select-block-result-wrong-concrete-type`,
+    `typed-select-if-result-wrong-concrete-type`,
+    `typed-select-function-result-nullability-mismatch`,
+    `typed-ref-as-non-null-function-result-wrong-concrete-type`,
+    `typed-br-on-null-block-result-wrong-concrete-type`, and
+    `typed-br-on-non-null-block-result-wrong-concrete-type`.
+  - A follow-on typed branch/select join-pressure sweep then widened nullability-flow pressure
+    specifically across `br`, `br_if`, `br_table`, and `select` interactions with typed refs.
+    Active official grounding now includes select-fed branch cases in `br-subset`,
+    `br-if-subset`, and `br-table-subset`, plus a direct typed-select nullability invalid in
+    `ref-select-subset`. New raw fixtures now pin valid nullable-target select-to-branch flows for
+    `br`, `br_if`, and `br_table`, along with exact-offset invalids for direct
+    typed-select nullability mismatch, select-fed `br` / `br_if` / `br_table` non-null target
+    failures, and mixed nullable/non-null `br_table` target inconsistency.
+    Representative raw fixtures and unit tests now pin `typed-select-to-br-nullable`,
+    `typed-select-to-br-if-nullable`, `typed-select-to-br-table-nullable`,
+    `typed-select-nullability-mismatch`, `typed-select-to-br-nullability-mismatch`,
+    `typed-select-to-br-if-nullability-mismatch`,
+    `typed-select-to-br-table-nullability-mismatch`, and
+    `typed-br-table-nullability-targets-mismatch`.
+  - A further typed branch-result pressure sweep then widened nullability-specific coverage around
+    loop params, block results, and `if` joins. Active official grounding now includes nullable
+    branch-to-loop-param cases in `br-subset` and `br-if-subset`, nullable block/loop result cases
+    in `block-subset` and `loop-subset`, and nullable/non-null join pressure in `if-subset`.
+    New raw fixtures now pin valid non-null→nullable flows for block results, loop results,
+    `if` joins, `br` to loop params, and `br_if` to loop params, along with exact-offset invalids
+    for non-null block/loop/`if` result expectations fed by nullable typed refs and for nullable
+    branch values targeting non-null loop params.
+    Representative raw fixtures and unit tests now pin
+    `typed-block-result-nullable-from-nonnull`,
+    `typed-loop-result-nullable-from-nonnull`,
+    `typed-if-result-nullable-from-join`,
+    `typed-br-to-loop-param-nullable`,
+    `typed-br-if-to-loop-param-nullable`,
+    `typed-block-result-nullability-mismatch`,
+    `typed-loop-result-nullability-mismatch`,
+    `typed-if-result-nullability-mismatch`,
+    `typed-br-to-loop-param-nullability-mismatch`, and
+    `typed-br-if-to-loop-param-nullability-mismatch`.
+  - A follow-on typed nullability-consumer sweep then widened pressure across plain `return`,
+    `call_ref` consumers, and table/global storage boundaries under mixed nullable/non-null
+    structured joins. Active official grounding now includes nullable structured-join return cases
+    in `return-subset`, nullable `if`-fed `call_ref` cases in `typed-call-ref-subset`, and
+    nullable `if`-fed `global.set` / `table.set` cases in `typed-table-ref-subset`. New raw
+    fixtures now pin valid nullable joins flowing into `return`, `call_ref`, `global.set`, and
+    `table.set`, along with exact-offset invalids for non-null return/global/table expectations fed
+    by nullable structured joins and for an abstract `funcref` structured join consumed by
+    `call_ref`.
+    Representative raw fixtures and unit tests now pin `typed-return-if-nullable`,
+    `typed-call-ref-if-nullable`, `typed-global-set-if-nullable`,
+    `typed-table-set-if-nullable`, `typed-return-if-nullability-mismatch`,
+    `typed-call-ref-if-abstract-nullability-mismatch`,
+    `typed-global-set-if-nullability-mismatch`, and
+    `typed-table-set-if-nullability-mismatch`.
+  - A further typed nullability storage/dataflow sweep then widened structured-join coverage across
+    locals, globals, and tables, while extending nullability pressure through passive element and
+    `table.init` flows. Active official grounding now includes nullable structured joins stored via
+    `local.set` in `local-set-subset`, carried through `local` / `global` / `table` storage into
+    later `call_ref` consumers in `typed-call-ref-subset`, fed through non-null function-result
+    boundaries in `return-subset`, and widened passive-element / `table.init` nullability coverage
+    in `elem-table-init-subset` and `table-init-subset`.
+    New raw fixtures now pin valid structured-join storage/dataflow through locals, globals, and
+    tables into later `call_ref`, plus passive-element and `table.init` nullable flows from
+    non-null producers. Exact-offset invalids now pin nullable structured-join values escaping
+    local/global/table storage into non-null function results, nullable structured joins stored into
+    non-null locals, nullable passive-element expressions consumed as non-null typed refs, and
+    nullable typed element segments targeting non-null tables.
+    Representative raw fixtures and unit tests now pin `typed-local-set-if-nullable`,
+    `typed-local-if-nullable-to-call-ref`, `typed-global-if-nullable-to-call-ref`,
+    `typed-table-if-nullable-to-call-ref`, `typed-passive-element-nullable-from-nonnull`,
+    `typed-table-init-nullable-to-call-ref`, `typed-local-set-if-nullability-mismatch`,
+    `typed-local-if-to-return-nullability-mismatch`,
+    `typed-global-if-to-return-nullability-mismatch`,
+    `typed-table-if-to-return-nullability-mismatch`,
+    `typed-passive-element-nullability-mismatch`, and
+    `typed-table-init-nullability-mismatch`.
+  - A follow-on typed nullability transport sweep then widened indirect storage/initialization
+    coverage across `global.get -> passive elem -> table.init -> table.get` chains, with blame
+    pinned at the final semantic consumer when intermediate transport remains valid. Active official
+    grounding now includes nullable and non-null global transport into passive elements in
+    `elem-table-init-subset`, indirect nullable transport into `call_ref` consumers in
+    `typed-call-ref-subset` and `table-init-subset`, indirect nullable transport into non-null
+    function-result boundaries in `return-subset`, and indirect nullable transport into non-null
+    `global.set` in `typed-table-ref-subset`.
+    New raw fixtures now pin valid defined/imported global transport through passive elements and
+    `table.init` into later `call_ref` consumers, including non-null global values widened through
+    nullable passive-element / table boundaries. Exact-offset invalids now pin nullable transport
+    arriving at non-null function results, nullable transport arriving at non-null `global.set`,
+    and nullable passive-element segments targeting non-null tables.
+    Representative raw fixtures and unit tests now pin
+    `typed-defined-global-passive-element-table-init-nullable-to-call-ref`,
+    `typed-imported-global-passive-element-table-init-nullable-to-call-ref`,
+    `typed-defined-nonnull-global-passive-element-nullable`,
+    `typed-imported-nonnull-global-passive-element-table-init-nullable-to-call-ref`,
+    `typed-defined-global-passive-element-table-init-to-return-nullability-mismatch`,
+    `typed-imported-global-passive-element-table-init-to-return-nullability-mismatch`,
+    `typed-defined-global-passive-element-table-init-to-global-set-nullability-mismatch`, and
+    `typed-imported-global-passive-element-table-init-nullability-mismatch`.
+  - A further typed nullability consumer-lattice sweep then widened terminal-consumer pressure
+    across `return_call_ref`, `return_call_indirect`, and branch-target transport after table
+    initialization. Active official grounding now includes table-initialized function-reference
+    transport into `return_call_ref` result boundaries in `typed-return-call-ref-subset`,
+    table-initialized indirect-call-table transport into `return_call_indirect` result boundaries
+    in `return-call-indirect-subset`, and table-initialized branch-value transport into `br`,
+    `br_if`, and `br_table` target/result boundaries in `br-subset`, `br-if-subset`, and
+    `br-table-subset`.
+    New raw fixtures now pin valid nullable consumer flows for table-initialized
+    `return_call_ref`, `return_call_indirect`, `br`, `br_if`, and `br_table` cases. Exact-offset
+    invalids now pin where the terminal consumer rejects nullable transport: `ResultTypeMismatch`
+    at `return_call_ref` / `return_call_indirect`, and `BranchTypeMismatch` at `br`, `br_if`, and
+    `br_table`.
+    Representative raw fixtures and unit tests now pin
+    `typed-table-init-to-return-call-ref-result-nullable`,
+    `typed-table-init-to-return-call-indirect-result-nullable`,
+    `typed-table-init-to-br-nullable`, `typed-table-init-to-br-if-nullable`,
+    `typed-table-init-to-br-table-nullable`,
+    `typed-table-init-to-return-call-ref-result-nullability-mismatch`,
+    `typed-table-init-to-return-call-indirect-result-nullability-mismatch`,
+    `typed-table-init-to-br-nullability-mismatch`,
+    `typed-table-init-to-br-if-nullability-mismatch`, and
+    `typed-table-init-to-br-table-nullability-mismatch`.
+  - A follow-on shared-source nullability sweep then widened mixed terminal-consumer pressure
+    across `return`, `return_call_ref`, `br_if`, and `global.set` when all four consume the same
+    table-initialized nullable callee reference cached in a local before final use. Active official
+    grounding now includes shared-source terminal coverage in `return-subset`,
+    `typed-return-call-ref-subset`, `br-if-subset`, and `typed-table-ref-subset`.
+    New raw fixtures now pin valid shared-source nullable flows into each terminal consumer, while
+    exact-offset invalids pin the final blame site for the same transported source: `return`
+    rejects at `ControlResultTypeMismatch`, `return_call_ref` rejects at `ResultTypeMismatch`,
+    `br_if` rejects at `BranchTypeMismatch`, and `global.set` rejects at `TypeMismatch`.
+    Representative raw fixtures and unit tests now pin
+    `typed-table-init-shared-source-to-return-nullable`,
+    `typed-table-init-shared-source-to-return-call-ref-nullable`,
+    `typed-table-init-shared-source-to-br-if-nullable`,
+    `typed-table-init-shared-source-to-global-set-nullable`,
+    `typed-table-init-shared-source-to-return-nullability-mismatch`,
+    `typed-table-init-shared-source-to-return-call-ref-nullability-mismatch`,
+    `typed-table-init-shared-source-to-br-if-nullability-mismatch`, and
+    `typed-table-init-shared-source-to-global-set-nullability-mismatch`.
+  - A final shared-source sweep across the remaining terminal family then widened the same cached
+    transport pattern into `br`, `br_table`, and `return_call_indirect`. Active official grounding
+    now includes shared-source terminal coverage in `br-subset`, `br-table-subset`, and
+    `return-call-indirect-subset`, where the transported nullable value is first cached in a local
+    and only then consumed by the final terminal operator.
+    New raw fixtures now pin valid shared-source nullable flows into `br`, `br_table`, and
+    `return_call_indirect`, while exact-offset invalids again pin the final blame site rather than
+    the shared transport path: `br` and `br_table` reject at `BranchTypeMismatch`, and
+    `return_call_indirect` rejects at `ResultTypeMismatch`.
+    Representative raw fixtures and unit tests now pin
+    `typed-table-init-shared-source-to-br-nullable`,
+    `typed-table-init-shared-source-to-br-table-nullable`,
+    `typed-table-init-shared-source-to-return-call-indirect-result-nullable`,
+    `typed-table-init-shared-source-to-br-nullability-mismatch`,
+    `typed-table-init-shared-source-to-br-table-nullability-mismatch`, and
+    `typed-table-init-shared-source-to-return-call-indirect-result-nullability-mismatch`.
+  - Checkpoint 1 closure work then resumed the adjacent official validation-only lane by densifying
+    `labels-subset` with additional supported official control-flow cases drawn from `labels.wast`.
+    Active official grounding now includes loop-result labels, `br_if` result threading through
+    nested blocks, label shadowing, and nested `br_table` label routing from the official labels
+    file, backed by raw valid fixtures for representative labels/switch shapes.
+    Representative raw fixtures and unit tests now pin `official-labels-loop5`,
+    `official-labels-loop6`, `official-labels-br-if1`, `official-labels-br-if2`,
+    `official-labels-shadowing`, `official-labels-switch`, and `official-switch-corner`.
+  - Checkpoint 1 then widened that same official validation-only lane again with a denser
+    labels/control batch: `labels-subset` now also carries official `block`, `loop1`, `loop2`,
+    `if`, `return`, `br_if0`, and `br` shapes from `labels.wast`, while `switch-subset` now also
+    carries the official statement-style `br_table` tower from `switch.wast`.
+    Representative raw fixtures and unit tests now pin `official-labels-block`,
+    `official-labels-loop1`, `official-labels-loop2`, `official-labels-if`,
+    `official-labels-return`, `official-labels-br-if0`, `official-labels-br`, and
+    `official-switch-stmt`.
+  - Checkpoint 1 then extended the same official lane once more with adjacent loop/if/branch
+    shapes from `labels.wast` plus the expression-style switch tower from `switch.wast`.
+    `labels-subset` now also carries official `loop3`, `loop4`, `if2`, and `br_if3`, while
+    `switch-subset` now also carries the official `expr` case.
+    Representative raw fixtures and unit tests now pin `official-labels-loop3`,
+    `official-labels-loop4`, `official-labels-if2`, `official-labels-br-if3`, and
+    `official-switch-expr`. The remaining adjacent blockers stayed explicit during scouting, so
+    neither the official `labels` `redefinition` case nor the official `switch` `arg` case was
+    activated prematurely.
+  - Checkpoint 1 then closed the adjacent `labels` redefinition blocker itself. The validator’s
+    frame-closing path now preserves stack-polymorphic result popping relative to the frame being
+    closed, rather than the enclosing frame, so same-frame branches no longer consume outer
+    operands while materializing block results.
+    `labels-subset` now also carries the official `redefinition` case, with representative raw
+    fixture and unit test `official-labels-redefinition`.
+  - That same frame-closing / stack-polymorphic fix also closed the adjacent `switch` `arg`
+    blocker. `switch-subset` now also carries the official `arg` case, with representative raw
+    fixture and unit test `official-switch-arg`.
+  - A follow-on broader WebAssembly 3.0 type-surface audit then pinned the current bounded-model
+    decode boundary for recursive / non-function GC type definitions. Representative raw invalid-
+    decode fixtures now cover `rec` groups plus `sub`, `struct`, and `array` type definitions,
+    all currently rejected at the type-section functype tag boundary. Node/V8 parity is skipped for
+    these fixtures so Baedeker can keep explicit malformed-boundary assertions even though external
+    runtimes accept a broader GC-era type space.
+  - The next broader 3.0 audit/classification pass then split the adjacent official recursive/type
+    files into currently supportable versus needs-implementation buckets. Curated supportable
+    fragments from `ref.wast` are now active in the zero-skip lane: `typed-reference-types-subset`
+    now carries the official typed-reference syntax module, while `typed-invalid-typeidx-subset`
+    now carries the official unknown-type invalids from `ref.wast` plus the invalid forward-type-
+    reference recursion case from `type-equivalence.wast`. At the same time, Baedeker now rejects
+    forward concrete type references outside explicit recursive groups via a pinned raw invalid
+    fixture `type-forward-ref-outside-rec-group`, while `type-canon.wast` and the explicit-rec /
+    non-function portions of `type-rec.wast` remain classified as broader type-system work beyond
+    the current flat functype decoder.
+  - `ref.as_non_null` support now also includes decoding plus validation grounding via new
+    `ref-as-non-null-subset` upstream coverage, raw valid
+    `valid/ref-as-non-null-call-ref.wasm`, and raw invalid
+    `invalid-validate/ref-as-non-null-non-ref-input.wasm`. Within the current bounded model,
+    `ref.as_non_null` accepts reference operands and produces the non-null form of that reference
+    type.
+  - Null-branch support now also includes `br_on_null` and `br_on_non_null` decoding plus
+    validation grounding via new `br-on-null-subset` and `br-on-non-null-subset` upstream files.
+    Raw fixtures now include valid `valid/br-on-null-fallthrough-narrow.wasm` and
+    `valid/br-on-non-null-branch-result.wasm`, plus invalid
+    `invalid-validate/br-on-null-non-ref-input.wasm` and
+    `invalid-validate/br-on-non-null-non-ref-target.wasm`. `br_on_null` now narrows the
+    fallthrough reference to non-null, while `br_on_non_null` requires the target label to end in a
+    reference type and routes the tested value through that branch target.
+  - Raw invalid body-fixture metadata is now tighter for decode-preserving validation failures:
+    the current wrapped `ValidationErrorKind::Decode` cases for truncated bulk-memory, truncated
+    memarg, and unknown SIMD opcode bodies now pin exact `offset=` alongside `context=` and
+    `decode_kind=`.
+  - Raw bulk-memory invalid fixtures now also pin exact `offset=` for representative
+    `memory.init`, `memory.copy`, `memory.fill`, and `data.drop` validation failures.
+  - Raw initialization/const-expression invalid fixtures now also pin exact `offset=` for
+    representative global-init, active-data, element-expression, active-element-table, and
+    `table.init` validation failures.
+  - Raw control invalid fixtures now also pin exact `offset=` for representative
+    `call_indirect` table-type validation failures.
+  - Raw table/reference invalid fixtures now also pin exact `offset=` for representative unknown
+    exported-table index failures.
+  - Raw malformed/decode fixtures now pin both exact `offset=` and direct decode `context=` across
+    the full `invalid-decode/` corpus, and `spec.rs` now asserts that all raw invalid fixtures
+    carry complete metadata (`kind`/`offset`, plus `context` for direct decode failures and nested
+    `decode_kind` for decode-preserving validation failures).
+
+  - Current decode-vs-validate boundary in the raw fixture harness is:
+    - `invalid-decode`: `Module::decode(...)` itself must fail.
+    - `invalid-validate`: module decoding succeeds, then validation fails.
+    - malformed function-body instruction streams that are only decoded during validation belong in
+      `invalid-validate` and should assert `kind=Decode` plus nested `context=` / `decode_kind=`
+      metadata where useful.
+
+#### Revised Phase 1 completion definition
+Phase 1 is complete when Baedeker provides a robust, diagnostics-oriented validation front-end
+that is strong enough to serve as the semantic foundation for register-based lowering and
+execution.
+
+That is intentionally **not** the same as saying every adjacent WebAssembly 3.0 type-system or
+proposal-era surface is fully implemented before Phase 2 begins. Full WebAssembly 3.0 remains the
+program goal, but it is the destination, not the entrance exam for starting the runtime.
+
+More concretely, Phase 1 is done when all of the following are true:
+1. **Validation coverage**
+   - The decoder and validator cover the runtime-facing surface Baedeker is ready to build on, and
+     any unsupported or deferred areas are rejected explicitly and documented clearly.
+2. **Semantic reliability**
+   - Control-flow typing, operand stack typing, label/result propagation, const-expression rules,
+     and index-space resolution are stable enough that later lowering does not need to rediscover
+     spec semantics on its own.
+3. **Diagnostics quality**
+   - Validation and malformed-input failures preserve precise byte offsets where feasible and report
+     stable structured error kinds suitable for regression testing.
+4. **Spec-test grounding**
+   - Baedeker is exercised against both its internal fixture corpus and official spec-suite style
+     invalid/malformed validation inputs, with compliance status tracked explicitly.
+5. **Architectural clarity**
+   - The validator remains a spec-facing proof/type layer, clearly separated from the future
+     register-based IR and interpreter core.
+
+What Phase 1 does **not** require before Phase 2 starts:
+- full recursive type-group decoding/validation
+- full non-function GC type support (`sub`, `struct`, `array`)
+- `type-canon.wast` support
+- broader recursive canonicalization / GC heap-lattice completeness
+
+### Reading path to retain from Phase 1
+- [Types](https://webassembly.github.io/spec/core/syntax/types.html)
+- [Validation](https://webassembly.github.io/spec/core/valid/index.html)
+- [Appendix: Validation Algorithm](https://webassembly.github.io/spec/core/appendix/algorithm.html)
+- Official tests worth rereading with the current boundary in mind:
+  - `ref.wast`
+  - `type-equivalence.wast`
+  - `type-rec.wast`
+  - `type-canon.wast`
+  - `labels.wast`
+  - `switch.wast`
+
+#### Checkpoint 8 — Phase 1 closure checklist
+
+**Checklist verdict:** Phase 1 is now closed for the current milestone. This does **not** claim
+full recursive/GC-era WebAssembly 3.0 support; it records a stable, verified semantic-validation
+baseline and explicitly defers the remaining recursive / non-function type-system work rather than
+leaving it as silent Phase 1 debt.
+
+### Checklist status
+1. **Active official-lane semantic blockers removed** — **Done**
+   - Closed the adjacent official `labels` / `switch` blockers (`redefinition`, `arg`) without
+     weakening the zero-skip lane.
+2. **Stable zero-skip official validation baseline established** — **Done**
+   - Active upstream grounding remains **87** files / **622** directives with no active-file skips.
+   - Additional micro-densification is no longer required for Phase 1 closure; if more official
+     slices are added later, they should be real cohorts again rather than checklist tail work.
+3. **Raw malformed/validation regression floor established** — **Done**
+   - Exact-offset metadata, decode-vs-validate separation, decode-preserving validation assertions,
+     and Node/V8 parity exceptions for bounded-model/raw-boundary cases are all in place.
+4. **Broader WebAssembly 3.0 audit/classification completed for the remaining adjacent
+   recursive/type surfaces** — **Done**
+   - **Active now:** supportable slices from `ref.wast` plus the forward-reference invalid from
+     `type-equivalence.wast`.
+   - **Raw-boundary-only in Phase 1:** `gc-rec-type-group`, `gc-sub-type-definition`,
+     `gc-struct-type-definition`, and `gc-array-type-definition`.
+   - **Deferred beyond Phase 1:** `type-canon.wast`, and the explicit-`rec` / non-function portions
+     of `type-rec.wast`, along with the broader recursive canonicalization and non-function GC heap
+     lattice they imply.
+5. **Explicit Phase 1 support boundary written down** — **Done**
+   - Phase 1 supports a flat functype type section, typed references over `func` / `extern` /
+     concrete function types in non-recursive groups, self/earlier concrete type references, and
+     subtype-aware matching/canonicalization across structurally equivalent function signatures.
+   - Phase 1 does **not** yet implement explicit recursive type groups, `sub` / `struct` / `array`
+     type definitions, or the broader GC-era non-function heap lattice.
+6. **Final verification snapshot taken** — **Done**
+   - `cargo fmt -- --check`
+   - `cargo test -p baedeker-core --test spec`
+   - `cargo test -p baedeker-core --test spec_wast`
+   - `cargo test -p baedeker-core --test spec_node`
+   - `cargo test -p baedeker-core`
+   - `cargo clippy -p baedeker-core --all-targets -- -D warnings`
+7. **Early-Phase-2 follow-ons recorded explicitly** — **Deferred (not a Phase 1 blocker)**
+   - Full recursive type-group decoding/validation
+   - Non-function GC type definitions (`sub`, `struct`, `array`)
+   - Recursive canonicalization / richer GC-era heap-type relations
+
+### Phase 1 boundary snapshot
+- **Supported / grounded now**
+  - Core validation front-end with precise diagnostics and exact-offset regression coverage
+  - Zero-skip curated official subset lane
+  - Typed function references within the current bounded model
+  - Flat functype definitions with self/earlier concrete-type references only
+  - Typed nullability/control/table/global/element flows already grounded in the active corpus
+- **Represented as raw boundary assertions, not active official support**
+  - GC-era type-section forms that Baedeker does not yet decode (`rec`, `sub`, `struct`, `array`)
+  - Raw malformed/decode boundaries where Node/V8 accepts a broader space than Baedeker currently
+    models
+- **Explicitly deferred beyond Phase 1**
+  - `type-canon.wast`
+  - Explicit recursive-group and non-function-type portions of `type-rec.wast`
+  - Broader recursive/GC type-system work needed for those files
+
+### Final verification snapshot (Phase 1 closure, June 2026)
+- `baedeker-core` unit test count: **530 passing** at closure (now 550 with Phase 2 runtime)
+- Spec-harness integration tests: **8 passing** (`spec`: 3, `spec_wast`: 2, `spec_node`: 3)
+- Corpus: 87 upstream subset files, 236 valid fixtures, 173 invalid-validate fixtures, 38 invalid-decode fixtures
+- `spec_node` continues to cross-check the active supported surface.
+
+**Tracking moved to GitHub Issues as of June 2026.** See the [Tracking](#tracking) section at
+the top of this document for current issue links. Status below reflects the design intent of
+each phase; linked issues carry live progress.
+
+### Phase 1 note
+The validator stack remains the spec-facing abstract operand/control stack used for proof of
+well-typedness. This is intentionally distinct from the future execution architecture, which still
+flows through decode → validate → lower to register IR → execute.
+
+Baedeker’s long-term target remains broader WebAssembly 3.0 validation, but the remaining
+recursive/GC-era type-system work is now an explicit follow-on rather than a reason to keep Phase 1
+open-ended while the project needs to move on.
+
+### Spec sections to internalize
+- [Types](https://webassembly.github.io/spec/core/syntax/types.html)
+- [Validation](https://webassembly.github.io/spec/core/valid/index.html) — especially instruction validation.
+- [Appendix: Validation Algorithm](https://webassembly.github.io/spec/core/appendix/algorithm.html)
+
+---
+
+## Phase 2 — Register-Based Lowering and Runtime Bring-Up
+
+**Focus:** This is now the critical path. Phase 2 turns the validated semantic front-end into an
+actual runtime without waiting for every remaining WebAssembly 3.0 completeness item to land
+first.
+
+### Phase 2 charter
+- Lower validated stack-machine code into a register-based IR.
+- Execute that IR with a small, auditable runtime core.
+- Keep validation as the gatekeeper for unsupported modules and unsupported type-system surfaces.
+- Avoid baking the current flat-functype limitation too deeply into runtime internals.
+- Build GPU-offload awareness into the engine architecture from the start, so Vulkan-based
+  compute dispatch (via Borsalino, across Metal/Nvidia/AMD hardware) has a natural home in the
+  runtime without a later retrofit.
+  (See [`docs/borsalino-integration.md`](borsalino-integration.md) for the full design.)
+
+### Phase 2 design guardrails
+- **No more micro-expansion by default.** Validation-only work should now happen when it fixes a
+  soundness issue or unblocks runtime architecture, not just because another nearby spec case
+  exists.
+- **Keep type handles abstract.** Lowering/runtime data structures should assume richer recursive
+  and GC-era relations may exist later.
+- **Keep execution support explicit.** A module may validate before every feature it uses is
+  executable; when that happens, lowering/runtime should fail clearly and intentionally.
+- **Use the validator's shape, not a new ad hoc semantics.** Lowering should reuse the control-flow
+  and stack-shape knowledge Phase 1 already established.
+- **Keep GPU dispatch extensible.** The engine state should carry an optional GPU backend slot
+  early, and the register IR should preserve basic-block structure so arithmetic-only blocks can
+  be identified for GPU offload without a separate decompilation pass.
+
+### Checkpoint 1 — IR shape and lowering skeleton
+**Goal:** define the execution-side vocabulary.
+
+- Introduce `RegModule`, `RegFunc`, `RegBlock`, `RegInstr`, and whatever typed value / virtual
+  register representation best fits Baedeker.
+- Decide how block parameters, block results, branch transfers, locals, and constants appear in IR.
+- Lower a simple validated function into inspectable IR without executing it yet.
+- Keep the IR spec-shaped enough that validation concepts still map onto it cleanly.
+
+**Milestone:** lower the exported `add` example into register IR and snapshot/assert its shape in
+unit tests.
+
+**Reading path**
+- [Execution](https://webassembly.github.io/spec/core/exec/index.html)
+- [Instructions](https://webassembly.github.io/spec/core/syntax/instructions.html)
+- Re-read [Appendix: Validation Algorithm](https://webassembly.github.io/spec/core/appendix/algorithm.html)
+  with the question: "what type/control facts must lowering preserve as value-flow facts?"
+
+### Checkpoint 2 — Function frames and numeric execution core
+**Goal:** execute straight-line code correctly.
+
+- Implement runtime values, locals, call frames, and exported-function entry.
+- Execute constants, local access, basic numeric arithmetic, comparisons, and conversions.
+- Build a small runtime test harness that exercises the execution core independently from validation.
+
+**Milestone:** execute exported arithmetic functions such as `add` through the embedding API.
+
+**Reading path**
+- [Execution](https://webassembly.github.io/spec/core/exec/index.html)
+- [Numerics](https://webassembly.github.io/spec/core/exec/numerics.html)
+- [Runtime Structure](https://webassembly.github.io/spec/core/exec/runtime.html)
+
+### Checkpoint 3 — Structured control flow in the runtime
+**Goal:** make validated structured control actually run.
+
+- Implement `block`, `loop`, `if`, `else`, `br`, `br_if`, `br_table`, `return`, `unreachable`, and
+  `select` in the lowered/runtime model.
+- Preserve the branch-result and block-result discipline already proven by the validator.
+- **Extract basic-block structure during lowering.** The register IR should identify block
+  boundaries, entry points, and exit edges so that arithmetic-only basic blocks can later be
+  compiled to WGSL for GPU offload without a separate decompilation pass.
+- Add runtime-focused tests for branch transfer, loop back-edges, and result threading.
+
+**Milestone:** pass the core control/numeric execution slices needed for nontrivial functions,
+with basic-block boundaries visible in the lowered IR.
+
+**Reading path**
+- [Execution Instructions](https://webassembly.github.io/spec/core/exec/instructions.html)
+- [Control Instructions](https://webassembly.github.io/spec/core/syntax/instructions.html#control-instructions)
+- Revisit `labels.wast`, `switch.wast`, `br.wast`, `br_if.wast`, and `br_table.wast`
+
+### Checkpoint 4 — Widen execution and prepare GPU offload
+**Goal:** push execution breadth into calls, SIMD, and linear memory — the prerequisites for both
+real modules and Borsalino GPU acceleration.
+
+- **SIMD execution.** Implement `v128` lowering and runtime execution for the core SIMD
+  instruction set. This unblocks Borsalino integration Level 1 (bulk SIMD offload).
+- **Direct and indirect calls.** Implement function call frames so multi-function modules execute.
+- **Linear memory, globals, tables.** The state machinery needed for real workloads.
+- **GPU backend slot.** Add an optional `GpuBackend` to the engine state with a trait-based
+  interface, so a Vulkan-based backend can be plugged in on any platform without changing the
+  core engine.
+- Keep execution support staged: runtime parity should broaden in deliberate cohorts.
+- Use Node/V8 / external-runtime parity where useful once runtime semantics are comparable.
+
+**Milestone:** run modules that use locals, control flow, SIMD, memory access, globals, and calls.
+GPU dispatch can be exercised on bulk SIMD operations.
+
+**Reading path**
+- [Function Instances](https://webassembly.github.io/spec/core/exec/runtime.html#function-instances)
+- [Table Instances](https://webassembly.github.io/spec/core/exec/runtime.html#table-instances)
+- [Memory Instances](https://webassembly.github.io/spec/core/exec/runtime.html#memory-instances)
+- [Global Instances](https://webassembly.github.io/spec/core/exec/runtime.html#global-instances)
+- [`docs/borsalino-integration.md`](borsalino-integration.md)
+
+### Why Phase 2 starts now
+Phase 1 is finished as a semantic foundation. Remaining recursive/GC-era completeness work still
+matters to the overall WebAssembly 3.0 goal, but it now belongs in a deferred backlog unless it
+becomes a concrete runtime blocker.
+
+### Where your toolkit applies
+This is where Orlando's transducer philosophy becomes relevant. The stack-to-register lowering
+pass is a transformation of transformations: you're rewriting a sequence of stack effects into
+a sequence of register transfers. If you can express this as a composable transducer pipeline,
+you get a clean architecture for layering optimization passes later.
+
+This is also where Borsalino enters the picture. The register IR's basic-block structure feeds
+directly into WGSL compilation for Vulkan GPU dispatch (portable across Metal/Nvidia/AMD
+hardware). The lowering pass produces both a CPU execution plan and — for arithmetic-only
+blocks — a candidate GPU shader. See [`docs/borsalino-integration.md`](borsalino-integration.md)
+for the integration design.
+
+---
+
+## Deferred WebAssembly 3.0 Completeness Backlog
+
+These items remain strategically important because full WebAssembly 3.0 support is still the
+long-term target. They are no longer the gate in front of Phase 2.
+
+1. **Recursive type groups and canonicalization**
+   - Matters for: full support of recursive function-type surfaces and later richer heap typing.
+   - Deferred because: the current validator already rejects unsupported forms explicitly, and the
+     runtime can begin on the validated active surface.
+   - Reading path: `type-equivalence.wast`, `type-rec.wast`, `type-canon.wast`, plus the spec's
+     type and validation chapters.
+2. **Non-function GC type definitions (`sub`, `struct`, `array`)**
+   - Matters for: the broader GC proposal and heap-allocated non-linear-memory objects.
+   - Deferred because: Baedeker currently treats these as explicit malformed/decode boundaries,
+     which is good enough for Phase 2 bring-up.
+   - Reading path: `ref.wast`, `type-rec.wast`, and the spec/proposal material around reference and
+     heap types.
+3. **Richer heap-type relations beyond the current bounded model**
+   - Matters for: eventually supporting a fuller recursive/GC-era subtype lattice.
+   - Deferred because: current typed-function-reference work is enough to start lowering/runtime
+     design without freezing the final lattice now.
+   - Reading path: typed reference cases already active in the corpus, plus the type chapters with
+     an eye toward subtyping and canonicalization.
+4. **Additional validation-only spec expansion that does not change runtime architecture**
+   - Matters for: eventual completeness and confidence.
+   - Deferred because: Phase 2 should not stall on another long tail of validation micro-edits.
+   - Reading path: revisit the existing curated upstream subsets in thematic batches rather than one
+     isolated case at a time.
+
+---
+
+## Phase 3 — Memory, Tables, Globals
+
+**Focus:** The mutable state model — linear memory, tables, global variables.
+
+- Implement linear memory: allocation, bounds checking, grow semantics. Pay close attention
+  to the 32-bit address space and page granularity (64KiB). Memory access must be correct
+  for unaligned loads/stores and must trap on out-of-bounds — no UB.
+- Implement load/store instructions for all width and signedness combinations (i32.load8_s,
+  i64.load32_u, etc.), including the alignment hints and their actual semantics (they're
+  hints, not requirements, but misalignment has performance implications on ARM).
+- Implement tables (funcref and externref), `table.get`, `table.set`, `table.grow`, `table.fill`,
+  `table.copy`, `table.init`, `elem.drop`.
+- Implement globals (mutable and immutable, imported and defined).
+- Implement data segments and element segments, including passive segments and the
+  `memory.init` / `data.drop` bulk memory operations.
+- **Milestone:** Can run modules that allocate memory, perform pointer arithmetic, and use
+  indirect function calls through tables. This is where "real" programs start working.
+
+### Spec sections to internalize
+- [Memory Instances](https://webassembly.github.io/spec/core/exec/runtime.html#memory-instances)
+- [Table Instances](https://webassembly.github.io/spec/core/exec/runtime.html#table-instances)
+- Bulk memory operations proposal (now merged into 2.0)
+
+---
+
+## Phase 4 — Module Instantiation & Linking
+
+**Focus:** The full module lifecycle — imports, exports, instantiation, multi-module linking.
+
+- Implement the instantiation algorithm: resolve imports, allocate memories/tables/globals,
+  evaluate global initializer expressions, run the start function.
+- Build the host function interface: the Rust API for registering callable functions that
+  WASM modules can import. This is the primary embedding API and its ergonomics matter
+  enormously — it's what you'll use to bridge Baedeker into host applications (Swift on Apple
+  platforms, plain C everywhere) and to expose system capabilities (GPU compute, file I/O, etc.).
+- Implement multi-module linking: one module importing another module's exports.
+- Implement the `call_indirect` + table machinery that makes dynamic dispatch and
+  function pointers work.
+- **Milestone:** Can instantiate a module that imports `env.print_i32` from the host,
+  calls it, and produces output. Can link two modules together. This is where Baedeker
+  becomes a usable embedding runtime.
+
+### Design consideration
+The host function API is where you decide Baedeker's personality as an embeddable runtime.
+Consider a trait-based approach where host functions are statically typed against WASM
+signatures, avoiding the runtime type-checking overhead that plagues some runtimes.
+
+---
+
+## Phase 5 — Platform Integration Layers
+
+**Focus:** Making Baedeker a first-class citizen on every target platform.
+
+- Build `baedeker-ffi`: a crate that compiles to a static library with a C-compatible FFI,
+  usable from any host language on any OS Baedeker targets.
+- Produce idiomatic wrappers over the FFI per ecosystem: a Swift package for Apple platforms
+  (async/await for long-running WASM computations, value types for WASM values, closures for
+  host functions), with Kotlin/Android and plain-C headers as follow-ons.
+- Implement an AOT pipeline: compile WASM to Baedeker's internal IR at build time,
+  serialize the IR, bundle it into the app, deserialize and execute on device. This sidesteps
+  the iOS JIT prohibition and improves startup time everywhere else too.
+- Implement a GPU compute host module: a standard set of importable functions that let WASM
+  modules dispatch Vulkan compute kernels (via Borsalino, across Metal/Nvidia/AMD hardware),
+  pass buffers, and read results. Purpose-built for running Amari/Cliffy workloads on any
+  GPU-capable device, from iPad to desktop.
+- **Milestone:** An iOS Swift app that loads a WASM module compiled from Amari and performs a
+  geometric algebra computation — and the same module running unmodified in a native
+  desktop CLI. The demo that proves the thesis on two platforms at once.
+
+---
+
+## Phase 6 — Post-MVP Proposals
+
+**Focus:** The evolving spec — GC, threads, tail calls, exception handling, component model.
+
+These are ordered by relevance to your use cases:
+
+1. **Tail calls** — relatively simple, high value for functional patterns in Cliffy.
+2. **Exception handling** — needed for robust interop with code compiled from languages
+   that use exceptions.
+3. **Threads and atomics** — shared memory, `memory.atomic.*` instructions, `wait`/`notify`.
+   Critical for parallel geometric algebra on multi-core iPad chips. Careful: this interacts
+   with the memory model in subtle ways.
+4. **GC proposal** — struct and array types managed by the runtime's GC. This is a massive
+   addition that fundamentally changes what WASM can express efficiently. It's also where the
+   "interaction between linear memory and GC'd references" lives — the hardest conceptual
+   territory in modern WASM.
+5. **Component Model** — the higher-level module linking and interface type system. This is
+   where Flynn contracts could map onto WASM's own interface validation. A component that
+   declares "this function takes a blade of grade 2" using component model interface types,
+   validated at link time, is the synthesis of Baedeker and Amari's contract system.
+
+---
+
+## Ongoing: Spec Test Suite Compliance
+
+The official [WebAssembly spec test suite](https://github.com/AnisBoss/WebAssembly-spec-testsuite)
+is the ground truth. Every phase should be accompanied by running the relevant subset of spec
+tests. Track compliance percentage as a first-class project metric, but track it by active surface:
+validation, lowering, runtime, and deferred completeness work should not be collapsed into one
+misleading number. The near-term goal is strong parity on each active implementation slice as it
+comes online; the long-term goal remains the full intended WebAssembly 3.0 surface.
+
+## Ongoing: Differential Testing
+
+Once the interpreter is functional, set up differential testing against Wasmtime or Wasmer:
+feed the same modules to both runtimes and compare outputs. This catches spec misunderstandings
+that the official test suite might not cover.
+
+## Ongoing: Robustness Testing
+
+As parser and validator coverage grows, add fuzzing and malformed-input testing specifically to
+harden decoding, validation, and error reporting against truncated or invalid WebAssembly modules.
+This work is strictly for standards compliance, runtime robustness, and implementation quality.
+
+## Ongoing: Creusot Contracts
+
+As each layer stabilizes, add Creusot contracts to the core invariants:
+- LEB128 decode/encode roundtrip correctness
+- Validation algorithm soundness (well-typed programs don't get stuck)
+- Memory bounds checking completeness
+- Numeric operation IEEE 754 conformance
+
+This is a long-term investment that compounds: a verified WASM runtime core is
+a unique artifact in the ecosystem.

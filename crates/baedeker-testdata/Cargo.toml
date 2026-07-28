@@ -1,0 +1,8 @@
+[package]
+name = "baedeker-testdata"
+description = "WASM test fixtures compiled from Rust sources at build time"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
