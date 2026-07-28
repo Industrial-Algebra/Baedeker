@@ -66,10 +66,11 @@ baedeker/
 - Internal comments explain *why*, not *what*.
 
 ## Git Workflow (Gitflow)
-- **Branches**: `main` (releases), `develop` (integration), `feature/*`, `chore/*`, `fix/*`, `release/*`
-- Feature work: branch from `develop` → PR to `develop`
-- Releases: `develop` → release PR → `main`
-- Never push directly to `main` or `develop`
+See [AGENTS.md](AGENTS.md) — it is the authoritative branch-and-release discipline
+(branch model, the four hard rules, release flow, backmerge). Summary: feature branches
+from `develop` → PR to `develop`; releases via `release/v*` → `main` → tag → backmerge
+`main → develop` with a merge commit. Never push directly to `main` or `develop`, and
+never enable delete-branch-on-merge on a gitflow repo.
 
 ## Pre-commit Checks
 1. `cargo fmt -- --check`
