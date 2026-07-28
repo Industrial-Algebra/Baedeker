@@ -1,7 +1,8 @@
 # Baedeker
 
-A WebAssembly runtime implemented in Rust, targeting every platform Rust compiles to:
-Linux, macOS, iOS, Android, and beyond.
+A fully-general WebAssembly runtime implemented in Rust, targeting every platform Rust
+compiles to: Linux, macOS, iOS, Android, and beyond — with full WebAssembly 3.0
+compliance as the goal.
 
 Baedeker decodes, validates, lowers, and executes WebAssembly modules. Validated programs are
 lowered into a register-based internal IR and executed by an interpreter designed for
@@ -15,10 +16,13 @@ cautious, methodical, but ultimately willing to venture into the unknown.
 
 ## Status
 
-**WebAssembly 2.0 core: complete and green.** The interpreter passes the official WebAssembly
-spec test suite — **85 files, 19,204 assertions, 993 modules, 0 failures**. Every remaining
-deferred file requires a post-2.0 proposal (tail calls, GC, exception handling) or is
-genuinely host-specific.
+**WebAssembly 2.0 core: complete and green — the first milestone on the road to 3.0.**
+The interpreter passes the official WebAssembly spec test suite: **85 files, 19,204
+assertions, 993 modules, 0 failures**. Every remaining deferred file exercises a post-2.0
+proposal — tail calls, GC, exception handling, memory64, and friends — which is precisely
+the 3.0 surface. Baedeker is meant to be a fully-general runtime: 3.0 spec support is the
+destination, both to widen what the runtime can execute and to help push WebAssembly
+adoption in general.
 
 - **Full 2.0 feature set** — structured control flow with multi-value, direct/indirect calls,
   bulk memory, tables, globals, SIMD v128 core, and the reference-types + function-references
@@ -41,15 +45,16 @@ The [Industrial Algebra](https://github.com/Industrial-Algebra) ecosystem includ
 crates for geometric algebra, information geometry, and high-performance functional programming
 (Amari, Cliffy, Minuet, Orlando). Running these across platforms today means per-platform
 rewrites (Swift on Apple, Kotlin on Android) or accepting the limitations of existing WASM
-runtimes. Baedeker exists to close that gap: a purpose-built WASM 2.0 engine written in Rust
+runtimes. Baedeker exists to close that gap: a purpose-built WASM engine written in Rust
 that runs anywhere Rust does, embeds into host applications via a C-compatible FFI (including
 idiomatic Swift on Apple platforms), and offers GPU acceleration through Vulkan-based compute
 that runs across Metal, Nvidia, and AMD hardware.
 
 ## Goals
 
-- **Spec compliance** — full WebAssembly 2.0 core, validated against the official spec test
-  suite. *(Done — see Status.)*
+- **Spec compliance** — full WebAssembly 3.0 core, validated against the official spec test
+  suite. *(2.0 done — see Status; 3.0 proposals tracked as
+  [deferred work](https://github.com/Industrial-Algebra/Baedeker/issues/15).)*
 - **Cross-platform embedding** — `no_std` + `alloc` core with no OS dependencies, designed for
   static linking into host apps via C FFI on any platform (Swift interop on Apple platforms).
 - **Interpreter-first, AOT later** — a register-based interpreter with an explicit
