@@ -106,6 +106,7 @@ fn validation_kind_name(kind: &ValidationErrorKind) -> &'static str {
         ValidationErrorKind::DuplicateExportName { .. } => "DuplicateExportName",
         ValidationErrorKind::MemorySizeOutOfRange => "MemorySizeOutOfRange",
         ValidationErrorKind::MemoryMinExceedsMax => "MemoryMinExceedsMax",
+        ValidationErrorKind::TableTypeMismatch => "TableTypeMismatch",
     }
 }
 

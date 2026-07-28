@@ -161,6 +161,8 @@ pub enum ValidationErrorKind {
     },
     MemorySizeOutOfRange,
     MemoryMinExceedsMax,
+    /// A non-nullable-element table without an initializer.
+    TableTypeMismatch,
     DuplicateExportName {
         name: alloc::string::String,
     },
@@ -418,6 +420,7 @@ impl fmt::Display for ValidationErrorKind {
             ValidationErrorKind::MemoryMinExceedsMax => {
                 write!(f, "size minimum must not be greater than maximum")
             }
+            ValidationErrorKind::TableTypeMismatch => write!(f, "type mismatch"),
             ValidationErrorKind::DuplicateExportName { name } => {
                 write!(f, "duplicate export name {:?}", name)
             }

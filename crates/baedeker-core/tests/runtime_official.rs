@@ -44,7 +44,6 @@ const DEFERRED_FILES: &[(&str, &str)] = &[
     ("type-rec.wast", "recursive types not implemented"),
     ("type.wast", "recursive/GC types not implemented"),
     ("exceptions", "exception handling not implemented"),
-    ("table.wast", "huge tables need lazy storage"),
     // Guard-page semantics are host/OS-specific.
     (
         "skip-stack-guard-page.wast",
@@ -257,7 +256,7 @@ fn instantiate(
 }
 
 type SharedMemory = (MemType, Rc<RefCell<Vec<u8>>>);
-type SharedTable = (TableType, Rc<RefCell<Vec<Value>>>);
+type SharedTable = (TableType, Rc<RefCell<baedeker_core::runtime::Table>>);
 
 fn linked_memory(registry: &Registry, module: &str, name: &str) -> Result<SharedMemory, String> {
     let source = registry
