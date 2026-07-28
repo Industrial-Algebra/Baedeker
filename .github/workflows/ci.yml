@@ -63,3 +63,6 @@ jobs:
 
       - name: Fuzz smith_module
         run: cargo +nightly fuzz run smith_module -- -runs=5000
+
+      - name: Fuzz trap_edges
+        run: cargo +nightly fuzz run trap_edges -- -runs=50000

@@ -15,4 +15,10 @@ done
 mkdir -p corpus/smith_module
 find ../crates/baedeker-testdata -name '*.wasm' -exec cp {} corpus/smith_module/ \;
 
-echo "Seeded: $(find corpus -type f | wc -l) files across 3 targets"
+# trap_edges wants short structured inputs (op selector + operands).
+mkdir -p corpus/trap_edges
+for f in ../crates/baedeker-testdata/spec/valid/*.wasm; do
+    head -c 17 "$f" > "corpus/trap_edges/$(basename "$f").head"
+done
+
+echo "Seeded: $(find corpus -type f | wc -l) files across 4 targets"

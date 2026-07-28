@@ -4393,6 +4393,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fuel_exhaustion_stops_runaway_and_bounded_finishes() {
+        // An infinite loop burns any budget.
+        let reg_module = lower_wat("(module (func (export \"spin\") (loop br 0)))");
+        let store = crate::runtime::Store::instantiate(&reg_module).unwrap();
+        store.set_fuel(Some(1_000));
+        let error = crate::runtime::execute_export(&reg_module, &store, "spin", &[]).unwrap_err();
+        assert_eq!(error.kind, crate::runtime::RuntimeErrorKind::FuelExhausted);
+        assert_eq!(store.fuel(), Some(0));
+
+        // A bounded loop fits inside a sufficient budget.
+        let reg_module = lower_wat(
+            "(module (func (export \"sum\") (result i32) (local i32 i32) \
+             (block (loop \
+             local.get 0 i32.const 10 i32.ge_s br_if 1 \
+             local.get 1 local.get 0 i32.add local.set 1 \
+             local.get 0 i32.const 1 i32.add local.set 0 \
+             br 0)) \
+             local.get 1))",
+        );
+        let store = crate::runtime::Store::instantiate(&reg_module).unwrap();
+        store.set_fuel(Some(10_000));
+        let result = crate::runtime::execute_export(&reg_module, &store, "sum", &[]).unwrap();
+        assert_eq!(result, vec![crate::runtime::Value::I32(45)]);
+        assert!(store.fuel().unwrap() < 10_000);
+
+        // Unlimited by default: no budget, no exhaustion.
+        let reg_module = lower_wat("(module (func (export \"one\") (result i32) i32.const 1))");
+        let store = crate::runtime::Store::instantiate(&reg_module).unwrap();
+        assert_eq!(store.fuel(), None);
+        let result = crate::runtime::execute_export(&reg_module, &store, "one", &[]).unwrap();
+        assert_eq!(result, vec![crate::runtime::Value::I32(1)]);
+    }
+
     /// Execute an exported function with full module context (required for
     /// `call` instructions).
     fn run_wat_export(
