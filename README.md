@@ -3,13 +3,37 @@
 A WebAssembly runtime implemented in Rust, targeting every platform Rust compiles to:
 Linux, macOS, iOS, Android, and beyond.
 
-Baedeker focuses on correct decoding, validation, lowering, and execution of WebAssembly modules,
-with an architecture that begins from spec-aligned validation and later lowers validated programs
-into a register-based internal IR for execution. The project is intended for language runtime
-research, portability, and safe systems engineering.
+Baedeker decodes, validates, lowers, and executes WebAssembly modules. Validated programs are
+lowered into a register-based internal IR and executed by an interpreter designed for
+embedding: `no_std` + `alloc` core, no OS dependencies, explicit resource limits, and
+diagnostics that carry byte offsets into the original binary.
 
 Named after the Hindmost Baedeker from Larry Niven's *Ringworld* / *Fleet of Worlds* series —
 cautious, methodical, but ultimately willing to venture into the unknown.
+
+[![CI](https://github.com/Industrial-Algebra/Baedeker/actions/workflows/ci.yml/badge.svg)](https://github.com/Industrial-Algebra/Baedeker/actions/workflows/ci.yml)
+
+## Status
+
+**WebAssembly 2.0 core: complete and green.** The interpreter passes the official WebAssembly
+spec test suite — **85 files, 19,204 assertions, 993 modules, 0 failures**. Every remaining
+deferred file requires a post-2.0 proposal (tail calls, GC, exception handling) or is
+genuinely host-specific.
+
+- **Full 2.0 feature set** — structured control flow with multi-value, direct/indirect calls,
+  bulk memory, tables, globals, SIMD v128 core, and the reference-types + function-references
+  proposals (`call_ref`, `br_on_null`, `br_on_non_null`, `ref.as_non_null`, typed references).
+- **Multi-module linking** — shared memories, globals, tables, and functions across
+  instantiations, with host functions registered against the store.
+- **Embeddable by design** — per-instance fuel budgets for untrusted code, sparse table
+  storage (a `u32::MAX`-entry table instantiates), fallible allocation on memory growth,
+  and reentrant `&Store` execution.
+- **Differentially tested** — wasm-smith generated modules executed against Wasmtime
+  (zero divergences across thousands of executions), plus cargo-fuzz targets for decode,
+  validation/lowering, and trap-edge semantics.
+
+**Next: Phase 5 — platform integration.** C FFI, Swift package, AOT pipeline, and the GPU
+host module, ahead of a 0.1.0 release. See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Why
 
@@ -22,16 +46,10 @@ that runs anywhere Rust does, embeds into host applications via a C-compatible F
 idiomatic Swift on Apple platforms), and offers GPU acceleration through Vulkan-based compute
 that runs across Metal, Nvidia, and AMD hardware.
 
-## Non-goals
-
-- Baedeker is not a security exploitation framework.
-- It is not intended for offensive security workflows.
-- Its binary parsing, validation, malformed-input handling, and future robustness testing exist
-  to improve correctness, spec compliance, and runtime reliability.
-
 ## Goals
 
-- **Spec compliance** — full WebAssembly 2.0 core, validated against the official spec test suite.
+- **Spec compliance** — full WebAssembly 2.0 core, validated against the official spec test
+  suite. *(Done — see Status.)*
 - **Cross-platform embedding** — `no_std` + `alloc` core with no OS dependencies, designed for
   static linking into host apps via C FFI on any platform (Swift interop on Apple platforms).
 - **Interpreter-first, AOT later** — a register-based interpreter with an explicit
@@ -42,14 +60,23 @@ that runs across Metal, Nvidia, and AMD hardware.
   commodity hardware (iPad-class mobile GPUs included), demonstrating that the entire IA
   ecosystem can target any platform without leaving Rust.
 
-## Status
+## Non-goals
 
-**Phase 2 — Register-based lowering and runtime bring-up.** The spec-aligned decoder and
-validator are complete (Phase 1); the register-IR interpreter executes straight-line numeric
-code, full structured control flow (including multi-value), direct and indirect calls,
-linear memory, globals, tables, and a SIMD v128 core. An optional GPU backend slot exists
-for Vulkan-based bulk SIMD offload. See [docs/ROADMAP.md](docs/ROADMAP.md) for the full
-phase plan.
+- Baedeker is not a security exploitation framework.
+- It is not intended for offensive security workflows.
+- Its binary parsing, validation, malformed-input handling, and robustness testing exist
+  to improve correctness, spec compliance, and runtime reliability.
+
+## Workspace
+
+```
+crates/
+├── baedeker-core/       # no_std engine — decode, validate, lower, execute
+├── baedeker-cli/        # command-line harness
+├── baedeker-borsalino/  # optional Vulkan GPU offload (via Borsalino)
+└── baedeker-testdata/   # spec fixtures, incl. the vendored official suite
+fuzz/                    # cargo-fuzz targets (standalone nightly workspace)
+```
 
 ## Building
 
@@ -62,6 +89,10 @@ cargo build
 cargo test
 cargo run -p baedeker-cli -- path/to/module.wasm
 ```
+
+The official spec suite runs as part of `cargo test`
+(`crates/baedeker-core/tests/runtime_official.rs`). Fuzzing requires nightly; see
+[fuzz/README.md](fuzz/README.md).
 
 ## License
 
