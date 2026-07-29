@@ -125,6 +125,7 @@ superset with `git diff` per file — don't assume.
 | Backmerge as a squash | Graphs *still* don't join | Backmerge with a **merge commit** |
 | Date changelog on `develop` | Rule 1 violation | Rule 3 — date it on `release/*` |
 | `delete_branch_on_merge` enabled | `develop` deleted by a sync PR | Rule 4 — keep it disabled |
+| Required check context `check` vs job name `Check` | PRs stuck at "Expected — waiting for status" forever | Required contexts are case-sensitive — copy the exact job `name:` (`Check`, `Fuzz smoke`) |
 | PR body via `--body` with backticks | Shell mangles the markdown | `gh pr create --body-file <file>` |
 | Tag on `develop` instead of `main` | Publish doesn't fire / fires on wrong code | Tag the `main` merge commit |
 
