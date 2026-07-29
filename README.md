@@ -77,6 +77,7 @@ that runs across Metal, Nvidia, and AMD hardware.
 ```
 crates/
 ├── baedeker-core/       # no_std engine — decode, validate, lower, execute
+├── baedeker-ffi/        # C ABI (staticlib/cdylib) for host embedding
 ├── baedeker-cli/        # command-line harness
 ├── baedeker-borsalino/  # optional Vulkan GPU offload (via Borsalino)
 └── baedeker-testdata/   # spec fixtures, incl. the vendored official suite
