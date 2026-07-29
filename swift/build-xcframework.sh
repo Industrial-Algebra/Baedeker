@@ -26,7 +26,18 @@ lipo -create "$(lib_for aarch64-apple-darwin)" "$(lib_for x86_64-apple-darwin)" 
 lipo -create "$(lib_for aarch64-apple-ios-sim)" "$(lib_for x86_64-apple-ios)" \
     -output "$WORK_DIR/sim/libbaedeker_ffi.a"
 
-HEADERS="$REPO_ROOT/crates/baedeker-ffi/include"
+# Stage headers with a module map so SPM/Xcode can import the binary
+# target as module CBaedeker (xcodebuild copies the -headers dir verbatim).
+HEADERS="$WORK_DIR/headers"
+mkdir -p "$HEADERS"
+cp "$REPO_ROOT/crates/baedeker-ffi/include/baedeker.h" "$HEADERS/"
+cat > "$HEADERS/module.modulemap" << 'EOF'
+module CBaedeker {
+    header "baedeker.h"
+    export *
+}
+EOF
+
 rm -rf "$OUT_DIR/CBaedeker.xcframework"
 mkdir -p "$OUT_DIR"
 xcodebuild -create-xcframework \
