@@ -228,6 +228,38 @@ fn traps_and_fuel_map_to_distinct_statuses() {
 }
 
 #[test]
+fn aot_artifact_loads_and_executes() {
+    // Compile through the Rust pipeline, serialize, and reload via the FFI
+    // AOT entry point — the build-time/device-time split.
+    let bytes = wasm_bytes();
+    let module = baedeker_core::binary::module::Module::decode(&bytes).unwrap();
+    module.validate().unwrap();
+    let lowered = baedeker_core::lower::lower_module(&module).unwrap();
+    let artifact = baedeker_core::aot::serialize(&lowered);
+
+    let mut handle: *mut BaedekerModule = std::ptr::null_mut();
+    let status =
+        unsafe { baedeker_module_from_aot(artifact.as_ptr(), artifact.len(), &mut handle) };
+    assert_eq!(status, BaedekerStatus::Ok);
+
+    let mut instance: *mut BaedekerInstance = std::ptr::null_mut();
+    let status = unsafe { baedeker_instance_new(handle, &mut instance) };
+    assert_eq!(status, BaedekerStatus::Ok);
+    unsafe { baedeker_module_free(handle) };
+
+    let borrowed = Instance(instance);
+    let (status, sum) = borrowed.call_i32s(c"add", [19, 23]);
+    assert_eq!(status, BaedekerStatus::Ok);
+    assert_eq!(sum, 42);
+
+    // Garbage artifacts are rejected with Decode + a message.
+    let mut garbage: *mut BaedekerModule = std::ptr::null_mut();
+    let status = unsafe { baedeker_module_from_aot(b"junk".as_ptr(), 4, &mut garbage) };
+    assert_eq!(status, BaedekerStatus::Decode);
+    assert!(Instance::last_error().contains("AOT artifact rejected"));
+}
+
+#[test]
 fn null_and_misuse_paths_are_usage_errors() {
     let mut module: *mut BaedekerModule = std::ptr::null_mut();
     let status = unsafe { baedeker_module_compile(std::ptr::null(), 8, &mut module) };

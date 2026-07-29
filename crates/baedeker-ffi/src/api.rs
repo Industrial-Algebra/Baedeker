@@ -130,6 +130,40 @@ pub unsafe extern "C" fn baedeker_module_compile(
     })
 }
 
+/// Load a pre-compiled AOT artifact (see `baedeker_core::aot`) instead of a
+/// WASM binary. Artifacts skip decode/validate/lower at load time; only load
+/// artifacts produced from validated modules by this runtime's serializer.
+///
+/// # Safety
+/// `bytes` must be valid for `len` bytes; `out` must be a valid pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn baedeker_module_from_aot(
+    bytes: *const u8,
+    len: usize,
+    out: *mut *mut BaedekerModule,
+) -> BaedekerStatus {
+    guard(|| {
+        if bytes.is_null() || out.is_null() {
+            set_last_error("null bytes or out pointer");
+            return BaedekerStatus::Usage;
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(bytes, len) };
+        match baedeker_core::aot::deserialize(bytes) {
+            Ok(module) => {
+                let handle = Box::new(ModuleHandle {
+                    module: Arc::new(module),
+                });
+                unsafe { *out = Box::into_raw(handle).cast::<BaedekerModule>() };
+                BaedekerStatus::Ok
+            }
+            Err(e) => {
+                set_last_error(format!("AOT artifact rejected: {e}"));
+                BaedekerStatus::Decode
+            }
+        }
+    })
+}
+
 /// Free a module handle (null is allowed).
 ///
 /// # Safety

@@ -7,6 +7,7 @@ use core::fmt;
 
 /// The byte offset into the WASM binary where an error occurred.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ByteOffset(pub usize);
 
 /// Contextual information about what was being decoded when the error occurred.

@@ -8,9 +8,20 @@ license.workspace = true
 [features]
 default = []
 std = []
+# serde derives on the register IR (used by the `aot` feature and IA tooling).
+serde = ["dep:serde"]
+# AOT artifact envelope: postcard-serialized RegModule with magic/version.
+aot = ["serde", "dep:postcard"]
 
 [dependencies]
 libm = "0.2"
+serde = { version = "1", optional = true, default-features = false, features = [
+    "derive",
+    "alloc",
+] }
+postcard = { version = "1", optional = true, default-features = false, features = [
+    "alloc",
+] }
 
 [dev-dependencies]
 baedeker-testdata = { path = "../baedeker-testdata" }
