@@ -4,6 +4,7 @@ members = [
     "crates/baedeker-borsalino",
     "crates/baedeker-core",
     "crates/baedeker-cli",
+    "crates/baedeker-ffi",
     "crates/baedeker-testdata",
 ]
 

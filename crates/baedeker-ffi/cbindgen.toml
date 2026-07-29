@@ -1,0 +1,13 @@
+language = "C"
+include_guard = "BAEDEKER_H"
+pragma_once = true
+cpp_compat = true
+usize_is_size_t = true
+style = "both"
+documentation_style = "doxy"
+
+[defines]
+"target_os = ios" = "BAEDEKER_TARGET_IOS"
+
+[enum]
+prefix_with_name = true

@@ -29,6 +29,7 @@ baedeker/
 ├── Cargo.toml                    # workspace root
 ├── crates/
 │   ├── baedeker-core/            # no_std engine — decode, validate, execute
+│   ├── baedeker-ffi/             # C ABI for host embedding (Phase 5)
 │   ├── baedeker-cli/             # command-line test harness
 │   └── baedeker-wasm/            # baedeker compiled to WASM (future)
 ├── tests/                        # integration tests

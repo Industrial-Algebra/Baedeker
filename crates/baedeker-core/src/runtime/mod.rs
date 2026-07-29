@@ -109,6 +109,10 @@ pub enum RuntimeErrorKind {
     },
     /// The store's instruction fuel budget ran out (see `Store::set_fuel`).
     FuelExhausted,
+    /// A host function returned a failure (FFI or embedding-layer error).
+    HostError {
+        message: String,
+    },
     ImportedFunctionCallUnsupported {
         func: u32,
     },

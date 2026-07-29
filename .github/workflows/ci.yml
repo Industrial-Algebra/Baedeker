@@ -35,6 +35,11 @@ jobs:
       - name: Tests
         run: cargo test
 
+      - name: FFI header is up to date
+        run: |
+          cargo build -p baedeker-ffi
+          git diff --exit-code crates/baedeker-ffi/include/baedeker.h
+
   fuzz-smoke:
     name: Fuzz smoke
     runs-on: ubuntu-latest
