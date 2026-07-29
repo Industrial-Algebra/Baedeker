@@ -20,10 +20,12 @@ use crate::validate::error::{ValidationError, ValidationErrorKind};
 
 /// A virtual register in lowered Baedeker IR.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Reg(pub u32);
 
 /// A typed value currently on the lowering stack.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RegValue {
     pub reg: Reg,
     pub ty: ValType,
@@ -31,6 +33,7 @@ pub struct RegValue {
 
 /// A validated module lowered into register IR.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RegModule {
     pub funcs: Vec<RegFunc>,
     pub exports: Vec<RegExport>,
@@ -71,6 +74,7 @@ pub struct RegModule {
 
 /// An element segment in lowered register IR.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RegElement {
     pub mode: RegElementMode,
     /// Element values (funcref indices or nulls), in order.
@@ -79,6 +83,7 @@ pub struct RegElement {
 
 /// Instantiation behavior of an element segment.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum RegElementMode {
     /// Written into the table at instantiation.
     Active {
@@ -94,6 +99,7 @@ pub enum RegElementMode {
 
 /// One element value in a segment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum RegElemValue {
     FuncRef(FuncIdx),
     /// A `global.get` of a funcref global, resolved at instantiation.
@@ -103,6 +109,7 @@ pub enum RegElemValue {
 
 /// A defined global in lowered register IR.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RegGlobal {
     pub ty: ValType,
     pub mutable: bool,
@@ -112,6 +119,7 @@ pub struct RegGlobal {
 
 /// A data segment in lowered register IR.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RegDataSegment {
     pub mode: RegDataMode,
     pub bytes: Vec<u8>,
@@ -119,6 +127,7 @@ pub struct RegDataSegment {
 
 /// Instantiation behavior of a data segment.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum RegDataMode {
     /// Written into memory at instantiation, then dropped.
     Active {
@@ -133,6 +142,7 @@ pub enum RegDataMode {
 /// data segment offsets). Supports the const instrs plus the
 /// extended-const integer arithmetic the validator accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum RegConstInstr {
     I32Const(i32),
     I64Const(i64),
@@ -151,6 +161,7 @@ pub enum RegConstInstr {
 
 /// A function import declaration in lowered register IR.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RegImport {
     pub module: String,
     pub name: String,
@@ -159,6 +170,7 @@ pub struct RegImport {
 
 /// A memory import declaration in lowered register IR.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RegMemoryImport {
     pub module: String,
     pub name: String,
@@ -167,6 +179,7 @@ pub struct RegMemoryImport {
 
 /// A global import declaration in lowered register IR.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RegGlobalImport {
     pub module: String,
     pub name: String,
@@ -175,6 +188,7 @@ pub struct RegGlobalImport {
 
 /// A table import declaration in lowered register IR.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RegTableImport {
     pub module: String,
     pub name: String,
@@ -183,6 +197,7 @@ pub struct RegTableImport {
 
 /// A function export in lowered register IR.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RegExport {
     pub name: String,
     pub desc: RegExportDesc,
@@ -190,6 +205,7 @@ pub struct RegExport {
 
 /// What kind of item an export refers to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum RegExportDesc {
     Func(FuncIdx),
     Table(TableIdx),
@@ -199,6 +215,7 @@ pub enum RegExportDesc {
 
 /// A defined function lowered into register IR.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RegFunc {
     pub idx: FuncIdx,
     pub type_idx: TypeIdx,
@@ -214,6 +231,7 @@ pub struct RegFunc {
 
 /// A basic block in the lowered register IR.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RegBlock {
     pub label: LabelIdx,
     pub instrs: Vec<RegInstr>,
@@ -222,6 +240,7 @@ pub struct RegBlock {
 
 /// A block terminator — how execution leaves this block.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum RegTerm {
     /// Fall through to the next block in sequence.
     Fallthrough,
@@ -278,6 +297,7 @@ impl RegBlock {
 
 /// A lowered instruction with the source byte offset it came from.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RegInstr {
     pub offset: ByteOffset,
     pub op: RegOp,
@@ -285,6 +305,7 @@ pub struct RegInstr {
 
 /// Register-oriented operations.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum RegOp {
     LocalGet {
         dst: Reg,
@@ -542,6 +563,7 @@ pub enum RegOp {
 
 /// SIMD lane shapes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum LaneShape {
     I8x16,
     I16x8,
@@ -575,6 +597,7 @@ impl LaneShape {
 
 /// Lane-wise binary operation kinds. Bitwise kinds ignore lane shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum V128BinaryKind {
     Add,
     Sub,
@@ -587,6 +610,7 @@ pub enum V128BinaryKind {
 
 /// Linear-memory load operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum LoadOp {
     I32,
     I64,
@@ -653,6 +677,7 @@ impl LoadOp {
 
 /// Linear-memory store operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum StoreOp {
     I32,
     I64,
@@ -694,6 +719,7 @@ impl StoreOp {
 
 /// Unary numeric operation lowered into register IR.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum UnaryOp {
     I32Clz,
     I32Ctz,
@@ -759,6 +785,7 @@ pub enum UnaryOp {
 
 /// Binary numeric operation lowered into register IR.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum BinaryOp {
     I32Add,
     I32Sub,

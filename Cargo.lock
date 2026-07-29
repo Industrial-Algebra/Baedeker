@@ -137,6 +137,8 @@ dependencies = [
  "arbitrary",
  "baedeker-testdata",
  "libm",
+ "postcard",
+ "serde",
  "wasm-smith",
  "wasmtime",
  "wast 240.0.0",

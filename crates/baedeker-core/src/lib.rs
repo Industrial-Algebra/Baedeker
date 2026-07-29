@@ -18,6 +18,8 @@ extern crate alloc;
 #[cfg(all(test, not(feature = "std")))]
 extern crate std;
 
+#[cfg(feature = "aot")]
+pub mod aot;
 pub mod binary;
 pub mod error;
 pub mod lower;

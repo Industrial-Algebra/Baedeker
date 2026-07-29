@@ -35,6 +35,9 @@ jobs:
       - name: Tests
         run: cargo test
 
+      - name: Tests (AOT feature)
+        run: cargo test -p baedeker-core --features aot
+
       - name: FFI header is up to date
         run: |
           cargo build -p baedeker-ffi

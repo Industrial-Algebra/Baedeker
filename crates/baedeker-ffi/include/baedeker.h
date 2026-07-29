@@ -161,6 +161,18 @@ BaedekerStatus baedeker_module_compile(const uint8_t *bytes,
                                        struct BaedekerModule **out);
 
 /**
+ * Load a pre-compiled AOT artifact (see `baedeker_core::aot`) instead of a
+ * WASM binary. Artifacts skip decode/validate/lower at load time; only load
+ * artifacts produced from validated modules by this runtime's serializer.
+ *
+ * # Safety
+ * `bytes` must be valid for `len` bytes; `out` must be a valid pointer.
+ */
+BaedekerStatus baedeker_module_from_aot(const uint8_t *bytes,
+                                        size_t len,
+                                        struct BaedekerModule **out);
+
+/**
  * Free a module handle (null is allowed).
  *
  * # Safety
