@@ -9,5 +9,9 @@ documentation_style = "doxy"
 [defines]
 "target_os = ios" = "BAEDEKER_TARGET_IOS"
 
+[export]
+item_types = []
+include = ["BaedekerValueTag"]
+
 [enum]
 prefix_with_name = true

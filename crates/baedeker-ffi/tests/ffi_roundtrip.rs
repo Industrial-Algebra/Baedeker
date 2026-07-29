@@ -41,7 +41,7 @@ unsafe extern "C" fn host_add_ok(
     assert_eq!(n_results, 1);
     let args = unsafe { std::slice::from_raw_parts(args, n_args) };
     let (a, b) = unsafe { (args[0].data.i32_, args[1].data.i32_) };
-    unsafe { (*results).tag = BaedekerValueTag::I32 };
+    unsafe { (*results).tag = BaedekerValueTag::I32 as u8 };
     unsafe { (*results).data.i32_ = a + b };
     BaedekerStatus::Ok
 }
@@ -77,16 +77,16 @@ impl Instance {
     fn call_i32s(&self, name: &CStr, args: [i32; 2]) -> (BaedekerStatus, i32) {
         let c_args = [
             BaedekerValue {
-                tag: BaedekerValueTag::I32,
+                tag: BaedekerValueTag::I32 as u8,
                 data: BaedekerValueData { i32_: args[0] },
             },
             BaedekerValue {
-                tag: BaedekerValueTag::I32,
+                tag: BaedekerValueTag::I32 as u8,
                 data: BaedekerValueData { i32_: args[1] },
             },
         ];
         let mut out = [BaedekerValue {
-            tag: BaedekerValueTag::I32,
+            tag: BaedekerValueTag::I32 as u8,
             data: BaedekerValueData { i32_: 0 },
         }];
         let mut n_out = 0usize;

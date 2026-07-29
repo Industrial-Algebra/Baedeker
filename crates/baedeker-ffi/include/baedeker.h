@@ -70,7 +70,7 @@ enum BaedekerStatus
 #if __STDC_VERSION__ >= 202311L
 typedef enum BaedekerStatus BaedekerStatus;
 #else
-typedef uint8_t BaedekerStatus;
+typedef enum BaedekerStatus BaedekerStatus;
 #endif // __STDC_VERSION__ >= 202311L
 #endif // __cplusplus
 
@@ -93,7 +93,7 @@ enum BaedekerValueTag
 #if __STDC_VERSION__ >= 202311L
 typedef enum BaedekerValueTag BaedekerValueTag;
 #else
-typedef uint8_t BaedekerValueTag;
+typedef enum BaedekerValueTag BaedekerValueTag;
 #endif // __STDC_VERSION__ >= 202311L
 #endif // __cplusplus
 
@@ -122,9 +122,13 @@ typedef union BaedekerValueData {
 /**
  * A WebAssembly value across the FFI boundary. Reference types (funcref /
  * externref) are not representable in this FFI version.
+ *
+ * `tag` is a [`BaedekerValueTag`] value carried as a plain `uint8_t`:
+ * fixed-underlying-type enums are C23-only, and a C-int enum here would
+ * read 3 bytes of undefined struct padding against Rust's 1-byte write.
  */
 typedef struct BaedekerValue {
-  BaedekerValueTag tag;
+  uint8_t tag;
   union BaedekerValueData data;
 } BaedekerValue;
 
@@ -171,6 +175,20 @@ BaedekerStatus baedeker_module_compile(const uint8_t *bytes,
 BaedekerStatus baedeker_module_from_aot(const uint8_t *bytes,
                                         size_t len,
                                         struct BaedekerModule **out);
+
+/**
+ * Serialize a compiled module into an AOT artifact (the counterpart of
+ * `baedeker_module_from_aot`). When `buf` is null or too small, no bytes
+ * are written and the required size is still returned.
+ *
+ * Returns the artifact size in bytes (0 on error, with the reason in
+ * `baedeker_last_error`).
+ *
+ * # Safety
+ * `module` must be a valid module handle; `buf` must be writable for
+ * `buf_cap` bytes when non-null.
+ */
+size_t baedeker_module_write_aot(const struct BaedekerModule *module, uint8_t *buf, size_t buf_cap);
 
 /**
  * Free a module handle (null is allowed).

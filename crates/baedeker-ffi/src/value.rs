@@ -52,10 +52,14 @@ pub union BaedekerValueData {
 
 /// A WebAssembly value across the FFI boundary. Reference types (funcref /
 /// externref) are not representable in this FFI version.
+///
+/// `tag` is a [`BaedekerValueTag`] value carried as a plain `uint8_t`:
+/// fixed-underlying-type enums are C23-only, and a C-int enum here would
+/// read 3 bytes of undefined struct padding against Rust's 1-byte write.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct BaedekerValue {
-    pub tag: BaedekerValueTag,
+    pub tag: u8,
     pub data: BaedekerValueData,
 }
 
@@ -64,23 +68,23 @@ impl BaedekerValue {
     pub(crate) fn from_core(value: Value) -> Option<Self> {
         Some(match value {
             Value::I32(v) => Self {
-                tag: BaedekerValueTag::I32,
+                tag: BaedekerValueTag::I32 as u8,
                 data: BaedekerValueData { i32_: v },
             },
             Value::I64(v) => Self {
-                tag: BaedekerValueTag::I64,
+                tag: BaedekerValueTag::I64 as u8,
                 data: BaedekerValueData { i64_: v },
             },
             Value::F32(v) => Self {
-                tag: BaedekerValueTag::F32,
+                tag: BaedekerValueTag::F32 as u8,
                 data: BaedekerValueData { f32_: v },
             },
             Value::F64(v) => Self {
-                tag: BaedekerValueTag::F64,
+                tag: BaedekerValueTag::F64 as u8,
                 data: BaedekerValueData { f64_: v },
             },
             Value::V128(bytes) => Self {
-                tag: BaedekerValueTag::V128,
+                tag: BaedekerValueTag::V128 as u8,
                 data: BaedekerValueData { v128: bytes },
             },
             Value::FuncRef(_) | Value::ExternRef(_) => return None,
@@ -90,11 +94,12 @@ impl BaedekerValue {
     pub(crate) fn to_core(self) -> Value {
         unsafe {
             match self.tag {
-                BaedekerValueTag::I32 => Value::I32(self.data.i32_),
-                BaedekerValueTag::I64 => Value::I64(self.data.i64_),
-                BaedekerValueTag::F32 => Value::F32(self.data.f32_),
-                BaedekerValueTag::F64 => Value::F64(self.data.f64_),
-                BaedekerValueTag::V128 => Value::V128(self.data.v128),
+                t if t == BaedekerValueTag::I32 as u8 => Value::I32(self.data.i32_),
+                t if t == BaedekerValueTag::I64 as u8 => Value::I64(self.data.i64_),
+                t if t == BaedekerValueTag::F32 as u8 => Value::F32(self.data.f32_),
+                t if t == BaedekerValueTag::F64 as u8 => Value::F64(self.data.f64_),
+                t if t == BaedekerValueTag::V128 as u8 => Value::V128(self.data.v128),
+                _ => unreachable!("BaedekerValue tags are constructed from BaedekerValueTag"),
             }
         }
     }
