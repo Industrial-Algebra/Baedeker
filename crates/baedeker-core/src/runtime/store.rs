@@ -1165,9 +1165,11 @@ impl Store {
             .expect("gpu checked above")
             .map_err(runtime_gpu_error)?;
         let workgroups = [count.div_ceil(256) as u32, 1, 1];
-        self.with_gpu_mut(|gpu| gpu.dispatch(kernel, &[buf_a, buf_b, buf_out], workgroups))
-            .expect("gpu checked above")
-            .map_err(runtime_gpu_error)?;
+        self.with_gpu_mut(|gpu| {
+            gpu.dispatch_verified(kernel, &[buf_a, buf_b, buf_out], workgroups, [256, 1, 1])
+        })
+        .expect("gpu checked above")
+        .map_err(runtime_gpu_error)?;
         let result = self
             .with_gpu_mut(|gpu| gpu.read_buffer(buf_out))
             .expect("gpu checked above")
