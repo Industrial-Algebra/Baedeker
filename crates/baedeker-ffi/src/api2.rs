@@ -89,7 +89,7 @@ pub unsafe extern "C" fn baedeker_instance_register_host_func(
                 .collect::<Result<_, _>>()?;
             let mut c_results = vec![
                 BaedekerValue {
-                    tag: BaedekerValueTag::I32,
+                    tag: BaedekerValueTag::I32 as u8,
                     data: crate::value::BaedekerValueData { i32_: 0 },
                 };
                 n_results

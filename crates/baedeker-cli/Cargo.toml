@@ -6,7 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-baedeker-core = { path = "../baedeker-core", features = ["std"] }
+baedeker-core = { path = "../baedeker-core", features = ["std", "aot"] }
 
 [dev-dependencies]
 baedeker-testdata = { path = "../baedeker-testdata" }

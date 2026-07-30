@@ -43,6 +43,25 @@ jobs:
           cargo build -p baedeker-ffi
           git diff --exit-code crates/baedeker-ffi/include/baedeker.h
 
+  swift:
+    name: Swift package
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build XCFramework
+        run: swift/build-xcframework.sh
+
+      - name: Swift build and test
+        run: |
+          cd swift
+          swift build
+          swift test
+
   fuzz-smoke:
     name: Fuzz smoke
     runs-on: ubuntu-latest

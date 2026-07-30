@@ -19,6 +19,22 @@ fn main() {
 
     let mut bytes = Vec::new();
     bindings.write(&mut bytes);
+
+    // cbindgen's dual-mode enum output typedefs the enum for C23/C++ but
+    // plain `uint8_t` for older C — which gives Swift's Clang importer two
+    // same-named candidates. Typedef the enum in both branches instead:
+    // valid C89+ everywhere and unambiguous for Swift. (The enum's fixed
+    // `uint8_t` underlying type still applies on C23/C++; older C uses the
+    // compiler-chosen enum representation, which is ABI-compatible with
+    // the FFI's u8 statuses/tags on every targeted platform.)
+    let mut text = String::from_utf8(bytes).expect("cbindgen emits UTF-8");
+    for name in ["BaedekerStatus", "BaedekerValueTag"] {
+        text = text.replace(
+            &format!("typedef uint8_t {name};"),
+            &format!("typedef enum {name} {name};"),
+        );
+    }
+    let bytes = text.into_bytes();
     // Avoid touching the file (and dirtying the working tree / triggering
     // rebuild loops) when the output is unchanged.
     let unchanged = std::fs::read(&out)

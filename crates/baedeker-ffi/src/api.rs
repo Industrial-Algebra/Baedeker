@@ -164,6 +164,33 @@ pub unsafe extern "C" fn baedeker_module_from_aot(
     })
 }
 
+/// Serialize a compiled module into an AOT artifact (the counterpart of
+/// `baedeker_module_from_aot`). When `buf` is null or too small, no bytes
+/// are written and the required size is still returned.
+///
+/// Returns the artifact size in bytes (0 on error, with the reason in
+/// `baedeker_last_error`).
+///
+/// # Safety
+/// `module` must be a valid module handle; `buf` must be writable for
+/// `buf_cap` bytes when non-null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn baedeker_module_write_aot(
+    module: *const BaedekerModule,
+    buf: *mut u8,
+    buf_cap: usize,
+) -> usize {
+    let Some(handle) = (unsafe { module_ref(module) }) else {
+        set_last_error("null module handle");
+        return 0;
+    };
+    let artifact = baedeker_core::aot::serialize(&handle.module);
+    if !buf.is_null() && buf_cap >= artifact.len() {
+        unsafe { std::ptr::copy_nonoverlapping(artifact.as_ptr(), buf, artifact.len()) };
+    }
+    artifact.len()
+}
+
 /// Free a module handle (null is allowed).
 ///
 /// # Safety
