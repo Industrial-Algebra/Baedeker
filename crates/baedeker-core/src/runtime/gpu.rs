@@ -37,12 +37,44 @@ pub trait GpuBackend: core::fmt::Debug {
 
     /// Dispatch a kernel over `workgroups` (x, y, z) with `buffers` bound
     /// in order.
+    ///
+    /// Each workgroup runs the backend's default thread count. Prefer
+    /// [`dispatch_verified`](GpuBackend::dispatch_verified) when the workgroup
+    /// size is known, so non-default thread counts dispatch correctly.
     fn dispatch(
         &mut self,
         kernel: GpuKernelId,
         buffers: &[GpuBufferId],
         workgroups: [u32; 3],
     ) -> Result<(), GpuError>;
+
+    /// Dispatch a kernel with an explicit per-workgroup thread count.
+    ///
+    /// Like [`dispatch`](GpuBackend::dispatch), but each workgroup runs
+    /// `threads_per_group` threads rather than a backend-implied default.
+    /// This matters for kernels whose WGSL declares a non-default
+    /// `@workgroup_size`: `dispatch` silently uses the backend's default
+    /// (256 for Borsalino), which mis-dispatches such kernels.
+    ///
+    /// Backends that verify workgroup divisibility (Borsalino's
+    /// `dispatch_verified`) construct their proof from
+    /// `(workgroups, threads_per_group)` here; the divisibility check runs
+    /// on the x-dimension product `workgroups[0] * threads_per_group[0]`,
+    /// matching Borsalino's 1-D proof scope.
+    ///
+    /// The default implementation forwards to [`dispatch`](GpuBackend::dispatch),
+    /// ignoring `threads_per_group`. Concrete backends that honour explicit
+    /// workgroup sizes override this.
+    fn dispatch_verified(
+        &mut self,
+        kernel: GpuKernelId,
+        buffers: &[GpuBufferId],
+        workgroups: [u32; 3],
+        threads_per_group: [u32; 3],
+    ) -> Result<(), GpuError> {
+        let _ = threads_per_group;
+        self.dispatch(kernel, buffers, workgroups)
+    }
 
     /// Read a buffer's full contents back to host memory.
     fn read_buffer(&mut self, buffer: GpuBufferId) -> Result<Vec<u8>, GpuError>;
@@ -205,6 +237,35 @@ mod tests {
 
         store.clear_gpu();
         assert!(!store.has_gpu());
+    }
+
+    #[test]
+    fn dispatch_verified_default_delegates_to_dispatch() {
+        // A backend that only implements `dispatch` (the required method)
+        // inherits the trait default for `dispatch_verified`, which must
+        // forward to `dispatch` and accept an arbitrary `threads_per_group`.
+        let module = empty_module();
+        let mut store = crate::runtime::Store::instantiate(&module).unwrap();
+        let stats = alloc::rc::Rc::new(core::cell::RefCell::new(FakeStats::default()));
+        store.set_gpu(Box::new(FakeBackend::new(stats.clone())));
+        let (kernel, buf) = store
+            .with_gpu_mut(|gpu| {
+                let kernel = gpu.compile("k", "@compute fn k() {}")?;
+                let buf = gpu.create_buffer(&[0; 4])?;
+                Ok::<_, GpuError>((kernel, buf))
+            })
+            .expect("backend installed")
+            .unwrap();
+        // Non-default threads_per_group must be accepted by the default impl.
+        store
+            .with_gpu_mut(|gpu| gpu.dispatch_verified(kernel, &[buf], [4, 1, 1], [128, 1, 1]))
+            .expect("backend installed")
+            .unwrap();
+        assert_eq!(
+            stats.borrow().dispatches,
+            1,
+            "default forwarded to dispatch"
+        );
     }
 
     fn memory_module() -> RegModule {
