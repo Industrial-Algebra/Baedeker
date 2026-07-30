@@ -744,10 +744,12 @@ impl Store {
     }
 
     /// The shared handle of a memory by index-space index (imported first).
-    pub(crate) fn shared_memory(
-        &self,
-        idx: u32,
-    ) -> Option<alloc::rc::Rc<core::cell::RefCell<Vec<u8>>>> {
+    ///
+    /// Exposed so host-module crates (e.g. the GPU host module) can capture a
+    /// guest-memory handle at registration time and read/write it from inside
+    /// host-function closures. The handle stays valid across `memory.grow`,
+    /// which mutates the `Vec` in place rather than replacing it.
+    pub fn shared_memory(&self, idx: u32) -> Option<alloc::rc::Rc<core::cell::RefCell<Vec<u8>>>> {
         let idx = idx as usize;
         if idx < self.imported_memory_count as usize {
             return self.imported_memories.get(idx).cloned();

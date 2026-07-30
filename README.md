@@ -80,6 +80,7 @@ crates/
 ├── baedeker-ffi/        # C ABI (staticlib/cdylib) for host embedding
 ├── baedeker-cli/        # command-line harness
 ├── baedeker-borsalino/  # optional Vulkan GPU offload (via Borsalino)
+├── baedeker-gpu/        # GPU compute host module (importable `baedeker:gpu` ABI)
 └── baedeker-testdata/   # spec fixtures, incl. the vendored official suite
 fuzz/                    # cargo-fuzz targets (standalone nightly workspace)
 ```

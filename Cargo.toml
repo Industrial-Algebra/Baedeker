@@ -5,6 +5,7 @@ members = [
     "crates/baedeker-core",
     "crates/baedeker-cli",
     "crates/baedeker-ffi",
+    "crates/baedeker-gpu",
     "crates/baedeker-testdata",
 ]
 

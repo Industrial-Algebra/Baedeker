@@ -1,0 +1,12 @@
+[package]
+name = "baedeker-gpu"
+description = "GPU compute host module for the Baedeker WebAssembly runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+baedeker-core = { path = "../baedeker-core" }
+
+[dev-dependencies]
+wat = "1"

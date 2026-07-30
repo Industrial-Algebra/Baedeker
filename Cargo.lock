@@ -155,6 +155,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "baedeker-gpu"
+version = "0.1.0"
+dependencies = [
+ "baedeker-core",
+ "wat",
+]
+
+[[package]]
 name = "baedeker-testdata"
 version = "0.1.0"
 
