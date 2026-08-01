@@ -16,6 +16,10 @@ use std::collections::HashMap;
 
 use baedeker_core::runtime::gpu::{GpuBackend, GpuBufferId, GpuError, GpuErrorKind, GpuKernelId};
 
+mod verify;
+
+pub use verify::verify_f32_add;
+
 /// A [`GpuBackend`] implementation backed by Borsalino.
 ///
 /// Field order matters: Rust drops struct fields in declaration order, so

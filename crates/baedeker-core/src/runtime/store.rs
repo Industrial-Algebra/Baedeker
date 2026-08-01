@@ -11,20 +11,7 @@ use crate::runtime::host::HostFunction;
 use crate::runtime::{RuntimeError, RuntimeErrorKind, RuntimeTrap, Value, trap};
 use crate::types::{FuncIdx, GlobalType, Limits, MemType, TableType};
 
-/// WGSL element-wise f32 add kernel for bulk SIMD offload.
-const WGSL_F32_ADD: &str = r#"
-@group(0) @binding(0) var<storage, read> a: array<f32>;
-@group(0) @binding(1) var<storage, read> b: array<f32>;
-@group(0) @binding(2) var<storage, read_write> out: array<f32>;
-
-@compute @workgroup_size(256)
-fn vadd(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
-    if (i < arrayLength(&out)) {
-        out[i] = a[i] + b[i];
-    }
-}
-"#;
+use crate::runtime::verify::F32_ADD_WGSL;
 
 /// Default element count at or above which bulk SIMD work dispatches to
 /// GPU. Below this, CPU execution avoids dispatch overhead. Per-platform
@@ -1136,7 +1123,7 @@ impl Store {
             Some(&kernel) => kernel,
             None => {
                 let kernel = self
-                    .with_gpu_mut(|gpu| gpu.compile("vadd", WGSL_F32_ADD))
+                    .with_gpu_mut(|gpu| gpu.compile("vadd", F32_ADD_WGSL))
                     .expect("gpu checked above")
                     .map_err(runtime_gpu_error)?;
                 self.offload_kernels.insert("f32_add", kernel);

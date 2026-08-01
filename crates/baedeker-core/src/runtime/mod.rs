@@ -11,6 +11,7 @@ mod table;
 
 pub mod gpu;
 pub mod host;
+pub mod verify;
 
 pub use table::Table;
 
