@@ -199,9 +199,9 @@ dependencies = [
 
 [[package]]
 name = "borsalino"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2d7cdcb985ddaf9904aa505f8d551fd4eed98552c667833a7bc638642f2139d"
+checksum = "6a0e4d90763e05e970e9135e5a5caf8a1c16b3f7d42cb687f17a61830ec00178"
 dependencies = [
  "ash",
  "bytemuck",
