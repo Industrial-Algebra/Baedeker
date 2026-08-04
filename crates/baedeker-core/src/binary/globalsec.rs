@@ -1,3 +1,4 @@
+// Copyright (C) 2026 Industrial Algebra\n// SPDX-License-Identifier: Apache-2.0\n
 //! Global section parsing.
 //!
 //! Decodes defined globals and their initializer expressions from the global section.

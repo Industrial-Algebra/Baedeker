@@ -1,3 +1,4 @@
+// Copyright (C) 2026 Industrial Algebra\n// SPDX-License-Identifier: Apache-2.0\n
 //! Exports an `add(i32, i32) -> i32` function.
 //! Produces type, function, export, and code sections.
 #![no_std]

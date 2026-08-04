@@ -1,3 +1,4 @@
+// Copyright (C) 2026 Industrial Algebra\n// SPDX-License-Identifier: Apache-2.0\n
 //! Minimal register-IR execution core.
 //!
 //! This is the first Phase 2 runtime slice: execute straight-line lowered IR

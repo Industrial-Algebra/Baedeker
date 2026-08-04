@@ -1,3 +1,4 @@
+// Copyright (C) 2026 Industrial Algebra\n// SPDX-License-Identifier: Apache-2.0\n
 //! Top-level WASM module decoding.
 //!
 //! Produces a `Module` — a parsed but not yet validated representation of a

@@ -1,3 +1,4 @@
+// Copyright (C) 2026 Industrial Algebra\n// SPDX-License-Identifier: Apache-2.0\n
 //! Host functions: native callables registered with a [`Store`] that WASM
 //! modules can import and call.
 //!

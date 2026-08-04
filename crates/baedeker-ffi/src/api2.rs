@@ -1,3 +1,4 @@
+// Copyright (C) 2026 Industrial Algebra\n// SPDX-License-Identifier: Apache-2.0\n
 //! Calls, host functions, and memory access — the second half of the API.
 
 use std::ffi::{c_char, c_void};

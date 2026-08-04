@@ -1,3 +1,4 @@
+// Copyright (C) 2026 Industrial Algebra\n// SPDX-License-Identifier: Apache-2.0\n
 //! Instruction decoding.
 //!
 //! Decodes a subset of WebAssembly instructions sufficient to start Phase 1

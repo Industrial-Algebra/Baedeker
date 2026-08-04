@@ -1,3 +1,4 @@
+// Copyright (C) 2026 Industrial Algebra\n// SPDX-License-Identifier: Apache-2.0\n
 //! Validation state and control-flow scaffolding.
 //!
 //! These types model the operand/control stacks used by the WebAssembly validation

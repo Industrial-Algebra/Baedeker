@@ -1,3 +1,4 @@
+// Copyright (C) 2026 Industrial Algebra\n// SPDX-License-Identifier: Apache-2.0\n
 //! LEB128 (Little Endian Base 128) encoder/decoder.
 //!
 //! WASM uses LEB128 extensively for compact integer encoding in the binary format.

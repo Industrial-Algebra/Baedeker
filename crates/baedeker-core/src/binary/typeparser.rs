@@ -1,3 +1,4 @@
+// Copyright (C) 2026 Industrial Algebra\n// SPDX-License-Identifier: Apache-2.0\n
 //! Shared parsers for value/reference/heap types.
 //!
 //! This keeps the section decoders aligned on the same typed-reference decoding
