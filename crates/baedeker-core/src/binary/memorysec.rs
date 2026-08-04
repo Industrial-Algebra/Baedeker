@@ -1,3 +1,4 @@
+// Copyright (C) 2026 Industrial Algebra\n// SPDX-License-Identifier: Apache-2.0\n
 //! Memory section parsing.
 //!
 //! Decodes defined memories from the memory section.

@@ -1,3 +1,4 @@
+// Copyright (C) 2026 Industrial Algebra\n// SPDX-License-Identifier: Apache-2.0\n
 //! End-to-end exercise of the C ABI from Rust: compile → instantiate → call,
 //! memory access, host functions, fuel, and error/status mapping.
 

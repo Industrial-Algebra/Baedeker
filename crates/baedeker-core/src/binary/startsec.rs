@@ -1,3 +1,4 @@
+// Copyright (C) 2026 Industrial Algebra\n// SPDX-License-Identifier: Apache-2.0\n
 //! Start section parsing.
 //!
 //! Decodes the optional start function index from the start section.

@@ -1,3 +1,4 @@
+// Copyright (C) 2026 Industrial Algebra\n// SPDX-License-Identifier: Apache-2.0\n
 //! Differential testing against Wasmtime (issue #21).
 //!
 //! wasm-smith generates valid modules from deterministic seeds; each module

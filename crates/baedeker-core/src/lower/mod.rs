@@ -1,3 +1,4 @@
+// Copyright (C) 2026 Industrial Algebra\n// SPDX-License-Identifier: Apache-2.0\n
 //! Register-based lowering skeleton.
 //!
 //! Phase 2 starts by turning validated stack-machine functions into an

@@ -1,3 +1,4 @@
+// Copyright (C) 2026 Industrial Algebra\n// SPDX-License-Identifier: Apache-2.0\n
 //! AOT artifact format: a postcard-serialized [`RegModule`] behind a magic
 //! and format-version envelope.
 //!

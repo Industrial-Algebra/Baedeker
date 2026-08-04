@@ -103,4 +103,6 @@ The official spec suite runs as part of `cargo test`
 
 ## License
 
-MIT
+[Apache-2.0](./LICENSE). Contributions require the
+[Industrial Algebra CLA](https://github.com/Industrial-Algebra/.github/blob/main/CLA.md)
+— see [CONTRIBUTING.md](./CONTRIBUTING.md).

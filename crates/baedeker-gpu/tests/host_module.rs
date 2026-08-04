@@ -1,5 +1,5 @@
 // Copyright (C) 2026 Industrial Algebra
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 
 //! End-to-end tests for the GPU host module: a WAT guest imports the
 //! `baedeker:gpu` ABI and drives it against a recording fake backend.

@@ -1,3 +1,4 @@
+// Copyright (C) 2026 Industrial Algebra\n// SPDX-License-Identifier: Apache-2.0\n
 //! Type section parsing.
 //!
 //! Decodes WebAssembly function type entries from the type section.

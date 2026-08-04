@@ -1,3 +1,4 @@
+// Copyright (C) 2026 Industrial Algebra\n// SPDX-License-Identifier: Apache-2.0\n
 //! Sparse-capable table instance storage.
 //!
 //! Spec-valid tables can declare up to `u32::MAX` entries; a dense
