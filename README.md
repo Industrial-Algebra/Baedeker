@@ -13,6 +13,17 @@ Named after the Hindmost Baedeker from Larry Niven's *Ringworld* / *Fleet of Wor
 cautious, methodical, but ultimately willing to venture into the unknown.
 
 [![CI](https://github.com/Industrial-Algebra/Baedeker/actions/workflows/ci.yml/badge.svg)](https://github.com/Industrial-Algebra/Baedeker/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/baedeker-core.svg)](https://crates.io/crates/baedeker-core)
+[![docs](https://img.shields.io/badge/docs-mdBook-blue)](./book/src/SUMMARY.md)
+[![license](https://img.shields.io/crates/l/baedeker-core.svg)](./LICENSE)
+
+## Documentation
+
+- **[The Baedeker Book](./book/src/SUMMARY.md)** — introduction, architecture, guides,
+  and design notes (rendered site on release).
+- **[API reference (rustdoc)](https://docs.rs/baedeker-core)** — exhaustive signatures.
+- **[Examples](./crates/baedeker-cli/examples/)** — runnable end-to-end modules.
+- **[WebAssembly spec](https://webassembly.github.io/spec/core/)** — the authoritative reference.
 
 ## Status
 
