@@ -1,3 +1,6 @@
+// Copyright (C) 2026 Industrial Algebra
+// SPDX-License-Identifier: Apache-2.0
+
 use std::path::Path;
 
 use baedeker_core::binary::module::Module;

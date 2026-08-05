@@ -1,3 +1,6 @@
+// Copyright (C) 2026 Industrial Algebra
+// SPDX-License-Identifier: Apache-2.0
+
 //! Allocates linear memory and exports a function that writes to it.
 //! Exercises the memory section.
 #![no_std]

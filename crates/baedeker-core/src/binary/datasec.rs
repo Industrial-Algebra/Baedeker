@@ -1,3 +1,6 @@
+// Copyright (C) 2026 Industrial Algebra
+// SPDX-License-Identifier: Apache-2.0
+
 //! Data section parsing.
 //!
 //! Decodes defined data segments and their initialization payloads.

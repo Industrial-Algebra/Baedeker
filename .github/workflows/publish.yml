@@ -1,0 +1,44 @@
+name: Publish
+
+on:
+  push:
+    tags: ['v*']
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Publish in dependency order. baedeker-core has no internal deps; the
+      # rest depend on it via { path, version }. baedeker-testdata is
+      # publish = false (test fixtures) and is excluded.
+      - name: Publish baedeker-core
+        run: cargo publish -p baedeker-core --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      # crates.io index propagation can lag a few seconds; give dependents a
+      # chance to resolve the just-published core.
+      - name: Wait for index
+        run: sleep 15
+
+      - name: Publish baedeker-borsalino
+        run: cargo publish -p baedeker-borsalino --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Publish baedeker-gpu
+        run: cargo publish -p baedeker-gpu --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Publish baedeker-ffi
+        run: cargo publish -p baedeker-ffi --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Publish baedeker-cli
+        run: cargo publish -p baedeker-cli --token ${{ secrets.CARGO_REGISTRY_TOKEN }}

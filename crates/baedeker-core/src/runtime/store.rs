@@ -1,3 +1,6 @@
+// Copyright (C) 2026 Industrial Algebra
+// SPDX-License-Identifier: Apache-2.0
+
 //! Mutable runtime state for an instantiated module: linear memories and
 //! globals. See [Spec §4.4](https://webassembly.github.io/spec/core/exec/runtime.html).
 
@@ -11,20 +14,7 @@ use crate::runtime::host::HostFunction;
 use crate::runtime::{RuntimeError, RuntimeErrorKind, RuntimeTrap, Value, trap};
 use crate::types::{FuncIdx, GlobalType, Limits, MemType, TableType};
 
-/// WGSL element-wise f32 add kernel for bulk SIMD offload.
-const WGSL_F32_ADD: &str = r#"
-@group(0) @binding(0) var<storage, read> a: array<f32>;
-@group(0) @binding(1) var<storage, read> b: array<f32>;
-@group(0) @binding(2) var<storage, read_write> out: array<f32>;
-
-@compute @workgroup_size(256)
-fn vadd(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
-    if (i < arrayLength(&out)) {
-        out[i] = a[i] + b[i];
-    }
-}
-"#;
+use crate::runtime::verify::F32_ADD_WGSL;
 
 /// Default element count at or above which bulk SIMD work dispatches to
 /// GPU. Below this, CPU execution avoids dispatch overhead. Per-platform
@@ -744,10 +734,12 @@ impl Store {
     }
 
     /// The shared handle of a memory by index-space index (imported first).
-    pub(crate) fn shared_memory(
-        &self,
-        idx: u32,
-    ) -> Option<alloc::rc::Rc<core::cell::RefCell<Vec<u8>>>> {
+    ///
+    /// Exposed so host-module crates (e.g. the GPU host module) can capture a
+    /// guest-memory handle at registration time and read/write it from inside
+    /// host-function closures. The handle stays valid across `memory.grow`,
+    /// which mutates the `Vec` in place rather than replacing it.
+    pub fn shared_memory(&self, idx: u32) -> Option<alloc::rc::Rc<core::cell::RefCell<Vec<u8>>>> {
         let idx = idx as usize;
         if idx < self.imported_memory_count as usize {
             return self.imported_memories.get(idx).cloned();
@@ -1134,7 +1126,7 @@ impl Store {
             Some(&kernel) => kernel,
             None => {
                 let kernel = self
-                    .with_gpu_mut(|gpu| gpu.compile("vadd", WGSL_F32_ADD))
+                    .with_gpu_mut(|gpu| gpu.compile("vadd", F32_ADD_WGSL))
                     .expect("gpu checked above")
                     .map_err(runtime_gpu_error)?;
                 self.offload_kernels.insert("f32_add", kernel);
@@ -1165,9 +1157,11 @@ impl Store {
             .expect("gpu checked above")
             .map_err(runtime_gpu_error)?;
         let workgroups = [count.div_ceil(256) as u32, 1, 1];
-        self.with_gpu_mut(|gpu| gpu.dispatch(kernel, &[buf_a, buf_b, buf_out], workgroups))
-            .expect("gpu checked above")
-            .map_err(runtime_gpu_error)?;
+        self.with_gpu_mut(|gpu| {
+            gpu.dispatch_verified(kernel, &[buf_a, buf_b, buf_out], workgroups, [256, 1, 1])
+        })
+        .expect("gpu checked above")
+        .map_err(runtime_gpu_error)?;
         let result = self
             .with_gpu_mut(|gpu| gpu.read_buffer(buf_out))
             .expect("gpu checked above")

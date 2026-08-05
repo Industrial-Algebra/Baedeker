@@ -1,3 +1,6 @@
+// Copyright (C) 2026 Industrial Algebra
+// SPDX-License-Identifier: Apache-2.0
+
 //! Baedeker WebAssembly runtime core.
 //!
 //! A `no_std` WebAssembly 2.0 engine providing binary decoding, validation,
@@ -18,6 +21,8 @@ extern crate alloc;
 #[cfg(all(test, not(feature = "std")))]
 extern crate std;
 
+#[cfg(feature = "aot")]
+pub mod aot;
 pub mod binary;
 pub mod error;
 pub mod lower;

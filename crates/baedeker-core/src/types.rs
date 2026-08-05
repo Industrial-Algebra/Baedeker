@@ -1,3 +1,6 @@
+// Copyright (C) 2026 Industrial Algebra
+// SPDX-License-Identifier: Apache-2.0
+
 //! Core WebAssembly type definitions.
 //!
 //! These types mirror the WASM spec's abstract syntax for types.
@@ -9,6 +12,7 @@ use alloc::{string::String, vec::Vec};
 macro_rules! define_idx {
     ($name:ident) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
         pub struct $name(pub u32);
     };
 }
@@ -26,6 +30,7 @@ define_idx!(LabelIdx);
 /// Number types.
 /// See [Spec §2.3.1](https://webassembly.github.io/spec/core/syntax/types.html#number-types).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum NumType {
     I32,
     I64,
@@ -36,6 +41,7 @@ pub enum NumType {
 /// Vector types.
 /// See [Spec §2.3.2](https://webassembly.github.io/spec/core/syntax/types.html#vector-types).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum VecType {
     V128,
 }
@@ -43,6 +49,7 @@ pub enum VecType {
 /// Heap types used by reference types.
 /// See [Spec §2.3.3](https://webassembly.github.io/spec/core/syntax/types.html#reference-types).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum HeapType {
     Func,
     Extern,
@@ -62,6 +69,7 @@ impl HeapType {
 /// Reference types.
 /// See [Spec §2.3.3](https://webassembly.github.io/spec/core/syntax/types.html#reference-types).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum RefType {
     FuncRef,
     ExternRef,
@@ -149,6 +157,7 @@ impl RefType {
 /// Value types — the union of number, vector, and reference types.
 /// See [Spec §2.3.4](https://webassembly.github.io/spec/core/syntax/types.html#value-types).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ValType {
     Num(NumType),
     Vec(VecType),
@@ -185,6 +194,7 @@ impl ValType {
 /// Function types — parameter and result type vectors.
 /// See [Spec §2.3.5](https://webassembly.github.io/spec/core/syntax/types.html#function-types).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FuncType {
     pub params: Vec<ValType>,
     pub results: Vec<ValType>,
@@ -219,6 +229,7 @@ pub struct Global<'a> {
 /// Limits — used by memories and tables to specify size constraints.
 /// See [Spec §2.3.7](https://webassembly.github.io/spec/core/syntax/types.html#limits).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Limits {
     pub min: u32,
     pub max: Option<u32>,
@@ -227,6 +238,7 @@ pub struct Limits {
 /// Memory types.
 /// See [Spec §2.3.8](https://webassembly.github.io/spec/core/syntax/types.html#memory-types).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MemType {
     pub limits: Limits,
 }
@@ -234,6 +246,7 @@ pub struct MemType {
 /// Memory instruction immediate.
 /// See [Spec §2.4.5](https://webassembly.github.io/spec/core/syntax/instructions.html#memory-instructions).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MemArg {
     pub align: u32,
     pub offset: u32,
@@ -335,6 +348,7 @@ pub enum ExportDesc {
 /// Table types.
 /// See [Spec §2.3.9](https://webassembly.github.io/spec/core/syntax/types.html#table-types).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TableType {
     pub elem: RefType,
     pub limits: Limits,
@@ -345,6 +359,7 @@ pub struct TableType {
 
 /// Mutability of a global variable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Mutability {
     Const,
     Var,
@@ -353,6 +368,7 @@ pub enum Mutability {
 /// Global types.
 /// See [Spec §2.3.10](https://webassembly.github.io/spec/core/syntax/types.html#global-types).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct GlobalType {
     pub val_type: ValType,
     pub mutability: Mutability,

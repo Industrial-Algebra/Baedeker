@@ -4,10 +4,17 @@ members = [
     "crates/baedeker-borsalino",
     "crates/baedeker-core",
     "crates/baedeker-cli",
+    "crates/baedeker-ffi",
+    "crates/baedeker-gpu",
     "crates/baedeker-testdata",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/Industrial-Algebra/Baedeker"
+homepage = "https://github.com/Industrial-Algebra/Baedeker"
+keywords = ["wasm", "webassembly", "runtime", "interpreter", "no_std"]
+categories = ["wasm", "compilers", "no-std"]

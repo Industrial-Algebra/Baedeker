@@ -1,3 +1,6 @@
+// Copyright (C) 2026 Industrial Algebra
+// SPDX-License-Identifier: Apache-2.0
+
 //! Element section parsing.
 //!
 //! Decodes defined element segments from the element section.

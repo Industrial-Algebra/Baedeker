@@ -4,13 +4,30 @@ description = "WebAssembly runtime core — decode, validate, execute (no_std)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
 
 [features]
 default = []
 std = []
+# serde derives on the register IR (used by the `aot` feature and IA tooling).
+serde = ["dep:serde"]
+# AOT artifact envelope: postcard-serialized RegModule with magic/version.
+aot = ["serde", "dep:postcard"]
 
 [dependencies]
 libm = "0.2"
+serde = { version = "1", optional = true, default-features = false, features = [
+    "derive",
+    "alloc",
+] }
+postcard = { version = "1", optional = true, default-features = false, features = [
+    "alloc",
+] }
 
 [dev-dependencies]
 baedeker-testdata = { path = "../baedeker-testdata" }

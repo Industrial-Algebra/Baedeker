@@ -183,6 +183,26 @@ Blackwell (DGX Spark GB10), and PCIe-discrete GPUs (RTX class). Key metrics:
 
 If SIMD offload shows strong results, extend to register-block compilation.
 
+## GPU Verification ("both, layered")
+
+Distinct from the *integration levels* above (how much work the GPU does),
+the **verification layers** are how much correctness assurance a dispatch
+gets:
+
+| Layer | What it checks | When it runs | Where it lives |
+|---|---|---|---|
+| **1 — `dispatch_verified`** | Structural: the workgroup-divisibility proof + the explicit `threads_per_group` is honoured (non-default `@workgroup_size` kernels dispatch correctly, not silently at the 256-thread default) | Every GPU dispatch, uniform | `GpuBackend::dispatch_verified` (baedeker-core trait, BorsalinoGpu override) |
+| **2 — exact-match numerical** | Numerical: the kernel's math is bit-exact vs an FP32 CPU reference on binary `{0,1}` inputs, below the 2048 FP16 exact-integer ceiling (DeepReinforce protocol) | Opt-in, on demand, for known-linear kernels | pure core in `baedeker_core::runtime::verify`; `rand`-using driver `verify_f32_add` in baedeker-borsalino |
+
+Layer 1 shipped in #54. Layer 2's first kernel (`f32_add`) is verified by
+`baedeker_borsalino::verify_f32_add`, generic over `GpuBackend` so the
+pass/fail logic is unit-tested with CPU fakes and proven on hardware via an
+`#[ignore]` lavapipe test. Adding another linear offload kernel means adding
+its CPU reference to `baedeker_core::runtime::verify` and a driver entry.
+
+The exact-match protocol does **not** apply to non-linear kernels (`log`,
+`exp`, `tanh`): their irrational outputs cannot be checked with exact match.
+
 ## Borsalino Roadmap Items That Would Help
 
 None required for Levels 1-2, but these would benefit Level 3:

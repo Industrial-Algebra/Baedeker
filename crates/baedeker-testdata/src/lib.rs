@@ -1,3 +1,6 @@
+// Copyright (C) 2026 Industrial Algebra
+// SPDX-License-Identifier: Apache-2.0
+
 //! WASM test fixtures compiled from Rust sources at build time.
 //!
 //! Add `.rs` files to `fixtures/` and they will be compiled to `.wasm`

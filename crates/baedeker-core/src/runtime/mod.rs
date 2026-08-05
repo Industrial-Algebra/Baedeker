@@ -1,3 +1,6 @@
+// Copyright (C) 2026 Industrial Algebra
+// SPDX-License-Identifier: Apache-2.0
+
 //! Minimal register-IR execution core.
 //!
 //! This is the first Phase 2 runtime slice: execute straight-line lowered IR
@@ -11,6 +14,7 @@ mod table;
 
 pub mod gpu;
 pub mod host;
+pub mod verify;
 
 pub use table::Table;
 
@@ -109,6 +113,10 @@ pub enum RuntimeErrorKind {
     },
     /// The store's instruction fuel budget ran out (see `Store::set_fuel`).
     FuelExhausted,
+    /// A host function returned a failure (FFI or embedding-layer error).
+    HostError {
+        message: String,
+    },
     ImportedFunctionCallUnsupported {
         func: u32,
     },

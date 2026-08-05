@@ -1,0 +1,18 @@
+[package]
+name = "baedeker-gpu"
+description = "GPU compute host module for the Baedeker WebAssembly runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
+
+[dependencies]
+baedeker-core = { path = "../baedeker-core", version = "0.1.0" }
+
+[dev-dependencies]
+wat = "1"

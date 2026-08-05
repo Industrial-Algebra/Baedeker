@@ -1,3 +1,6 @@
+// Copyright (C) 2026 Industrial Algebra
+// SPDX-License-Identifier: Apache-2.0
+
 //! Validation error types.
 //!
 //! Validation runs after binary decoding and reports type/index/control-flow problems

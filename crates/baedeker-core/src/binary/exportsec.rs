@@ -1,3 +1,6 @@
+// Copyright (C) 2026 Industrial Algebra
+// SPDX-License-Identifier: Apache-2.0
+
 //! Export section parsing.
 //!
 //! Decodes exports and their descriptors from the export section.

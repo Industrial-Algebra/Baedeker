@@ -1,3 +1,6 @@
+// Copyright (C) 2026 Industrial Algebra
+// SPDX-License-Identifier: Apache-2.0
+
 //! Error types for binary decoding.
 //!
 //! All errors carry byte offsets into the original binary and structured context,
@@ -7,6 +10,7 @@ use core::fmt;
 
 /// The byte offset into the WASM binary where an error occurred.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ByteOffset(pub usize);
 
 /// Contextual information about what was being decoded when the error occurred.
