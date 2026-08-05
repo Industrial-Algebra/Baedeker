@@ -1,4 +1,6 @@
-// Copyright (C) 2026 Industrial Algebra\n// SPDX-License-Identifier: Apache-2.0\n
+// Copyright (C) 2026 Industrial Algebra
+// SPDX-License-Identifier: Apache-2.0
+
 //! The C ABI value representation and conversions to/from `baedeker_core::Value`.
 
 use baedeker_core::runtime::Value;

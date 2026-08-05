@@ -1,4 +1,6 @@
-// Copyright (C) 2026 Industrial Algebra\n// SPDX-License-Identifier: Apache-2.0\n
+// Copyright (C) 2026 Industrial Algebra
+// SPDX-License-Identifier: Apache-2.0
+
 //! WebAssembly validation.
 //!
 //! This module begins Phase 1 validation with a deliberately small but useful subset:

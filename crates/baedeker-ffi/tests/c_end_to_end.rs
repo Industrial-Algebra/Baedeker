@@ -1,4 +1,6 @@
-// Copyright (C) 2026 Industrial Algebra\n// SPDX-License-Identifier: Apache-2.0\n
+// Copyright (C) 2026 Industrial Algebra
+// SPDX-License-Identifier: Apache-2.0
+
 //! Compiles `tests/smoke.c` against the generated `include/baedeker.h`, links
 //! it against the built `libbaedeker_ffi` static library, and runs it — a
 //! true C-consumer end-to-end test of the ABI and header.

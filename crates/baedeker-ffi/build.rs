@@ -1,4 +1,6 @@
-// Copyright (C) 2026 Industrial Algebra\n// SPDX-License-Identifier: Apache-2.0\n
+// Copyright (C) 2026 Industrial Algebra
+// SPDX-License-Identifier: Apache-2.0
+
 //! Regenerates `include/baedeker.h` from the crate's `extern "C"` surface.
 //!
 //! The header is committed to the repo; CI fails on drift, so any change to

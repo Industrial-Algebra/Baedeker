@@ -1,4 +1,6 @@
-// Copyright (C) 2026 Industrial Algebra\n// SPDX-License-Identifier: Apache-2.0\n
+// Copyright (C) 2026 Industrial Algebra
+// SPDX-License-Identifier: Apache-2.0
+
 //! Mutable runtime state for an instantiated module: linear memories and
 //! globals. See [Spec §4.4](https://webassembly.github.io/spec/core/exec/runtime.html).
 

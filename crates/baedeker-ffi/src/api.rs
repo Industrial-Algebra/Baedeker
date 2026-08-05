@@ -1,4 +1,6 @@
-// Copyright (C) 2026 Industrial Algebra\n// SPDX-License-Identifier: Apache-2.0\n
+// Copyright (C) 2026 Industrial Algebra
+// SPDX-License-Identifier: Apache-2.0
+
 //! The `extern "C"` entry points. Every function runs inside a panic guard
 //! and reports through [`BaedekerStatus`] + the thread-local last error.
 

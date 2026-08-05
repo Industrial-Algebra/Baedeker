@@ -1,4 +1,6 @@
-// Copyright (C) 2026 Industrial Algebra\n// SPDX-License-Identifier: Apache-2.0\n
+// Copyright (C) 2026 Industrial Algebra
+// SPDX-License-Identifier: Apache-2.0
+
 //! Register-based lowering skeleton.
 //!
 //! Phase 2 starts by turning validated stack-machine functions into an
@@ -488,13 +490,13 @@ pub enum RegOp {
         args: Vec<Reg>,
         results: Vec<Reg>,
     },
-    /// `table.get`: dst = table[index].
+    /// `table.get`: dst = `table[index]`.
     TableGet {
         dst: Reg,
         table: TableIdx,
         index: Reg,
     },
-    /// `table.set`: table[index] = value.
+    /// `table.set`: `table[index]` = value.
     TableSet {
         table: TableIdx,
         index: Reg,
