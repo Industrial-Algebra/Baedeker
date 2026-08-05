@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] — 2026-08-04
+
 Baedeker's first public release. A `no_std` + `alloc` WebAssembly 2.0 engine
 (decode → validate → lower → execute) targeting every platform Rust compiles
 to, with a complete platform-integration surface for embedding. WebAssembly 3.0
@@ -52,4 +54,5 @@ as the post-0.1.0 roadmap.
 - License: **Apache-2.0** (with Industrial Algebra CLA). (Earlier development
   used MIT.)
 
-[Unreleased]: https://github.com/Industrial-Algebra/Baedeker/compare/HEAD
+[Unreleased]: https://github.com/Industrial-Algebra/Baedeker/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Industrial-Algebra/Baedeker/releases/tag/v0.1.0

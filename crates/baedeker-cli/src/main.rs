@@ -1,4 +1,6 @@
-// Copyright (C) 2026 Industrial Algebra\n// SPDX-License-Identifier: Apache-2.0\n
+// Copyright (C) 2026 Industrial Algebra
+// SPDX-License-Identifier: Apache-2.0
+
 //! Baedeker CLI — decode a `.wasm` binary and print its section layout, or
 //! compile one to an AOT artifact (`.bdkaot`) for bundling into host apps.
 
