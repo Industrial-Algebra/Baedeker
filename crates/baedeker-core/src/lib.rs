@@ -1,4 +1,6 @@
-// Copyright (C) 2026 Industrial Algebra\n// SPDX-License-Identifier: Apache-2.0\n
+// Copyright (C) 2026 Industrial Algebra
+// SPDX-License-Identifier: Apache-2.0
+
 //! Baedeker WebAssembly runtime core.
 //!
 //! A `no_std` WebAssembly 2.0 engine providing binary decoding, validation,

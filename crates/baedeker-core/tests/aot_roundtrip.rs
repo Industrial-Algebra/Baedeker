@@ -1,4 +1,6 @@
-// Copyright (C) 2026 Industrial Algebra\n// SPDX-License-Identifier: Apache-2.0\n
+// Copyright (C) 2026 Industrial Algebra
+// SPDX-License-Identifier: Apache-2.0
+
 //! AOT roundtrip soak: serialize every lowerable fixture module and verify
 //! the deserialized module is identical and executes identically.
 
