@@ -93,3 +93,80 @@ jobs:
 
       - name: Fuzz trap_edges
         run: cargo +nightly fuzz run trap_edges -- -runs=50000
+
+  # Cross-arch correctness coverage. These are NOT in the required-check set
+  # yet (see AGENTS.md required-check case-sensitivity pitfall) — added as
+  # separate jobs so the existing `Check`/`Fuzz smoke` contexts stay valid.
+  # Promote to required after they prove stable across a few merges.
+  check-aarch64:
+    name: Check (ARM64 Linux)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Core suite on aarch64 — the full official spec suite (19k assertions)
+      # runs natively on ARM, catching any arch-dependent trap/SIMD/ABI drift.
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Tests (core)
+        run: cargo test -p baedeker-core
+
+      - name: Tests (core, AOT feature)
+        run: cargo test -p baedeker-core --features aot
+
+  check-macos:
+    name: Check (macOS Apple Silicon)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Core suite on macOS/ARM. (The `swift` job already builds core+ffi for
+      # Apple platforms and runs the Swift tests; this adds the Rust suite.)
+      - name: Tests (core)
+        run: cargo test -p baedeker-core
+
+  # Android is a primary target. No native Android runner exists, so this is
+  # a cross-compile build check of the embeddable surface (core + FFI `.so` +
+  # GPU host module) for both 64-bit (arm64-v8a) and 32-bit (armeabi-v7a)
+  # devices. Vulkan-on-Android (baedeker-borsalino) is a separate follow-up.
+  android-cross:
+    name: Android cross-compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-android
+
+      - uses: nttld/setup-ndk@v1
+        id: setup_ndk
+        with:
+          ndk-version: r27c
+          add-to-path: false
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk
+
+      - name: Build aarch64 (arm64-v8a)
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup_ndk.outputs.ndk-path }}
+        run: cargo ndk --target aarch64-linux-android build -p baedeker-core -p baedeker-ffi -p baedeker-gpu
+
+      - name: Build armv7 (32-bit devices)
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup_ndk.outputs.ndk-path }}
+        run: cargo ndk --target armv7-linux-android build -p baedeker-core -p baedeker-ffi
