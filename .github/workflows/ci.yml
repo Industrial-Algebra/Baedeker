@@ -148,7 +148,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android,armv7-linux-android
+          targets: aarch64-linux-android,armv7-linux-androideabi
 
       - uses: nttld/setup-ndk@v1
         id: setup_ndk
@@ -169,4 +169,4 @@ jobs:
       - name: Build armv7 (32-bit devices)
         env:
           ANDROID_NDK_HOME: ${{ steps.setup_ndk.outputs.ndk-path }}
-        run: cargo ndk --target armv7-linux-android build -p baedeker-core -p baedeker-ffi
+        run: cargo ndk --target armv7-linux-androideabi build -p baedeker-core -p baedeker-ffi
