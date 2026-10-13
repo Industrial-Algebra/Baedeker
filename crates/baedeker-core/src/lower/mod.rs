@@ -436,6 +436,78 @@ pub enum RegOp {
         dst: Reg,
         src: Reg,
     },
+    /// Lane-wise integer unary (abs/neg/popcnt).
+    V128Unary {
+        dst: Reg,
+        src: Reg,
+        shape: LaneShape,
+        kind: V128UnaryKind,
+    },
+    /// Widen the low (`high == false`) or high half of `src`'s lanes to
+    /// double width; dst shape is implied by `src_shape`.
+    V128Extend {
+        dst: Reg,
+        src: Reg,
+        src_shape: LaneShape,
+        high: bool,
+        signed: bool,
+    },
+    /// Extended multiply: widen both operands' selected half, then
+    /// multiply lane-wise in the wider type.
+    V128ExtMul {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+        src_shape: LaneShape,
+        high: bool,
+        signed: bool,
+    },
+    /// Pairwise saturating-free sum of adjacent lanes, doubling width.
+    V128ExtAddPairwise {
+        dst: Reg,
+        src: Reg,
+        src_shape: LaneShape,
+        signed: bool,
+    },
+    /// Saturating-narrow `a` into the dst low half and `b` into the dst
+    /// high half, halving width. `_u` clamps negative lanes to 0.
+    V128Narrow {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+        dst_shape: LaneShape,
+        signed: bool,
+    },
+    /// i32x4.dot_i16x8_s: signed dot of adjacent i16 pairs, wrapping.
+    V128Dot {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    /// Per-bit select: mask bit 1 → a, 0 → b.
+    V128Bitselect {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+        mask: Reg,
+    },
+    /// i32 1 if any bit in the vector is nonzero, else 0.
+    V128AnyTrue {
+        dst: Reg,
+        src: Reg,
+    },
+    /// i32 1 if every lane (per `shape`) is nonzero, else 0.
+    V128AllTrue {
+        dst: Reg,
+        src: Reg,
+        shape: LaneShape,
+    },
+    /// i32 with bit i = MSB of lane i (per `shape`).
+    V128Bitmask {
+        dst: Reg,
+        src: Reg,
+        shape: LaneShape,
+    },
     /// Linear-memory store: mem[effective(addr)..+width] = value per `op`.
     Store {
         op: StoreOp,
@@ -637,6 +709,16 @@ pub enum V128BinaryKind {
     MaxU,
     AvgrU,
     Q15MulrSatS,
+}
+
+/// Integer lane-wise unary kinds (`f32x4`/`f64x2` abs/neg are separate
+/// float ops and are NOT part of this unit).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum V128UnaryKind {
+    Abs,
+    Neg,
+    Popcnt,
 }
 
 /// Linear-memory load operations.
@@ -3294,6 +3376,132 @@ impl<'b> FuncBuilder<'b> {
             Instr::I32x4MaxU => {
                 self.lower_v128_binary(offset, LaneShape::I32x4, V128BinaryKind::MaxU)?
             }
+            Instr::I8x16Abs => {
+                self.lower_v128_unary(offset, LaneShape::I8x16, V128UnaryKind::Abs)?
+            }
+            Instr::I8x16Neg => {
+                self.lower_v128_unary(offset, LaneShape::I8x16, V128UnaryKind::Neg)?
+            }
+            Instr::I8x16Popcnt => {
+                self.lower_v128_unary(offset, LaneShape::I8x16, V128UnaryKind::Popcnt)?
+            }
+            Instr::I16x8Abs => {
+                self.lower_v128_unary(offset, LaneShape::I16x8, V128UnaryKind::Abs)?
+            }
+            Instr::I16x8Neg => {
+                self.lower_v128_unary(offset, LaneShape::I16x8, V128UnaryKind::Neg)?
+            }
+            Instr::I32x4Abs => {
+                self.lower_v128_unary(offset, LaneShape::I32x4, V128UnaryKind::Abs)?
+            }
+            Instr::I32x4Neg => {
+                self.lower_v128_unary(offset, LaneShape::I32x4, V128UnaryKind::Neg)?
+            }
+            Instr::I64x2Abs => {
+                self.lower_v128_unary(offset, LaneShape::I64x2, V128UnaryKind::Abs)?
+            }
+            Instr::I64x2Neg => {
+                self.lower_v128_unary(offset, LaneShape::I64x2, V128UnaryKind::Neg)?
+            }
+            Instr::V128Bitselect => self.lower_v128_bitselect(offset)?,
+            Instr::V128AnyTrue => self.lower_v128_any_true(offset)?,
+            Instr::I8x16AllTrue => self.lower_v128_all_true(offset, LaneShape::I8x16)?,
+            Instr::I8x16Bitmask => self.lower_v128_bitmask(offset, LaneShape::I8x16)?,
+            Instr::I16x8AllTrue => self.lower_v128_all_true(offset, LaneShape::I16x8)?,
+            Instr::I16x8Bitmask => self.lower_v128_bitmask(offset, LaneShape::I16x8)?,
+            Instr::I32x4AllTrue => self.lower_v128_all_true(offset, LaneShape::I32x4)?,
+            Instr::I32x4Bitmask => self.lower_v128_bitmask(offset, LaneShape::I32x4)?,
+            Instr::I64x2AllTrue => self.lower_v128_all_true(offset, LaneShape::I64x2)?,
+            Instr::I64x2Bitmask => self.lower_v128_bitmask(offset, LaneShape::I64x2)?,
+            Instr::I8x16NarrowI16x8S => self.lower_v128_narrow(offset, LaneShape::I8x16, true)?,
+            Instr::I8x16NarrowI16x8U => self.lower_v128_narrow(offset, LaneShape::I8x16, false)?,
+            Instr::I16x8NarrowI32x4S => self.lower_v128_narrow(offset, LaneShape::I16x8, true)?,
+            Instr::I16x8NarrowI32x4U => self.lower_v128_narrow(offset, LaneShape::I16x8, false)?,
+            Instr::I16x8ExtAddPairwiseI8x16S => {
+                self.lower_v128_extadd_pairwise(offset, LaneShape::I8x16, true)?
+            }
+            Instr::I16x8ExtAddPairwiseI8x16U => {
+                self.lower_v128_extadd_pairwise(offset, LaneShape::I8x16, false)?
+            }
+            Instr::I32x4ExtAddPairwiseI16x8S => {
+                self.lower_v128_extadd_pairwise(offset, LaneShape::I16x8, true)?
+            }
+            Instr::I32x4ExtAddPairwiseI16x8U => {
+                self.lower_v128_extadd_pairwise(offset, LaneShape::I16x8, false)?
+            }
+            Instr::I16x8ExtendLowI8x16S => {
+                self.lower_v128_extend(offset, LaneShape::I8x16, false, true)?
+            }
+            Instr::I16x8ExtendHighI8x16S => {
+                self.lower_v128_extend(offset, LaneShape::I8x16, true, true)?
+            }
+            Instr::I16x8ExtendLowI8x16U => {
+                self.lower_v128_extend(offset, LaneShape::I8x16, false, false)?
+            }
+            Instr::I16x8ExtendHighI8x16U => {
+                self.lower_v128_extend(offset, LaneShape::I8x16, true, false)?
+            }
+            Instr::I32x4ExtendLowI16x8S => {
+                self.lower_v128_extend(offset, LaneShape::I16x8, false, true)?
+            }
+            Instr::I32x4ExtendHighI16x8S => {
+                self.lower_v128_extend(offset, LaneShape::I16x8, true, true)?
+            }
+            Instr::I32x4ExtendLowI16x8U => {
+                self.lower_v128_extend(offset, LaneShape::I16x8, false, false)?
+            }
+            Instr::I32x4ExtendHighI16x8U => {
+                self.lower_v128_extend(offset, LaneShape::I16x8, true, false)?
+            }
+            Instr::I64x2ExtendLowI32x4S => {
+                self.lower_v128_extend(offset, LaneShape::I32x4, false, true)?
+            }
+            Instr::I64x2ExtendHighI32x4S => {
+                self.lower_v128_extend(offset, LaneShape::I32x4, true, true)?
+            }
+            Instr::I64x2ExtendLowI32x4U => {
+                self.lower_v128_extend(offset, LaneShape::I32x4, false, false)?
+            }
+            Instr::I64x2ExtendHighI32x4U => {
+                self.lower_v128_extend(offset, LaneShape::I32x4, true, false)?
+            }
+            Instr::I16x8ExtMulLowI8x16S => {
+                self.lower_v128_extmul(offset, LaneShape::I8x16, false, true)?
+            }
+            Instr::I16x8ExtMulHighI8x16S => {
+                self.lower_v128_extmul(offset, LaneShape::I8x16, true, true)?
+            }
+            Instr::I16x8ExtMulLowI8x16U => {
+                self.lower_v128_extmul(offset, LaneShape::I8x16, false, false)?
+            }
+            Instr::I16x8ExtMulHighI8x16U => {
+                self.lower_v128_extmul(offset, LaneShape::I8x16, true, false)?
+            }
+            Instr::I32x4ExtMulLowI16x8S => {
+                self.lower_v128_extmul(offset, LaneShape::I16x8, false, true)?
+            }
+            Instr::I32x4ExtMulHighI16x8S => {
+                self.lower_v128_extmul(offset, LaneShape::I16x8, true, true)?
+            }
+            Instr::I32x4ExtMulLowI16x8U => {
+                self.lower_v128_extmul(offset, LaneShape::I16x8, false, false)?
+            }
+            Instr::I32x4ExtMulHighI16x8U => {
+                self.lower_v128_extmul(offset, LaneShape::I16x8, true, false)?
+            }
+            Instr::I64x2ExtMulLowI32x4S => {
+                self.lower_v128_extmul(offset, LaneShape::I32x4, false, true)?
+            }
+            Instr::I64x2ExtMulHighI32x4S => {
+                self.lower_v128_extmul(offset, LaneShape::I32x4, true, true)?
+            }
+            Instr::I64x2ExtMulLowI32x4U => {
+                self.lower_v128_extmul(offset, LaneShape::I32x4, false, false)?
+            }
+            Instr::I64x2ExtMulHighI32x4U => {
+                self.lower_v128_extmul(offset, LaneShape::I32x4, true, false)?
+            }
+            Instr::I32x4DotI16x8S => self.lower_v128_dot(offset)?,
             instr => {
                 if let Some(op) = unary_op(&instr) {
                     self.lower_unary_op(offset, op)?;
@@ -3585,6 +3793,212 @@ impl<'b> FuncBuilder<'b> {
                 dst,
                 lhs: lhs.reg,
                 rhs: rhs.reg,
+            },
+        );
+        Ok(())
+    }
+
+    fn lower_v128_unary(
+        &mut self,
+        offset: ByteOffset,
+        shape: LaneShape,
+        kind: V128UnaryKind,
+    ) -> Result<(), LowerError> {
+        let v128 = ValType::Vec(crate::types::VecType::V128);
+        let src = self.pop_expect(offset, "simd.unary", v128)?;
+        let dst = self.alloc_reg(v128);
+        self.stack.push(RegValue { reg: dst, ty: v128 });
+        self.emit(
+            offset,
+            RegOp::V128Unary {
+                dst,
+                src: src.reg,
+                shape,
+                kind,
+            },
+        );
+        Ok(())
+    }
+
+    fn lower_v128_extend(
+        &mut self,
+        offset: ByteOffset,
+        src_shape: LaneShape,
+        high: bool,
+        signed: bool,
+    ) -> Result<(), LowerError> {
+        let v128 = ValType::Vec(crate::types::VecType::V128);
+        let src = self.pop_expect(offset, "simd.extend", v128)?;
+        let dst = self.alloc_reg(v128);
+        self.stack.push(RegValue { reg: dst, ty: v128 });
+        self.emit(
+            offset,
+            RegOp::V128Extend {
+                dst,
+                src: src.reg,
+                src_shape,
+                high,
+                signed,
+            },
+        );
+        Ok(())
+    }
+
+    fn lower_v128_extmul(
+        &mut self,
+        offset: ByteOffset,
+        src_shape: LaneShape,
+        high: bool,
+        signed: bool,
+    ) -> Result<(), LowerError> {
+        let v128 = ValType::Vec(crate::types::VecType::V128);
+        let b = self.pop_expect(offset, "simd.extmul", v128)?;
+        let a = self.pop_expect(offset, "simd.extmul", v128)?;
+        let dst = self.alloc_reg(v128);
+        self.stack.push(RegValue { reg: dst, ty: v128 });
+        self.emit(
+            offset,
+            RegOp::V128ExtMul {
+                dst,
+                a: a.reg,
+                b: b.reg,
+                src_shape,
+                high,
+                signed,
+            },
+        );
+        Ok(())
+    }
+
+    fn lower_v128_extadd_pairwise(
+        &mut self,
+        offset: ByteOffset,
+        src_shape: LaneShape,
+        signed: bool,
+    ) -> Result<(), LowerError> {
+        let v128 = ValType::Vec(crate::types::VecType::V128);
+        let src = self.pop_expect(offset, "simd.extadd_pairwise", v128)?;
+        let dst = self.alloc_reg(v128);
+        self.stack.push(RegValue { reg: dst, ty: v128 });
+        self.emit(
+            offset,
+            RegOp::V128ExtAddPairwise {
+                dst,
+                src: src.reg,
+                src_shape,
+                signed,
+            },
+        );
+        Ok(())
+    }
+
+    fn lower_v128_narrow(
+        &mut self,
+        offset: ByteOffset,
+        dst_shape: LaneShape,
+        signed: bool,
+    ) -> Result<(), LowerError> {
+        let v128 = ValType::Vec(crate::types::VecType::V128);
+        let b = self.pop_expect(offset, "simd.narrow", v128)?;
+        let a = self.pop_expect(offset, "simd.narrow", v128)?;
+        let dst = self.alloc_reg(v128);
+        self.stack.push(RegValue { reg: dst, ty: v128 });
+        self.emit(
+            offset,
+            RegOp::V128Narrow {
+                dst,
+                a: a.reg,
+                b: b.reg,
+                dst_shape,
+                signed,
+            },
+        );
+        Ok(())
+    }
+
+    fn lower_v128_dot(&mut self, offset: ByteOffset) -> Result<(), LowerError> {
+        let v128 = ValType::Vec(crate::types::VecType::V128);
+        let b = self.pop_expect(offset, "i32x4.dot_i16x8_s", v128)?;
+        let a = self.pop_expect(offset, "i32x4.dot_i16x8_s", v128)?;
+        let dst = self.alloc_reg(v128);
+        self.stack.push(RegValue { reg: dst, ty: v128 });
+        self.emit(
+            offset,
+            RegOp::V128Dot {
+                dst,
+                a: a.reg,
+                b: b.reg,
+            },
+        );
+        Ok(())
+    }
+
+    fn lower_v128_bitselect(&mut self, offset: ByteOffset) -> Result<(), LowerError> {
+        let v128 = ValType::Vec(crate::types::VecType::V128);
+        let mask = self.pop_expect(offset, "v128.bitselect", v128)?;
+        let b = self.pop_expect(offset, "v128.bitselect", v128)?;
+        let a = self.pop_expect(offset, "v128.bitselect", v128)?;
+        let dst = self.alloc_reg(v128);
+        self.stack.push(RegValue { reg: dst, ty: v128 });
+        self.emit(
+            offset,
+            RegOp::V128Bitselect {
+                dst,
+                a: a.reg,
+                b: b.reg,
+                mask: mask.reg,
+            },
+        );
+        Ok(())
+    }
+
+    fn lower_v128_any_true(&mut self, offset: ByteOffset) -> Result<(), LowerError> {
+        let v128 = ValType::Vec(crate::types::VecType::V128);
+        let src = self.pop_expect(offset, "v128.any_true", v128)?;
+        let ty = ValType::Num(crate::types::NumType::I32);
+        let dst = self.alloc_reg(ty);
+        self.stack.push(RegValue { reg: dst, ty });
+        self.emit(offset, RegOp::V128AnyTrue { dst, src: src.reg });
+        Ok(())
+    }
+
+    fn lower_v128_all_true(
+        &mut self,
+        offset: ByteOffset,
+        shape: LaneShape,
+    ) -> Result<(), LowerError> {
+        let v128 = ValType::Vec(crate::types::VecType::V128);
+        let src = self.pop_expect(offset, "simd.all_true", v128)?;
+        let ty = ValType::Num(crate::types::NumType::I32);
+        let dst = self.alloc_reg(ty);
+        self.stack.push(RegValue { reg: dst, ty });
+        self.emit(
+            offset,
+            RegOp::V128AllTrue {
+                dst,
+                src: src.reg,
+                shape,
+            },
+        );
+        Ok(())
+    }
+
+    fn lower_v128_bitmask(
+        &mut self,
+        offset: ByteOffset,
+        shape: LaneShape,
+    ) -> Result<(), LowerError> {
+        let v128 = ValType::Vec(crate::types::VecType::V128);
+        let src = self.pop_expect(offset, "simd.bitmask", v128)?;
+        let ty = ValType::Num(crate::types::NumType::I32);
+        let dst = self.alloc_reg(ty);
+        self.stack.push(RegValue { reg: dst, ty });
+        self.emit(
+            offset,
+            RegOp::V128Bitmask {
+                dst,
+                src: src.reg,
+                shape,
             },
         );
         Ok(())

@@ -22,7 +22,8 @@ pub use host::{HostFunction, link_func};
 pub use store::{Imports, LinkGroup, PAGE_SIZE, Store};
 
 use crate::lower::{
-    BinaryOp, LaneShape, Reg, RegFunc, RegInstr, RegModule, RegOp, RegTerm, UnaryOp, V128BinaryKind,
+    BinaryOp, LaneShape, Reg, RegFunc, RegInstr, RegModule, RegOp, RegTerm, UnaryOp,
+    V128BinaryKind, V128UnaryKind,
 };
 use crate::types::{FuncIdx, MemArg, NumType, RefType, TableIdx, ValType};
 
@@ -1588,6 +1589,136 @@ fn execute_reg_op(
             }
             set_reg(registers, *dst, Value::V128(out))?;
         }
+        RegOp::V128Unary {
+            dst,
+            src,
+            shape,
+            kind,
+        } => {
+            let Value::V128(bytes) = get_reg(registers, *src)? else {
+                return Err(type_mismatch_v128(registers, *src));
+            };
+            let mut out = [0u8; 16];
+            v128_unary(*shape, *kind, &mut out, &bytes);
+            set_reg(registers, *dst, Value::V128(out))?;
+        }
+        RegOp::V128Extend {
+            dst,
+            src,
+            src_shape,
+            high,
+            signed,
+        } => {
+            let Value::V128(bytes) = get_reg(registers, *src)? else {
+                return Err(type_mismatch_v128(registers, *src));
+            };
+            let mut out = [0u8; 16];
+            v128_extend(*src_shape, *high, *signed, &mut out, &bytes);
+            set_reg(registers, *dst, Value::V128(out))?;
+        }
+        RegOp::V128ExtMul {
+            dst,
+            a,
+            b,
+            src_shape,
+            high,
+            signed,
+        } => {
+            let (Value::V128(a_bytes), Value::V128(b_bytes)) =
+                (get_reg(registers, *a)?, get_reg(registers, *b)?)
+            else {
+                return Err(type_mismatch_v128(registers, *a));
+            };
+            let mut out = [0u8; 16];
+            v128_extmul(*src_shape, *high, *signed, &mut out, &a_bytes, &b_bytes);
+            set_reg(registers, *dst, Value::V128(out))?;
+        }
+        RegOp::V128ExtAddPairwise {
+            dst,
+            src,
+            src_shape,
+            signed,
+        } => {
+            let Value::V128(bytes) = get_reg(registers, *src)? else {
+                return Err(type_mismatch_v128(registers, *src));
+            };
+            let mut out = [0u8; 16];
+            v128_extadd_pairwise(*src_shape, *signed, &mut out, &bytes);
+            set_reg(registers, *dst, Value::V128(out))?;
+        }
+        RegOp::V128Narrow {
+            dst,
+            a,
+            b,
+            dst_shape,
+            signed,
+        } => {
+            let (Value::V128(a_bytes), Value::V128(b_bytes)) =
+                (get_reg(registers, *a)?, get_reg(registers, *b)?)
+            else {
+                return Err(type_mismatch_v128(registers, *a));
+            };
+            let mut out = [0u8; 16];
+            v128_narrow(*dst_shape, *signed, &mut out, &a_bytes, &b_bytes);
+            set_reg(registers, *dst, Value::V128(out))?;
+        }
+        RegOp::V128Dot { dst, a, b } => {
+            let (Value::V128(a_bytes), Value::V128(b_bytes)) =
+                (get_reg(registers, *a)?, get_reg(registers, *b)?)
+            else {
+                return Err(type_mismatch_v128(registers, *a));
+            };
+            let mut out = [0u8; 16];
+            v128_dot(&mut out, &a_bytes, &b_bytes);
+            set_reg(registers, *dst, Value::V128(out))?;
+        }
+        RegOp::V128Bitselect { dst, a, b, mask } => {
+            let (Value::V128(a), Value::V128(b), Value::V128(m)) = (
+                get_reg(registers, *a)?,
+                get_reg(registers, *b)?,
+                get_reg(registers, *mask)?,
+            ) else {
+                return Err(type_mismatch_v128(registers, *mask));
+            };
+            let mut out = [0u8; 16];
+            for i in 0..16 {
+                out[i] = (a[i] & m[i]) | (b[i] & !m[i]);
+            }
+            set_reg(registers, *dst, Value::V128(out))?;
+        }
+        RegOp::V128AnyTrue { dst, src } => {
+            let Value::V128(bytes) = get_reg(registers, *src)? else {
+                return Err(type_mismatch_v128(registers, *src));
+            };
+            set_reg(
+                registers,
+                *dst,
+                Value::I32(if bytes.iter().any(|&b| b != 0) { 1 } else { 0 }),
+            )?;
+        }
+        RegOp::V128AllTrue { dst, src, shape } => {
+            let Value::V128(bytes) = get_reg(registers, *src)? else {
+                return Err(type_mismatch_v128(registers, *src));
+            };
+            let width = shape.lane_width();
+            let all = bytes
+                .chunks_exact(width)
+                .all(|lane| lane.iter().any(|&b| b != 0));
+            set_reg(registers, *dst, Value::I32(if all { 1 } else { 0 }))?;
+        }
+        RegOp::V128Bitmask { dst, src, shape } => {
+            let Value::V128(bytes) = get_reg(registers, *src)? else {
+                return Err(type_mismatch_v128(registers, *src));
+            };
+            let width = shape.lane_width();
+            let mut bits = 0u32;
+            for (i, lane) in bytes.chunks_exact(width).enumerate() {
+                if lane[width - 1] & 0x80 != 0 {
+                    bits |= 1 << i;
+                }
+            }
+            set_reg(registers, *dst, Value::I32(bits as i32))?;
+        }
     }
     Ok(())
 }
@@ -2023,6 +2154,280 @@ fn uses_unsigned_view(kind: V128BinaryKind) -> bool {
             | V128BinaryKind::MaxU
             | V128BinaryKind::AvgrU
     )
+}
+
+/// Lane-wise integer unary. abs/neg WRAP on the type's MIN value
+/// (spec: i8x16.abs(-128) = -128).
+fn v128_unary(shape: LaneShape, kind: V128UnaryKind, dst: &mut [u8], src: &[u8]) {
+    match shape {
+        LaneShape::I8x16 => {
+            for (d, s) in dst.iter_mut().zip(src.iter()) {
+                *d = match kind {
+                    V128UnaryKind::Abs => (*s as i8).wrapping_abs() as u8,
+                    V128UnaryKind::Neg => (*s as i8).wrapping_neg() as u8,
+                    V128UnaryKind::Popcnt => s.count_ones() as u8,
+                };
+            }
+        }
+        LaneShape::I16x8 => {
+            for (d, s) in dst.chunks_exact_mut(2).zip(src.chunks_exact(2)) {
+                let v = i16::from_le_bytes(s.try_into().expect("width"));
+                let r = match kind {
+                    V128UnaryKind::Abs => v.wrapping_abs(),
+                    V128UnaryKind::Neg => v.wrapping_neg(),
+                    V128UnaryKind::Popcnt => unreachable!("no i16x8 popcnt"),
+                };
+                d.copy_from_slice(&r.to_le_bytes());
+            }
+        }
+        LaneShape::I32x4 => {
+            for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+                let v = i32::from_le_bytes(s.try_into().expect("width"));
+                let r = match kind {
+                    V128UnaryKind::Abs => v.wrapping_abs(),
+                    V128UnaryKind::Neg => v.wrapping_neg(),
+                    V128UnaryKind::Popcnt => unreachable!("no i32x4 popcnt"),
+                };
+                d.copy_from_slice(&r.to_le_bytes());
+            }
+        }
+        LaneShape::I64x2 => {
+            for (d, s) in dst.chunks_exact_mut(8).zip(src.chunks_exact(8)) {
+                let v = i64::from_le_bytes(s.try_into().expect("width"));
+                let r = match kind {
+                    V128UnaryKind::Abs => v.wrapping_abs(),
+                    V128UnaryKind::Neg => v.wrapping_neg(),
+                    V128UnaryKind::Popcnt => unreachable!("no i64x2 popcnt"),
+                };
+                d.copy_from_slice(&r.to_le_bytes());
+            }
+        }
+        LaneShape::F32x4 | LaneShape::F64x2 => unreachable!("float unary is a later unit"),
+    }
+}
+
+/// Widen `src`'s selected half to double lane width. Dst shape is
+/// implied: I8x16→I16x8, I16x8→I32x4, I32x4→I64x2.
+fn v128_extend(src_shape: LaneShape, high: bool, signed: bool, dst: &mut [u8], src: &[u8]) {
+    match src_shape {
+        LaneShape::I8x16 => {
+            let half: &[u8] = if high { &src[8..] } else { &src[..8] };
+            for (d, s) in dst.chunks_exact_mut(2).zip(half.iter()) {
+                let lane: u16 = if signed {
+                    (*s as i8) as i16 as u16
+                } else {
+                    *s as u16
+                };
+                d.copy_from_slice(&lane.to_le_bytes());
+            }
+        }
+        LaneShape::I16x8 => {
+            let half: &[u8] = if high { &src[8..] } else { &src[..8] };
+            for (d, s) in dst.chunks_exact_mut(4).zip(half.chunks_exact(2)) {
+                let v = i16::from_le_bytes(s.try_into().expect("width"));
+                let lane: u32 = if signed {
+                    v as i32 as u32
+                } else {
+                    v as u16 as u32
+                };
+                d.copy_from_slice(&lane.to_le_bytes());
+            }
+        }
+        LaneShape::I32x4 => {
+            let half: &[u8] = if high { &src[8..] } else { &src[..8] };
+            for (d, s) in dst.chunks_exact_mut(8).zip(half.chunks_exact(4)) {
+                let v = i32::from_le_bytes(s.try_into().expect("width"));
+                let lane: u64 = if signed {
+                    v as i64 as u64
+                } else {
+                    v as u32 as u64
+                };
+                d.copy_from_slice(&lane.to_le_bytes());
+            }
+        }
+        _ => unreachable!("extend widens i8x16/i16x8/i32x4 only"),
+    }
+}
+
+/// Extended multiply: widen the selected half of both operands, then
+/// multiply lane-wise in double width.
+#[allow(clippy::unnecessary_cast)]
+fn v128_extmul(src_shape: LaneShape, high: bool, signed: bool, dst: &mut [u8], a: &[u8], b: &[u8]) {
+    match src_shape {
+        LaneShape::I8x16 => {
+            let (a_half, b_half): (&[u8], &[u8]) = if high {
+                (&a[8..], &b[8..])
+            } else {
+                (&a[..8], &b[..8])
+            };
+            for ((d, x), y) in dst
+                .chunks_exact_mut(2)
+                .zip(a_half.iter())
+                .zip(b_half.iter())
+            {
+                let product: i32 = if signed {
+                    (*x as i8 as i16 as i32) * (*y as i8 as i16 as i32)
+                } else {
+                    (*x as u8 as u16 as i32) * (*y as u8 as u16 as i32)
+                };
+                d.copy_from_slice(&(product as i16).to_le_bytes());
+            }
+        }
+        LaneShape::I16x8 => {
+            let (a_half, b_half): (&[u8], &[u8]) = if high {
+                (&a[8..], &b[8..])
+            } else {
+                (&a[..8], &b[..8])
+            };
+            for ((d, x), y) in dst
+                .chunks_exact_mut(4)
+                .zip(a_half.chunks_exact(2))
+                .zip(b_half.chunks_exact(2))
+            {
+                let x = i16::from_le_bytes(x.try_into().expect("width"));
+                let y = i16::from_le_bytes(y.try_into().expect("width"));
+                let product: i64 = if signed {
+                    (x as i32 as i64) * (y as i32 as i64)
+                } else {
+                    (x as u16 as u32 as i64) * (y as u16 as u32 as i64)
+                };
+                d.copy_from_slice(&(product as i32).to_le_bytes());
+            }
+        }
+        LaneShape::I32x4 => {
+            let (a_half, b_half): (&[u8], &[u8]) = if high {
+                (&a[8..], &b[8..])
+            } else {
+                (&a[..8], &b[..8])
+            };
+            for ((d, x), y) in dst
+                .chunks_exact_mut(8)
+                .zip(a_half.chunks_exact(4))
+                .zip(b_half.chunks_exact(4))
+            {
+                let x = i32::from_le_bytes(x.try_into().expect("width"));
+                let y = i32::from_le_bytes(y.try_into().expect("width"));
+                let product: i128 = if signed {
+                    (x as i64 as i128) * (y as i64 as i128)
+                } else {
+                    (x as u32 as u64 as i128) * (y as u32 as u64 as i128)
+                };
+                d.copy_from_slice(&(product as i64).to_le_bytes());
+            }
+        }
+        _ => unreachable!("extmul widens i8x16/i16x8/i32x4 only"),
+    }
+}
+
+/// Pairwise sum of adjacent lanes, doubling width. Never overflows the
+/// wider lane.
+#[allow(clippy::unnecessary_cast)]
+fn v128_extadd_pairwise(src_shape: LaneShape, signed: bool, dst: &mut [u8], src: &[u8]) {
+    match src_shape {
+        LaneShape::I8x16 => {
+            for (d, pair) in dst.chunks_exact_mut(2).zip(src.chunks_exact(2)) {
+                let sum: i32 = if signed {
+                    (pair[0] as i8 as i16 as i32) + (pair[1] as i8 as i16 as i32)
+                } else {
+                    (pair[0] as u8 as u16 as i32) + (pair[1] as u8 as u16 as i32)
+                };
+                d.copy_from_slice(&(sum as i16).to_le_bytes());
+            }
+        }
+        LaneShape::I16x8 => {
+            for (d, pair) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+                let (x, y) = (
+                    i16::from_le_bytes(pair[..2].try_into().expect("width")),
+                    i16::from_le_bytes(pair[2..].try_into().expect("width")),
+                );
+                let sum: i64 = if signed {
+                    (x as i32 as i64) + (y as i32 as i64)
+                } else {
+                    (x as u16 as u32 as i64) + (y as u16 as u32 as i64)
+                };
+                d.copy_from_slice(&(sum as i32).to_le_bytes());
+            }
+        }
+        _ => unreachable!("extadd_pairwise widens i8x16/i16x8 only"),
+    }
+}
+
+/// Saturating narrow: a's lanes → dst low half, b's lanes → dst high
+/// half. `_s` saturates to the signed range; `_u` clamps negatives to 0
+/// and saturates at the unsigned max (operating on the SIGNED source
+/// value).
+#[allow(clippy::unnecessary_cast)]
+fn v128_narrow(dst_shape: LaneShape, signed: bool, dst: &mut [u8], a: &[u8], b: &[u8]) {
+    let (dst_w, src_w) = match dst_shape {
+        LaneShape::I8x16 => (1usize, 2usize),
+        LaneShape::I16x8 => (2usize, 4usize),
+        _ => unreachable!("narrow halves width only"),
+    };
+    let mid = 16 / 2;
+    for (d, s) in dst[..mid]
+        .chunks_exact_mut(dst_w)
+        .zip(a.chunks_exact(src_w))
+    {
+        let v = match src_w {
+            2 => i16::from_le_bytes(s.try_into().expect("width")) as i32,
+            _ => i32::from_le_bytes(s.try_into().expect("width")),
+        };
+        let out = if signed {
+            v.clamp(
+                (-(1i32 << (dst_w * 8 - 1))) as i32,
+                (1i32 << (dst_w * 8 - 1)) - 1,
+            )
+        } else {
+            v.clamp(0, (1i32 << (dst_w * 8)) - 1)
+        };
+        d.copy_from_slice(&(out as u16).to_le_bytes()[..dst_w]);
+    }
+    for (d, s) in dst[mid..]
+        .chunks_exact_mut(dst_w)
+        .zip(b.chunks_exact(src_w))
+    {
+        let v = match src_w {
+            2 => i16::from_le_bytes(s.try_into().expect("width")) as i32,
+            _ => i32::from_le_bytes(s.try_into().expect("width")),
+        };
+        let out = if signed {
+            v.clamp(
+                (-(1i32 << (dst_w * 8 - 1))) as i32,
+                (1i32 << (dst_w * 8 - 1)) - 1,
+            )
+        } else {
+            v.clamp(0, (1i32 << (dst_w * 8)) - 1)
+        };
+        d.copy_from_slice(&(out as u16).to_le_bytes()[..dst_w]);
+    }
+}
+
+/// i32x4.dot_i16x8_s: dst lane i = a[2i]·b[2i] + a[2i+1]·b[2i+1] on
+/// SIGNED i16 lanes, products and sum WRAPPING at i32 (2·(−32768)²
+/// wraps to i32::MIN per spec).
+fn v128_dot(dst: &mut [u8], a: &[u8], b: &[u8]) {
+    for (d, i) in dst.chunks_exact_mut(4).zip(0..4usize) {
+        let lane = |bytes: &[u8], idx: usize| {
+            i16::from_le_bytes(bytes[idx * 2..idx * 2 + 2].try_into().expect("width")) as i32
+        };
+        let acc = lane(a, 2 * i)
+            .wrapping_mul(lane(b, 2 * i))
+            .wrapping_add(lane(a, 2 * i + 1).wrapping_mul(lane(b, 2 * i + 1)));
+        d.copy_from_slice(&acc.to_le_bytes());
+    }
+}
+
+fn type_mismatch_v128(registers: &[Option<Value>], reg: Reg) -> RuntimeError {
+    let found = match get_reg(registers, reg) {
+        Ok(value) => value.val_type(),
+        Err(error) => return error,
+    };
+    RuntimeError {
+        kind: RuntimeErrorKind::TypeMismatch {
+            expected: ValType::Vec(crate::types::VecType::V128),
+            found,
+        },
+    }
 }
 
 fn set_reg(registers: &mut [Option<Value>], reg: Reg, value: Value) -> Result<(), RuntimeError> {

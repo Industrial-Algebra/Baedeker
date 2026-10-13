@@ -2271,6 +2271,104 @@ fn validate_instr(
             ValType::Vec(crate::types::VecType::V128),
             ValType::Vec(crate::types::VecType::V128),
         )?,
+        Instr::I8x16Abs
+        | Instr::I8x16Neg
+        | Instr::I8x16Popcnt
+        | Instr::I16x8Abs
+        | Instr::I16x8Neg
+        | Instr::I32x4Abs
+        | Instr::I32x4Neg
+        | Instr::I64x2Abs
+        | Instr::I64x2Neg
+        | Instr::I16x8ExtAddPairwiseI8x16S
+        | Instr::I16x8ExtAddPairwiseI8x16U
+        | Instr::I32x4ExtAddPairwiseI16x8S
+        | Instr::I32x4ExtAddPairwiseI16x8U
+        | Instr::I16x8ExtendLowI8x16S
+        | Instr::I16x8ExtendHighI8x16S
+        | Instr::I16x8ExtendLowI8x16U
+        | Instr::I16x8ExtendHighI8x16U
+        | Instr::I32x4ExtendLowI16x8S
+        | Instr::I32x4ExtendHighI16x8S
+        | Instr::I32x4ExtendLowI16x8U
+        | Instr::I32x4ExtendHighI16x8U
+        | Instr::I64x2ExtendLowI32x4S
+        | Instr::I64x2ExtendHighI32x4S
+        | Instr::I64x2ExtendLowI32x4U
+        | Instr::I64x2ExtendHighI32x4U => validate_numeric_unary(
+            function,
+            state,
+            offset,
+            "simd.unary",
+            ValType::Vec(crate::types::VecType::V128),
+            ValType::Vec(crate::types::VecType::V128),
+        )?,
+        Instr::I8x16NarrowI16x8S
+        | Instr::I8x16NarrowI16x8U
+        | Instr::I16x8NarrowI32x4S
+        | Instr::I16x8NarrowI32x4U
+        | Instr::I16x8ExtMulLowI8x16S
+        | Instr::I16x8ExtMulHighI8x16S
+        | Instr::I16x8ExtMulLowI8x16U
+        | Instr::I16x8ExtMulHighI8x16U
+        | Instr::I32x4ExtMulLowI16x8S
+        | Instr::I32x4ExtMulHighI16x8S
+        | Instr::I32x4ExtMulLowI16x8U
+        | Instr::I32x4ExtMulHighI16x8U
+        | Instr::I64x2ExtMulLowI32x4S
+        | Instr::I64x2ExtMulHighI32x4S
+        | Instr::I64x2ExtMulLowI32x4U
+        | Instr::I64x2ExtMulHighI32x4U
+        | Instr::I32x4DotI16x8S => validate_numeric_binary(
+            function,
+            state,
+            offset,
+            "simd.extmul",
+            ValType::Vec(crate::types::VecType::V128),
+            ValType::Vec(crate::types::VecType::V128),
+        )?,
+        Instr::V128Bitselect => {
+            pop_expect(
+                function,
+                state,
+                ValType::Vec(crate::types::VecType::V128),
+                offset,
+                "v128.bitselect",
+            )?;
+            pop_expect(
+                function,
+                state,
+                ValType::Vec(crate::types::VecType::V128),
+                offset,
+                "v128.bitselect",
+            )?;
+            pop_expect(
+                function,
+                state,
+                ValType::Vec(crate::types::VecType::V128),
+                offset,
+                "v128.bitselect",
+            )?;
+            state
+                .operands
+                .push(ValType::Vec(crate::types::VecType::V128));
+        }
+        Instr::V128AnyTrue
+        | Instr::I8x16AllTrue
+        | Instr::I16x8AllTrue
+        | Instr::I32x4AllTrue
+        | Instr::I64x2AllTrue
+        | Instr::I8x16Bitmask
+        | Instr::I16x8Bitmask
+        | Instr::I32x4Bitmask
+        | Instr::I64x2Bitmask => validate_numeric_unary(
+            function,
+            state,
+            offset,
+            "simd.test",
+            ValType::Vec(crate::types::VecType::V128),
+            ValType::Num(crate::types::NumType::I32),
+        )?,
         Instr::I32Eqz => validate_numeric_unary(
             function,
             state,
