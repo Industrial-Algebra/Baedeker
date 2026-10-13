@@ -278,23 +278,7 @@ fn execute_call_indirect(
     let store = store.ok_or(RuntimeError {
         kind: RuntimeErrorKind::MissingStore,
     })?;
-    let target = store
-        .with_table(table.0, |table| table.get(idx))
-        .ok_or(RuntimeError {
-            kind: RuntimeErrorKind::UnknownTable { table: table.0 },
-        })?
-        .ok_or(trap(RuntimeTrap::UndefinedElement))?;
-    let Value::FuncRef(func_idx) = target else {
-        return Err(RuntimeError {
-            kind: RuntimeErrorKind::TypeMismatch {
-                expected: ValType::Ref(RefType::FuncRef),
-                found: target.val_type(),
-            },
-        });
-    };
-    let Some((instance_id, func_idx)) = func_idx else {
-        return Err(trap(RuntimeTrap::UninitializedElement));
-    };
+    let (instance_id, func_idx) = table_lookup_target(Some(store), table, idx)?;
     execute_funcref(
         module,
         store,
@@ -486,6 +470,147 @@ pub fn execute_func(func: &RegFunc, args: &[Value]) -> Result<Vec<Value>, Runtim
     execute_func_in(None, None, func, args, 0)
 }
 
+/// A resolved tail-call target: `Defined` transfers control to a
+/// same-instance function at the current depth (trampoline hop); `Ready`
+/// carries the final results (host target, or cross-instance delegation
+/// which recurses depth + 1 as before).
+enum TailTarget<'a> {
+    Defined(&'a RegFunc),
+    Ready(Vec<Value>),
+}
+
+/// Resolve a direct `return_call` target. Direct indices are module-local,
+/// so the target is either a host import (dispatched immediately) or a
+/// same-instance defined function (trampoline hop).
+fn resolve_tail_direct<'a>(
+    module: Option<&'a RegModule>,
+    store: Option<&Store>,
+    callee_idx: &FuncIdx,
+    call_args: &[Value],
+) -> Result<TailTarget<'a>, RuntimeError> {
+    let module = module.ok_or(RuntimeError {
+        kind: RuntimeErrorKind::UnknownFunction { func: callee_idx.0 },
+    })?;
+    if callee_idx.0 < module.imported_func_count {
+        // Tail call to an imported function: dispatch to the host; its
+        // results are the tail-call results.
+        let store = store.ok_or(RuntimeError {
+            kind: RuntimeErrorKind::MissingStore,
+        })?;
+        return Ok(TailTarget::Ready(store.call_host(callee_idx.0, call_args)?));
+    }
+    let callee = module
+        .funcs
+        .iter()
+        .find(|func| func.idx == *callee_idx)
+        .ok_or(RuntimeError {
+            kind: RuntimeErrorKind::UnknownFunction { func: callee_idx.0 },
+        })?;
+    Ok(TailTarget::Defined(callee))
+}
+
+/// Resolve an indirect/ref tail-call target. Host targets and cross-instance
+/// targets are executed immediately (results in `Ready`); same-instance
+/// defined targets transfer via the trampoline (`Defined`).
+#[allow(clippy::too_many_arguments)]
+fn resolve_tail_funcref<'a>(
+    module: Option<&'a RegModule>,
+    store: Option<&Store>,
+    type_idx: &crate::types::TypeIdx,
+    instance_id: u32,
+    func_idx: u32,
+    call_args: &[Value],
+    depth: usize,
+) -> Result<TailTarget<'a>, RuntimeError> {
+    let module = module.ok_or(RuntimeError {
+        kind: RuntimeErrorKind::UnknownFunction { func: 0 },
+    })?;
+    let store = store.ok_or(RuntimeError {
+        kind: RuntimeErrorKind::MissingStore,
+    })?;
+    if instance_id != store.instance_id() {
+        // Cross-instance tail target: delegate to the existing funcref path
+        // (structural type check against the remote module, depth + 1).
+        let results = execute_funcref(
+            module,
+            store,
+            type_idx,
+            instance_id,
+            func_idx,
+            call_args,
+            depth,
+        )?;
+        return Ok(TailTarget::Ready(results));
+    }
+    // Same instance: structural type check first (mirrors `execute_funcref`).
+    let expected = module.types.get(type_idx.0 as usize).ok_or(RuntimeError {
+        kind: RuntimeErrorKind::UnknownType {
+            type_idx: type_idx.0,
+        },
+    })?;
+    if func_idx < module.imported_func_count {
+        let import_ty = &module
+            .imported_funcs
+            .get(func_idx as usize)
+            .ok_or(RuntimeError {
+                kind: RuntimeErrorKind::UnknownFunction { func: func_idx },
+            })?
+            .ty;
+        if expected != import_ty {
+            return Err(trap(RuntimeTrap::IndirectCallTypeMismatch));
+        }
+        return Ok(TailTarget::Ready(store.call_host(func_idx, call_args)?));
+    }
+    let callee = module
+        .funcs
+        .iter()
+        .find(|func| func.idx.0 == func_idx)
+        .ok_or(RuntimeError {
+            kind: RuntimeErrorKind::UnknownFunction { func: func_idx },
+        })?;
+    let actual = module
+        .types
+        .get(callee.type_idx.0 as usize)
+        .ok_or(RuntimeError {
+            kind: RuntimeErrorKind::UnknownType {
+                type_idx: callee.type_idx.0,
+            },
+        })?;
+    if expected != actual {
+        return Err(trap(RuntimeTrap::IndirectCallTypeMismatch));
+    }
+    Ok(TailTarget::Defined(callee))
+}
+
+/// Look up an indirect-call target in a table: `(instance_id, func_idx)`.
+fn table_lookup_target(
+    store: Option<&Store>,
+    table: &TableIdx,
+    idx: u32,
+) -> Result<(u32, u32), RuntimeError> {
+    let store = store.ok_or(RuntimeError {
+        kind: RuntimeErrorKind::MissingStore,
+    })?;
+    let target = store
+        .with_table(table.0, |table| table.get(idx))
+        .ok_or(RuntimeError {
+            kind: RuntimeErrorKind::UnknownTable { table: table.0 },
+        })?
+        .ok_or(trap(RuntimeTrap::UndefinedElement))?;
+    let Value::FuncRef(func_idx) = target else {
+        return Err(RuntimeError {
+            kind: RuntimeErrorKind::TypeMismatch {
+                expected: ValType::Ref(RefType::FuncRef),
+                found: target.val_type(),
+            },
+        });
+    };
+    let Some((instance_id, func_idx)) = func_idx else {
+        return Err(trap(RuntimeTrap::UninitializedElement));
+    };
+    Ok((instance_id, func_idx))
+}
+
 /// Execute a function with optional module context for resolving `call`
 /// targets and optional store context for memory/global access, tracking
 /// recursion depth for stack exhaustion.
@@ -499,82 +624,82 @@ pub(crate) fn execute_func_in(
     if depth >= MAX_CALL_DEPTH {
         return Err(trap(RuntimeTrap::CallStackExhausted));
     }
-    if args.len() != func.params.len() {
-        return Err(RuntimeError {
-            kind: RuntimeErrorKind::ArityMismatch {
-                expected: func.params.len(),
-                found: args.len(),
-            },
-        });
-    }
 
-    for (&arg, &expected) in args.iter().zip(func.params.iter()) {
-        if !value_satisfies(expected, arg) {
+    // Tail-call trampoline: `return_call*` terminators replace the current
+    // frame at the same depth instead of recursing, keeping tail recursion
+    // stack-safe. `func`/`args` are reassigned per hop; `module`/`store`
+    // stay fixed — cross-instance tail targets delegate through
+    // `resolve_tail_funcref` with depth + 1 (correct, depth-bounded).
+    let mut func = func;
+    let mut owned_args: Vec<Value> = Vec::new();
+    let mut use_owned_args = false;
+    // Backstop against true infinite loops when no fuel budget is set (the
+    // coarse guard predates configurable fuel; with fuel, exhaustion is the
+    // honest `FuelExhausted` error instead of `MissingReturn`). The cap
+    // spans tail hops: an unbounded no-fuel tail loop is still bounded.
+    let max_iterations = 10_000_000;
+    let mut iteration: usize = 0;
+
+    'tail: loop {
+        let args: &[Value] = if use_owned_args { &owned_args } else { args };
+        if args.len() != func.params.len() {
             return Err(RuntimeError {
-                kind: RuntimeErrorKind::TypeMismatch {
-                    expected,
-                    found: arg.val_type(),
+                kind: RuntimeErrorKind::ArityMismatch {
+                    expected: func.params.len(),
+                    found: args.len(),
                 },
             });
         }
-    }
 
-    let mut locals = alloc::vec![None; func.locals.len()];
-    for (idx, &arg) in args.iter().enumerate() {
-        locals[idx] = Some(arg);
-    }
-    // Non-parameter locals are zero-initialized per spec (null for
-    // nullable references).
-    for (slot, &ty) in locals.iter_mut().zip(func.locals.iter()).skip(args.len()) {
-        if slot.is_none() {
-            *slot = match ty {
-                ValType::Num(NumType::I32) => Some(Value::I32(0)),
-                ValType::Num(NumType::I64) => Some(Value::I64(0)),
-                ValType::Num(NumType::F32) => Some(Value::F32(0.0)),
-                ValType::Num(NumType::F64) => Some(Value::F64(0.0)),
-                ValType::Ref(ref_type) if ref_nullable(&ref_type) => {
-                    Some(ref_null_value(&ref_type))
-                }
-                ValType::Vec(_) => Some(Value::V128([0; 16])),
-                _ => None,
-            };
+        for (&arg, &expected) in args.iter().zip(func.params.iter()) {
+            if !value_satisfies(expected, arg) {
+                return Err(RuntimeError {
+                    kind: RuntimeErrorKind::TypeMismatch {
+                        expected,
+                        found: arg.val_type(),
+                    },
+                });
+            }
         }
-    }
 
-    let mut registers = alloc::vec![None; func.reg_types.len()];
+        let mut locals = alloc::vec![None; func.locals.len()];
+        for (idx, &arg) in args.iter().enumerate() {
+            locals[idx] = Some(arg);
+        }
+        // Non-parameter locals are zero-initialized per spec (null for
+        // nullable references).
+        for (slot, &ty) in locals.iter_mut().zip(func.locals.iter()).skip(args.len()) {
+            if slot.is_none() {
+                *slot = match ty {
+                    ValType::Num(NumType::I32) => Some(Value::I32(0)),
+                    ValType::Num(NumType::I64) => Some(Value::I64(0)),
+                    ValType::Num(NumType::F32) => Some(Value::F32(0.0)),
+                    ValType::Num(NumType::F64) => Some(Value::F64(0.0)),
+                    ValType::Ref(ref_type) if ref_nullable(&ref_type) => {
+                        Some(ref_null_value(&ref_type))
+                    }
+                    ValType::Vec(_) => Some(Value::V128([0; 16])),
+                    _ => None,
+                };
+            }
+        }
 
-    if func.blocks.is_empty() {
-        return Err(RuntimeError {
-            kind: RuntimeErrorKind::MissingReturn,
-        });
-    }
+        let mut registers = alloc::vec![None; func.reg_types.len()];
 
-    let mut block_idx: u32 = 0;
-    // Backstop against true infinite loops when no fuel budget is set (the
-    // coarse guard predates configurable fuel; with fuel, exhaustion is the
-    // honest `FuelExhausted` error instead of `MissingReturn`).
-    let max_iterations = 10_000_000;
-    let mut iteration: usize = 0;
-    loop {
-        iteration += 1;
-        if iteration > max_iterations {
+        if func.blocks.is_empty() {
             return Err(RuntimeError {
                 kind: RuntimeErrorKind::MissingReturn,
             });
         }
-        if let Some(store) = store
-            && !store.charge_fuel()
-        {
-            return Err(RuntimeError {
-                kind: RuntimeErrorKind::FuelExhausted,
-            });
-        }
-        let block = func.blocks.get(block_idx as usize).ok_or(RuntimeError {
-            kind: RuntimeErrorKind::MissingReturn,
-        })?;
 
-        // Execute straight-line instructions in this block
-        for instr in &block.instrs {
+        let mut block_idx: u32 = 0;
+        loop {
+            iteration += 1;
+            if iteration > max_iterations {
+                return Err(RuntimeError {
+                    kind: RuntimeErrorKind::MissingReturn,
+                });
+            }
             if let Some(store) = store
                 && !store.charge_fuel()
             {
@@ -582,155 +707,257 @@ pub(crate) fn execute_func_in(
                     kind: RuntimeErrorKind::FuelExhausted,
                 });
             }
-            if let RegOp::Call {
-                func: callee_idx,
-                args: arg_regs,
-                results,
-            } = &instr.op
-            {
-                let call_args = arg_regs
-                    .iter()
-                    .map(|&reg| get_reg(&registers, reg))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let returned = execute_call(module, store, callee_idx, &call_args, depth)?;
-                for (&dst, value) in results.iter().zip(returned) {
-                    set_reg(&mut registers, dst, value)?;
-                }
-            } else if let RegOp::CallIndirect {
-                type_idx,
-                table,
-                index,
-                args: arg_regs,
-                results,
-            } = &instr.op
-            {
-                let idx = expect_addr(get_reg(&registers, *index)?)?;
-                let call_args = arg_regs
-                    .iter()
-                    .map(|&reg| get_reg(&registers, reg))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let returned =
-                    execute_call_indirect(module, store, type_idx, table, idx, &call_args, depth)?;
-                for (&dst, value) in results.iter().zip(returned) {
-                    set_reg(&mut registers, dst, value)?;
-                }
-            } else if let RegOp::CallRef {
-                type_idx,
-                func,
-                args: arg_regs,
-                results,
-            } = &instr.op
-            {
-                let target = get_reg(&registers, *func)?;
-                let call_args = arg_regs
-                    .iter()
-                    .map(|&reg| get_reg(&registers, reg))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let returned =
-                    execute_call_ref(module, store, type_idx, target, &call_args, depth)?;
-                for (&dst, value) in results.iter().zip(returned) {
-                    set_reg(&mut registers, dst, value)?;
-                }
-            } else {
-                execute_reg_op(store, &mut registers, &mut locals, instr)?;
-            }
-        }
+            let block = func.blocks.get(block_idx as usize).ok_or(RuntimeError {
+                kind: RuntimeErrorKind::MissingReturn,
+            })?;
 
-        // Follow the terminator
-        match &block.term {
-            RegTerm::Return { values } => {
-                let mut results = Vec::with_capacity(values.len());
-                for &reg in values {
-                    results.push(get_reg(&registers, reg)?);
+            // Execute straight-line instructions in this block
+            for instr in &block.instrs {
+                if let Some(store) = store
+                    && !store.charge_fuel()
+                {
+                    return Err(RuntimeError {
+                        kind: RuntimeErrorKind::FuelExhausted,
+                    });
                 }
-                return Ok(results);
+                if let RegOp::Call {
+                    func: callee_idx,
+                    args: arg_regs,
+                    results,
+                } = &instr.op
+                {
+                    let call_args = arg_regs
+                        .iter()
+                        .map(|&reg| get_reg(&registers, reg))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let returned = execute_call(module, store, callee_idx, &call_args, depth)?;
+                    for (&dst, value) in results.iter().zip(returned) {
+                        set_reg(&mut registers, dst, value)?;
+                    }
+                } else if let RegOp::CallIndirect {
+                    type_idx,
+                    table,
+                    index,
+                    args: arg_regs,
+                    results,
+                } = &instr.op
+                {
+                    let idx = expect_addr(get_reg(&registers, *index)?)?;
+                    let call_args = arg_regs
+                        .iter()
+                        .map(|&reg| get_reg(&registers, reg))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let returned = execute_call_indirect(
+                        module, store, type_idx, table, idx, &call_args, depth,
+                    )?;
+                    for (&dst, value) in results.iter().zip(returned) {
+                        set_reg(&mut registers, dst, value)?;
+                    }
+                } else if let RegOp::CallRef {
+                    type_idx,
+                    func,
+                    args: arg_regs,
+                    results,
+                } = &instr.op
+                {
+                    let target = get_reg(&registers, *func)?;
+                    let call_args = arg_regs
+                        .iter()
+                        .map(|&reg| get_reg(&registers, reg))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let returned =
+                        execute_call_ref(module, store, type_idx, target, &call_args, depth)?;
+                    for (&dst, value) in results.iter().zip(returned) {
+                        set_reg(&mut registers, dst, value)?;
+                    }
+                } else {
+                    execute_reg_op(store, &mut registers, &mut locals, instr)?;
+                }
             }
-            RegTerm::IfFork {
-                cond,
-                then_block,
-                else_block,
-            } => {
-                let val = get_reg(&registers, *cond)?;
-                if let Value::I32(v) = val {
-                    if v != 0 {
-                        block_idx = *then_block;
+
+            // Follow the terminator
+            match &block.term {
+                RegTerm::Return { values } => {
+                    let mut results = Vec::with_capacity(values.len());
+                    for &reg in values {
+                        results.push(get_reg(&registers, reg)?);
+                    }
+                    return Ok(results);
+                }
+                RegTerm::TailCall {
+                    func: callee_idx,
+                    args: arg_regs,
+                } => {
+                    let call_args = arg_regs
+                        .iter()
+                        .map(|&reg| get_reg(&registers, reg))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    match resolve_tail_direct(module, store, callee_idx, &call_args)? {
+                        TailTarget::Defined(callee) => {
+                            func = callee;
+                            owned_args = call_args;
+                            use_owned_args = true;
+                            continue 'tail;
+                        }
+                        TailTarget::Ready(results) => return Ok(results),
+                    }
+                }
+                RegTerm::TailCallIndirect {
+                    type_idx,
+                    table,
+                    index,
+                    args: arg_regs,
+                } => {
+                    let idx = expect_addr(get_reg(&registers, *index)?)?;
+                    let call_args = arg_regs
+                        .iter()
+                        .map(|&reg| get_reg(&registers, reg))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let (instance_id, target_func_idx) = table_lookup_target(store, table, idx)?;
+                    match resolve_tail_funcref(
+                        module,
+                        store,
+                        type_idx,
+                        instance_id,
+                        target_func_idx,
+                        &call_args,
+                        depth,
+                    )? {
+                        TailTarget::Defined(callee) => {
+                            func = callee;
+                            owned_args = call_args;
+                            use_owned_args = true;
+                            continue 'tail;
+                        }
+                        TailTarget::Ready(results) => return Ok(results),
+                    }
+                }
+                RegTerm::TailCallRef {
+                    type_idx,
+                    func: func_reg,
+                    args: arg_regs,
+                } => {
+                    let target = get_reg(&registers, *func_reg)?;
+                    let call_args = arg_regs
+                        .iter()
+                        .map(|&reg| get_reg(&registers, reg))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let Value::FuncRef(func_idx) = target else {
+                        return Err(RuntimeError {
+                            kind: RuntimeErrorKind::TypeMismatch {
+                                expected: ValType::Ref(RefType::FuncRef),
+                                found: target.val_type(),
+                            },
+                        });
+                    };
+                    let Some((instance_id, target_func_idx)) = func_idx else {
+                        return Err(trap(RuntimeTrap::NullFunctionReference));
+                    };
+                    match resolve_tail_funcref(
+                        module,
+                        store,
+                        type_idx,
+                        instance_id,
+                        target_func_idx,
+                        &call_args,
+                        depth,
+                    )? {
+                        TailTarget::Defined(callee) => {
+                            func = callee;
+                            owned_args = call_args;
+                            use_owned_args = true;
+                            continue 'tail;
+                        }
+                        TailTarget::Ready(results) => return Ok(results),
+                    }
+                }
+                RegTerm::IfFork {
+                    cond,
+                    then_block,
+                    else_block,
+                } => {
+                    let val = get_reg(&registers, *cond)?;
+                    if let Value::I32(v) = val {
+                        if v != 0 {
+                            block_idx = *then_block;
+                        } else {
+                            block_idx = *else_block;
+                        }
                     } else {
                         block_idx = *else_block;
                     }
-                } else {
-                    block_idx = *else_block;
                 }
-            }
-            RegTerm::Br { target_block, .. } => {
-                block_idx = *target_block;
-            }
-            RegTerm::BrIf {
-                cond, target_block, ..
-            } => {
-                let val = get_reg(&registers, *cond)?;
-                if let Value::I32(v) = val {
-                    if v != 0 {
+                RegTerm::Br { target_block, .. } => {
+                    block_idx = *target_block;
+                }
+                RegTerm::BrIf {
+                    cond, target_block, ..
+                } => {
+                    let val = get_reg(&registers, *cond)?;
+                    if let Value::I32(v) = val {
+                        if v != 0 {
+                            block_idx = *target_block;
+                        } else {
+                            block_idx += 1;
+                        }
+                    } else {
+                        block_idx += 1;
+                    }
+                }
+                RegTerm::BrIfNull {
+                    value,
+                    target_block,
+                    ..
+                } => {
+                    let val = get_reg(&registers, *value)?;
+                    if is_null_ref(&val) {
                         block_idx = *target_block;
                     } else {
                         block_idx += 1;
                     }
-                } else {
+                }
+                RegTerm::BrIfNonNull {
+                    value,
+                    target_block,
+                    ..
+                } => {
+                    let val = get_reg(&registers, *value)?;
+                    if is_null_ref(&val) {
+                        block_idx += 1;
+                    } else {
+                        block_idx = *target_block;
+                    }
+                }
+                RegTerm::BrTable {
+                    index,
+                    targets,
+                    default,
+                    ..
+                } => {
+                    let val = get_reg(&registers, *index)?;
+                    // The index is read as u32: negative i32 values are large
+                    // and fall through to the default target.
+                    let idx = match val {
+                        Value::I32(v) => v as u32 as usize,
+                        _ => targets.len(),
+                    };
+                    block_idx = if idx < targets.len() {
+                        targets[idx]
+                    } else {
+                        *default
+                    };
+                }
+                RegTerm::Fallthrough => {
                     block_idx += 1;
+                    if block_idx as usize >= func.blocks.len() {
+                        return Err(RuntimeError {
+                            kind: RuntimeErrorKind::MissingReturn,
+                        });
+                    }
                 }
-            }
-            RegTerm::BrIfNull {
-                value,
-                target_block,
-                ..
-            } => {
-                let val = get_reg(&registers, *value)?;
-                if is_null_ref(&val) {
-                    block_idx = *target_block;
-                } else {
-                    block_idx += 1;
+                RegTerm::Trap => {
+                    return Err(trap(RuntimeTrap::Unreachable));
                 }
-            }
-            RegTerm::BrIfNonNull {
-                value,
-                target_block,
-                ..
-            } => {
-                let val = get_reg(&registers, *value)?;
-                if is_null_ref(&val) {
-                    block_idx += 1;
-                } else {
-                    block_idx = *target_block;
-                }
-            }
-            RegTerm::BrTable {
-                index,
-                targets,
-                default,
-                ..
-            } => {
-                let val = get_reg(&registers, *index)?;
-                // The index is read as u32: negative i32 values are large
-                // and fall through to the default target.
-                let idx = match val {
-                    Value::I32(v) => v as u32 as usize,
-                    _ => targets.len(),
-                };
-                block_idx = if idx < targets.len() {
-                    targets[idx]
-                } else {
-                    *default
-                };
-            }
-            RegTerm::Fallthrough => {
-                block_idx += 1;
-                if block_idx as usize >= func.blocks.len() {
-                    return Err(RuntimeError {
-                        kind: RuntimeErrorKind::MissingReturn,
-                    });
-                }
-            }
-            RegTerm::Trap => {
-                return Err(trap(RuntimeTrap::Unreachable));
             }
         }
     }

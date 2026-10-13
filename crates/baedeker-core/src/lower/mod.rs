@@ -284,6 +284,22 @@ pub enum RegTerm {
     },
     /// Return from the function with values.
     Return { values: Vec<Reg> },
+    /// Tail call (`return_call`): replace the current frame with the callee
+    /// at the same stack depth. Terminates the block like `Return`.
+    TailCall { func: FuncIdx, args: Vec<Reg> },
+    /// Tail call through a table (`return_call_indirect`).
+    TailCallIndirect {
+        type_idx: TypeIdx,
+        table: TableIdx,
+        index: Reg,
+        args: Vec<Reg>,
+    },
+    /// Tail call through a function reference (`return_call_ref`).
+    TailCallRef {
+        type_idx: TypeIdx,
+        func: Reg,
+        args: Vec<Reg>,
+    },
     /// Unconditional trap (`unreachable`).
     Trap,
 }
@@ -2664,6 +2680,77 @@ impl<'b> FuncBuilder<'b> {
                 // processed (under polymorphic stack discipline).
                 self.set_unreachable();
             }
+            Instr::ReturnCall(func) => {
+                let Some(callee_ty) = self.tables.func_types.get(func.0 as usize) else {
+                    return Err(LowerError {
+                        offset,
+                        function: Some(self.func_idx),
+                        kind: LowerErrorKind::InvalidFunction { func: func.0 },
+                    });
+                };
+                let mut args = Vec::with_capacity(callee_ty.params.len());
+                for &expected in callee_ty.params.iter().rev() {
+                    let found = self.pop_expect(offset, "return_call", expected)?;
+                    args.push(found.reg);
+                }
+                args.reverse();
+                self.finish_block(RegTerm::TailCall { func, args });
+                self.set_unreachable();
+            }
+            Instr::ReturnCallIndirect {
+                type_idx,
+                table_idx,
+            } => {
+                let Some(ty) = self.tables.types.get(type_idx.0 as usize) else {
+                    return Err(LowerError {
+                        offset,
+                        function: Some(self.func_idx),
+                        kind: LowerErrorKind::InvalidType {
+                            type_idx: type_idx.0,
+                        },
+                    });
+                };
+                let index =
+                    self.pop_expect(offset, "return_call_indirect", ValType::Num(NumType::I32))?;
+                let mut args = Vec::with_capacity(ty.params.len());
+                for &expected in ty.params.iter().rev() {
+                    let found = self.pop_expect(offset, "return_call_indirect", expected)?;
+                    args.push(found.reg);
+                }
+                args.reverse();
+                self.finish_block(RegTerm::TailCallIndirect {
+                    type_idx,
+                    table: table_idx,
+                    index: index.reg,
+                    args,
+                });
+                self.set_unreachable();
+            }
+            Instr::ReturnCallRef(type_idx) => {
+                let Some(ty) = self.tables.types.get(type_idx.0 as usize) else {
+                    return Err(LowerError {
+                        offset,
+                        function: Some(self.func_idx),
+                        kind: LowerErrorKind::InvalidType {
+                            type_idx: type_idx.0,
+                        },
+                    });
+                };
+                // Stack order: [args..., funcref] — the reference is on top.
+                let func = self.pop_any(offset, "return_call_ref")?;
+                let mut args = Vec::with_capacity(ty.params.len());
+                for &expected in ty.params.iter().rev() {
+                    let found = self.pop_expect(offset, "return_call_ref", expected)?;
+                    args.push(found.reg);
+                }
+                args.reverse();
+                self.finish_block(RegTerm::TailCallRef {
+                    type_idx,
+                    func: func.reg,
+                    args,
+                });
+                self.set_unreachable();
+            }
             Instr::CallRef(type_idx) => {
                 let Some(ty) = self.tables.types.get(type_idx.0 as usize) else {
                     return Err(LowerError {
@@ -3731,6 +3818,9 @@ fn instr_name(instr: &Instr) -> &'static str {
         Instr::BrIf(_) => "br_if",
         Instr::BrTable { .. } => "br_table",
         Instr::Return => "return",
+        Instr::ReturnCall(_) => "return_call",
+        Instr::ReturnCallIndirect { .. } => "return_call_indirect",
+        Instr::ReturnCallRef(_) => "return_call_ref",
         Instr::Call(_) => "call",
         Instr::CallIndirect { .. } => "call_indirect",
         Instr::LocalSet(_) => "local.set",
@@ -4278,7 +4368,10 @@ mod tests {
         loop {
             match func.blocks[idx as usize].term {
                 RegTerm::Fallthrough => idx += 1,
-                RegTerm::Return { .. } => break,
+                RegTerm::Return { .. }
+                | RegTerm::TailCall { .. }
+                | RegTerm::TailCallIndirect { .. }
+                | RegTerm::TailCallRef { .. } => break,
                 ref other => panic!("unexpected terminator on else path: {other:?}"),
             }
         }

@@ -11,6 +11,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 baedeker-core = { path = "../crates/baedeker-core" }
 arbitrary = "1" 
+wast = "240"
 
 [dependencies.wasm-smith]
 version = "0.254"
@@ -45,5 +46,11 @@ required-features = ["wasm-smith"]
 [[bin]]
 name = "trap_edges"
 path = "fuzz_targets/trap_edges.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "return_call_depth"
+path = "fuzz_targets/return_call_depth.rs"
 test = false
 doc = false
