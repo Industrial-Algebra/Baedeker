@@ -8,6 +8,7 @@
 
 use alloc::vec::Vec;
 
+use crate::binary::instr::{Instr, decode_instr};
 use crate::binary::leb128::{self, Cursor};
 use crate::binary::section::RawSection;
 use crate::binary::typeparser::parse_val_type as parse_binary_val_type;
@@ -82,22 +83,33 @@ fn parse_mutability(
     }
 }
 
+/// Parse an initializer expression, returning its raw bytes (including the
+/// terminating `end`).
+///
+/// The boundary is found by walking the instruction stream, not by scanning
+/// for the first `0x0B` byte: operand bytes can themselves be `0x0B` (e.g.
+/// the LEB funcidx 11 in `ref.func 11`), which a raw scan misreads as the
+/// terminator.
 fn parse_init_expr<'a>(
     cursor: &mut Cursor<'a>,
     base_offset: usize,
 ) -> Result<&'a [u8], DecodeError> {
     let start = cursor.position();
+    let mut block_depth = 0usize;
     loop {
-        let opcode_offset = cursor.position();
-        let byte = cursor.read_byte().map_err(|_| DecodeError {
-            offset: ByteOffset(base_offset + opcode_offset),
-            context: DecodeContext::GlobalSection,
-            kind: DecodeErrorKind::UnexpectedEof,
+        let instr = decode_instr(cursor, base_offset).map_err(|mut e| {
+            e.context = DecodeContext::GlobalSection;
+            e
         })?;
-
-        if byte == 0x0B {
-            let end = cursor.position();
-            return Ok(&cursor.original()[start..end]);
+        match instr {
+            Instr::Block(_) | Instr::Loop(_) | Instr::If(_) => block_depth += 1,
+            Instr::End => {
+                if block_depth == 0 {
+                    return Ok(&cursor.original()[start..cursor.position()]);
+                }
+                block_depth -= 1;
+            }
+            _ => {}
         }
     }
 }
@@ -157,5 +169,22 @@ mod tests {
         let section = raw_global_section(&[0x01, 0x7F, 0x00, 0x41, 0x00]);
         let err = parse_global_section(&section).unwrap_err();
         assert_eq!(err.kind, DecodeErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn parse_ref_func_init_operand_0x0b() {
+        // `ref.func 11` encodes as 0xD2 0x0B — the operand byte is itself
+        // 0x0B and must not be mistaken for the expression terminator. The
+        // trailing global proves the cursor resumed at the right position.
+        let section = raw_global_section(&[
+            0x02, // 2 globals
+            0x70, 0x00, 0xD2, 0x0B, 0x0B, // funcref const, ref.func 11, end
+            0x7F, 0x00, 0x41, 0x2A, 0x0B, // i32 const, i32.const 42, end
+        ]);
+        let globals = parse_global_section(&section).unwrap();
+        assert_eq!(globals.len(), 2);
+        assert_eq!(globals[0].init_expr, &[0xD2, 0x0B, 0x0B]);
+        assert_eq!(globals[1].global_type.val_type, ValType::Num(NumType::I32));
+        assert_eq!(globals[1].init_expr, &[0x41, 0x2A, 0x0B]);
     }
 }

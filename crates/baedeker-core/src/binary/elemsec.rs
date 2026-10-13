@@ -8,6 +8,7 @@
 
 use alloc::vec::Vec;
 
+use crate::binary::instr::{Instr, decode_instr};
 use crate::binary::leb128::{self, Cursor};
 use crate::binary::section::RawSection;
 use crate::binary::typeparser::parse_ref_type as parse_binary_ref_type;
@@ -180,20 +181,33 @@ fn parse_expr_vec<'a>(
     Ok(exprs)
 }
 
+/// Parse an element/offset expression, returning its raw bytes (including
+/// the terminating `end`).
+///
+/// The boundary is found by walking the instruction stream, not by scanning
+/// for the first `0x0B` byte: operand bytes can themselves be `0x0B` (e.g.
+/// the LEB funcidx 11 in `ref.func 11`), which a raw scan misreads as the
+/// terminator.
 fn parse_init_expr<'a>(
     cursor: &mut Cursor<'a>,
     base_offset: usize,
 ) -> Result<&'a [u8], DecodeError> {
     let start = cursor.position();
+    let mut block_depth = 0usize;
     loop {
-        let pos = cursor.position();
-        let byte = cursor.read_byte().map_err(|_| DecodeError {
-            offset: ByteOffset(base_offset + pos),
-            context: DecodeContext::ElementSection,
-            kind: DecodeErrorKind::UnexpectedEof,
+        let instr = decode_instr(cursor, base_offset).map_err(|mut e| {
+            e.context = DecodeContext::ElementSection;
+            e
         })?;
-        if byte == 0x0B {
-            return Ok(&cursor.original()[start..cursor.position()]);
+        match instr {
+            Instr::Block(_) | Instr::Loop(_) | Instr::If(_) => block_depth += 1,
+            Instr::End => {
+                if block_depth == 0 {
+                    return Ok(&cursor.original()[start..cursor.position()]);
+                }
+                block_depth -= 1;
+            }
+            _ => {}
         }
     }
 }
@@ -278,6 +292,27 @@ mod tests {
             ElementInit::Expressions(exprs) => {
                 assert_eq!(exprs.len(), 1);
                 assert_eq!(exprs[0].expr, &[0xD2, 0x70, 0x0B]);
+            }
+            _ => panic!("expected expression initializers"),
+        }
+    }
+
+    #[test]
+    fn parse_ref_func_expr_operand_0x0b() {
+        // `ref.func 11` encodes as 0xD2 0x0B — the operand byte is itself
+        // 0x0B and must not be mistaken for the expression terminator.
+        let section = raw_element_section(&[
+            0x01, 0x05, 0x70, 0x02, // passive funcref exprs, 2 items
+            0xD2, 0x0B, 0x0B, // ref.func 11, end
+            0xD2, 0x0C, 0x0B, // ref.func 12, end
+        ]);
+        let elems = parse_element_section(&section).unwrap();
+        assert_eq!(elems.len(), 1);
+        match &elems[0].init {
+            ElementInit::Expressions(exprs) => {
+                assert_eq!(exprs.len(), 2);
+                assert_eq!(exprs[0].expr, &[0xD2, 0x0B, 0x0B]);
+                assert_eq!(exprs[1].expr, &[0xD2, 0x0C, 0x0B]);
             }
             _ => panic!("expected expression initializers"),
         }

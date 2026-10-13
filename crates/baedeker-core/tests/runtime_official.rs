@@ -30,10 +30,6 @@ use wast::{QuoteWat, Wast, WastArg, WastDirective, WastExecute, WastRet};
 /// Files deferred with a reason (feature not yet implemented). Every entry
 /// here is a known gap; keep the list honest and shrinking.
 const DEFERRED_FILES: &[(&str, &str)] = &[
-    // Tail calls: return_call/return_call_indirect not lowered.
-    ("return_call.wast", "tail calls not implemented"),
-    ("return_call_indirect.wast", "tail calls not implemented"),
-    ("return_call_ref.wast", "tail calls not implemented"),
     // Function-references / GC-era references.
     ("ref_null.wast", "GC heap types (anyref) not implemented"),
     (
