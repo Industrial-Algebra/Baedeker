@@ -445,6 +445,9 @@ fn validate_const_instr(
         Instr::F64Const(_) if !matches!(kind, ConstExprKind::ElementExpr) => {
             stack.push(ValType::Num(crate::types::NumType::F64));
         }
+        Instr::V128Const(_) if !matches!(kind, ConstExprKind::ElementExpr) => {
+            stack.push(ValType::Vec(crate::types::VecType::V128));
+        }
         Instr::RefNull(ref_type) => {
             validate_reftype_type_indices(module, ref_type, None, decoded.offset.0)?;
             stack.push(normalize_valtype(module, ValType::Ref(ref_type)));
@@ -2069,50 +2072,74 @@ fn validate_instr(
             ValType::Num(crate::types::NumType::F64),
             ValType::Vec(crate::types::VecType::V128),
         )?,
-        Instr::I32x4ExtractLane(_) => validate_numeric_unary(
-            function,
-            state,
-            offset,
-            "i32x4.extract_lane",
-            ValType::Vec(crate::types::VecType::V128),
-            ValType::Num(crate::types::NumType::I32),
-        )?,
-        Instr::I8x16ExtractLaneS(_)
-        | Instr::I8x16ExtractLaneU(_)
-        | Instr::I16x8ExtractLaneS(_)
-        | Instr::I16x8ExtractLaneU(_) => validate_numeric_unary(
-            function,
-            state,
-            offset,
-            "simd.extract_lane",
-            ValType::Vec(crate::types::VecType::V128),
-            ValType::Num(crate::types::NumType::I32),
-        )?,
-        Instr::I64x2ExtractLane(_) => validate_numeric_unary(
-            function,
-            state,
-            offset,
-            "i64x2.extract_lane",
-            ValType::Vec(crate::types::VecType::V128),
-            ValType::Num(crate::types::NumType::I64),
-        )?,
-        Instr::F64x2ExtractLane(_) => validate_numeric_unary(
-            function,
-            state,
-            offset,
-            "f64x2.extract_lane",
-            ValType::Vec(crate::types::VecType::V128),
-            ValType::Num(crate::types::NumType::F64),
-        )?,
-        Instr::F32x4ExtractLane(_) => validate_numeric_unary(
-            function,
-            state,
-            offset,
-            "f32x4.extract_lane",
-            ValType::Vec(crate::types::VecType::V128),
-            ValType::Num(crate::types::NumType::F32),
-        )?,
-        Instr::I32x4ReplaceLane(_) => {
+        Instr::I32x4ExtractLane(lane) => {
+            validate_simd_lane_idx(function, offset, "i32x4.extract_lane", *lane, 3)?;
+            validate_numeric_unary(
+                function,
+                state,
+                offset,
+                "i32x4.extract_lane",
+                ValType::Vec(crate::types::VecType::V128),
+                ValType::Num(crate::types::NumType::I32),
+            )?
+        }
+        Instr::I8x16ExtractLaneS(lane) | Instr::I8x16ExtractLaneU(lane) => {
+            validate_simd_lane_idx(function, offset, "simd.extract_lane", *lane, 15)?;
+            validate_numeric_unary(
+                function,
+                state,
+                offset,
+                "simd.extract_lane",
+                ValType::Vec(crate::types::VecType::V128),
+                ValType::Num(crate::types::NumType::I32),
+            )?
+        }
+        Instr::I16x8ExtractLaneS(lane) | Instr::I16x8ExtractLaneU(lane) => {
+            validate_simd_lane_idx(function, offset, "simd.extract_lane", *lane, 7)?;
+            validate_numeric_unary(
+                function,
+                state,
+                offset,
+                "simd.extract_lane",
+                ValType::Vec(crate::types::VecType::V128),
+                ValType::Num(crate::types::NumType::I32),
+            )?
+        }
+        Instr::I64x2ExtractLane(lane) => {
+            validate_simd_lane_idx(function, offset, "i64x2.extract_lane", *lane, 1)?;
+            validate_numeric_unary(
+                function,
+                state,
+                offset,
+                "i64x2.extract_lane",
+                ValType::Vec(crate::types::VecType::V128),
+                ValType::Num(crate::types::NumType::I64),
+            )?
+        }
+        Instr::F64x2ExtractLane(lane) => {
+            validate_simd_lane_idx(function, offset, "f64x2.extract_lane", *lane, 1)?;
+            validate_numeric_unary(
+                function,
+                state,
+                offset,
+                "f64x2.extract_lane",
+                ValType::Vec(crate::types::VecType::V128),
+                ValType::Num(crate::types::NumType::F64),
+            )?
+        }
+        Instr::F32x4ExtractLane(lane) => {
+            validate_simd_lane_idx(function, offset, "f32x4.extract_lane", *lane, 3)?;
+            validate_numeric_unary(
+                function,
+                state,
+                offset,
+                "f32x4.extract_lane",
+                ValType::Vec(crate::types::VecType::V128),
+                ValType::Num(crate::types::NumType::F32),
+            )?
+        }
+        Instr::I32x4ReplaceLane(lane) => {
+            validate_simd_lane_idx(function, offset, "i32x4.replace_lane", *lane, 3)?;
             pop_expect(
                 function,
                 state,
@@ -2131,7 +2158,13 @@ fn validate_instr(
                 .operands
                 .push(ValType::Vec(crate::types::VecType::V128));
         }
-        Instr::I8x16ReplaceLane(_) | Instr::I16x8ReplaceLane(_) => {
+        Instr::I8x16ReplaceLane(lane) | Instr::I16x8ReplaceLane(lane) => {
+            let max = if matches!(decoded.instr, Instr::I8x16ReplaceLane(_)) {
+                15
+            } else {
+                7
+            };
+            validate_simd_lane_idx(function, offset, "simd.replace_lane", *lane, max)?;
             pop_expect(
                 function,
                 state,
@@ -2150,7 +2183,8 @@ fn validate_instr(
                 .operands
                 .push(ValType::Vec(crate::types::VecType::V128));
         }
-        Instr::F32x4ReplaceLane(_) => {
+        Instr::F32x4ReplaceLane(lane) => {
+            validate_simd_lane_idx(function, offset, "f32x4.replace_lane", *lane, 3)?;
             pop_expect(
                 function,
                 state,
@@ -2169,7 +2203,8 @@ fn validate_instr(
                 .operands
                 .push(ValType::Vec(crate::types::VecType::V128));
         }
-        Instr::I64x2ReplaceLane(_) => {
+        Instr::I64x2ReplaceLane(lane) => {
+            validate_simd_lane_idx(function, offset, "i64x2.replace_lane", *lane, 1)?;
             pop_expect(
                 function,
                 state,
@@ -2188,7 +2223,8 @@ fn validate_instr(
                 .operands
                 .push(ValType::Vec(crate::types::VecType::V128));
         }
-        Instr::F64x2ReplaceLane(_) => {
+        Instr::F64x2ReplaceLane(lane) => {
+            validate_simd_lane_idx(function, offset, "f64x2.replace_lane", *lane, 1)?;
             pop_expect(
                 function,
                 state,
@@ -2226,11 +2262,13 @@ fn validate_instr(
         Instr::I8x16Add
         | Instr::I8x16Sub
         | Instr::I16x8Add
+        | Instr::I16x8Mul
         | Instr::I16x8Sub
         | Instr::I32x4Add
         | Instr::I32x4Sub
         | Instr::I32x4Mul
         | Instr::I64x2Add
+        | Instr::I64x2Mul
         | Instr::I64x2Sub
         | Instr::F32x4Add
         | Instr::F32x4Sub

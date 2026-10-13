@@ -151,6 +151,7 @@ pub enum RegConstInstr {
     I64Const(i64),
     F32Const(u32),
     F64Const(u64),
+    V128Const([u8; 16]),
     GlobalGet(GlobalIdx),
     RefNull,
     RefFunc(FuncIdx),
@@ -1899,6 +1900,7 @@ pub(crate) fn lower_const_expr(
             Instr::I64Const(value) => RegConstInstr::I64Const(value),
             Instr::F32Const(value) => RegConstInstr::F32Const(value.to_bits()),
             Instr::F64Const(value) => RegConstInstr::F64Const(value.to_bits()),
+            Instr::V128Const(bytes) => RegConstInstr::V128Const(bytes),
             Instr::GlobalGet(global) => RegConstInstr::GlobalGet(global),
             Instr::RefNull(_) => RegConstInstr::RefNull,
             Instr::RefFunc(func) => RegConstInstr::RefFunc(func),
@@ -3423,6 +3425,9 @@ impl<'b> FuncBuilder<'b> {
             Instr::I16x8Add => {
                 self.lower_v128_binary(offset, LaneShape::I16x8, V128BinaryKind::Add)?
             }
+            Instr::I16x8Mul => {
+                self.lower_v128_binary(offset, LaneShape::I16x8, V128BinaryKind::Mul)?
+            }
             Instr::I16x8Sub => {
                 self.lower_v128_binary(offset, LaneShape::I16x8, V128BinaryKind::Sub)?
             }
@@ -3437,6 +3442,9 @@ impl<'b> FuncBuilder<'b> {
             }
             Instr::I64x2Add => {
                 self.lower_v128_binary(offset, LaneShape::I64x2, V128BinaryKind::Add)?
+            }
+            Instr::I64x2Mul => {
+                self.lower_v128_binary(offset, LaneShape::I64x2, V128BinaryKind::Mul)?
             }
             Instr::I64x2Sub => {
                 self.lower_v128_binary(offset, LaneShape::I64x2, V128BinaryKind::Sub)?
