@@ -23,7 +23,8 @@ pub use store::{Imports, LinkGroup, PAGE_SIZE, Store};
 
 use crate::lower::{
     BinaryOp, LaneShape, Reg, RegFunc, RegInstr, RegModule, RegOp, RegTerm, UnaryOp,
-    V128BinaryKind, V128CompareKind, V128ShiftKind, V128UnaryKind,
+    V128BinaryKind, V128CompareKind, V128ConvertKind, V128FloatUnaryKind, V128ShiftKind,
+    V128UnaryKind,
 };
 use crate::types::{FuncIdx, MemArg, NumType, RefType, TableIdx, ValType};
 
@@ -1757,6 +1758,47 @@ fn execute_reg_op(
             v128_shift(*shape, *kind, &mut out, &bytes, amount);
             set_reg(registers, *dst, Value::V128(out))?;
         }
+        RegOp::V128FloatUnary {
+            dst,
+            src,
+            shape,
+            kind,
+        } => {
+            let Value::V128(bytes) = get_reg(registers, *src)? else {
+                return Err(type_mismatch_v128(registers, *src));
+            };
+            let mut out = [0u8; 16];
+            v128_float_unary(*shape, *kind, &mut out, &bytes);
+            set_reg(registers, *dst, Value::V128(out))?;
+        }
+        RegOp::V128Convert { dst, src, kind } => {
+            let Value::V128(bytes) = get_reg(registers, *src)? else {
+                return Err(type_mismatch_v128(registers, *src));
+            };
+            let mut out = [0u8; 16];
+            v128_convert(*kind, &mut out, &bytes);
+            set_reg(registers, *dst, Value::V128(out))?;
+        }
+        RegOp::V128Swizzle { dst, a, b } => {
+            let (Value::V128(a_bytes), Value::V128(b_bytes)) =
+                (get_reg(registers, *a)?, get_reg(registers, *b)?)
+            else {
+                return Err(type_mismatch_v128(registers, *a));
+            };
+            let mut out = [0u8; 16];
+            v128_swizzle(&mut out, &a_bytes, &b_bytes);
+            set_reg(registers, *dst, Value::V128(out))?;
+        }
+        RegOp::V128Shuffle { dst, a, b, lanes } => {
+            let (Value::V128(a_bytes), Value::V128(b_bytes)) =
+                (get_reg(registers, *a)?, get_reg(registers, *b)?)
+            else {
+                return Err(type_mismatch_v128(registers, *a));
+            };
+            let mut out = [0u8; 16];
+            v128_shuffle(&mut out, &a_bytes, &b_bytes, lanes);
+            set_reg(registers, *dst, Value::V128(out))?;
+        }
     }
     Ok(())
 }
@@ -2170,13 +2212,49 @@ fn apply_lane_binary(
         LaneShape::F32x4 => {
             let a = f32::from_bits(u32::from_le_bytes(lhs.try_into().expect("width")));
             let b = f32::from_bits(u32::from_le_bytes(rhs.try_into().expect("width")));
-            let result = lane_float_op!(kind, a, b, f32);
+            let result = match kind {
+                V128BinaryKind::FMin => wasm_f32_min(a, b),
+                V128BinaryKind::FMax => wasm_f32_max(a, b),
+                V128BinaryKind::PMin => {
+                    if b < a {
+                        b
+                    } else {
+                        a
+                    }
+                }
+                V128BinaryKind::PMax => {
+                    if a < b {
+                        b
+                    } else {
+                        a
+                    }
+                }
+                _ => lane_float_op!(kind, a, b, f32),
+            };
             dst.copy_from_slice(&result.to_bits().to_le_bytes());
         }
         LaneShape::F64x2 => {
             let a = f64::from_bits(u64::from_le_bytes(lhs.try_into().expect("width")));
             let b = f64::from_bits(u64::from_le_bytes(rhs.try_into().expect("width")));
-            let result = lane_float_op!(kind, a, b, f64);
+            let result = match kind {
+                V128BinaryKind::FMin => wasm_f64_min(a, b),
+                V128BinaryKind::FMax => wasm_f64_max(a, b),
+                V128BinaryKind::PMin => {
+                    if b < a {
+                        b
+                    } else {
+                        a
+                    }
+                }
+                V128BinaryKind::PMax => {
+                    if a < b {
+                        b
+                    } else {
+                        a
+                    }
+                }
+                _ => lane_float_op!(kind, a, b, f64),
+            };
             dst.copy_from_slice(&result.to_bits().to_le_bytes());
         }
     }
@@ -2642,6 +2720,137 @@ fn v128_dot(dst: &mut [u8], a: &[u8], b: &[u8]) {
             .wrapping_mul(lane(b, 2 * i))
             .wrapping_add(lane(a, 2 * i + 1).wrapping_mul(lane(b, 2 * i + 1)));
         d.copy_from_slice(&acc.to_le_bytes());
+    }
+}
+
+fn v128_float_unary(shape: LaneShape, kind: V128FloatUnaryKind, dst: &mut [u8], src: &[u8]) {
+    let width = shape.lane_width();
+    match width {
+        4 => {
+            for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+                let v = f32::from_bits(u32::from_le_bytes(s.try_into().expect("width")));
+                let r = match kind {
+                    V128FloatUnaryKind::Abs => f32::from_bits(v.to_bits() & 0x7FFF_FFFF),
+                    V128FloatUnaryKind::Neg => f32::from_bits(v.to_bits() ^ 0x8000_0000),
+                    V128FloatUnaryKind::Sqrt => libm::sqrtf(v),
+                    V128FloatUnaryKind::Ceil => libm::ceilf(v),
+                    V128FloatUnaryKind::Floor => libm::floorf(v),
+                    V128FloatUnaryKind::Trunc => libm::truncf(v),
+                    V128FloatUnaryKind::Nearest => libm::rintf(v),
+                };
+                d.copy_from_slice(&r.to_bits().to_le_bytes());
+            }
+        }
+        8 => {
+            for (d, s) in dst.chunks_exact_mut(8).zip(src.chunks_exact(8)) {
+                let v = f64::from_bits(u64::from_le_bytes(s.try_into().expect("width")));
+                let r = match kind {
+                    V128FloatUnaryKind::Abs => f64::from_bits(v.to_bits() & 0x7FFF_FFFF_FFFF_FFFF),
+                    V128FloatUnaryKind::Neg => f64::from_bits(v.to_bits() ^ 0x8000_0000_0000_0000),
+                    V128FloatUnaryKind::Sqrt => libm::sqrt(v),
+                    V128FloatUnaryKind::Ceil => libm::ceil(v),
+                    V128FloatUnaryKind::Floor => libm::floor(v),
+                    V128FloatUnaryKind::Trunc => libm::trunc(v),
+                    V128FloatUnaryKind::Nearest => libm::rint(v),
+                };
+                d.copy_from_slice(&r.to_bits().to_le_bytes());
+            }
+        }
+        _ => unreachable!("float unary is f32x4/f64x2 only"),
+    }
+}
+
+fn v128_convert(kind: V128ConvertKind, dst: &mut [u8], src: &[u8]) {
+    match kind {
+        V128ConvertKind::TruncSatF32x4S => {
+            for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+                let v = f32::from_bits(u32::from_le_bytes(s.try_into().expect("width")));
+                d.copy_from_slice(&(v as i32).to_le_bytes());
+            }
+        }
+        V128ConvertKind::TruncSatF32x4U => {
+            for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+                let v = f32::from_bits(u32::from_le_bytes(s.try_into().expect("width")));
+                d.copy_from_slice(&(v as u32).to_le_bytes());
+            }
+        }
+        V128ConvertKind::ConvertI32x4S => {
+            for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+                let v = i32::from_le_bytes(s.try_into().expect("width"));
+                d.copy_from_slice(&((v as f32).to_bits()).to_le_bytes());
+            }
+        }
+        V128ConvertKind::ConvertI32x4U => {
+            for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+                let v = u32::from_le_bytes(s.try_into().expect("width"));
+                d.copy_from_slice(&((v as f32).to_bits()).to_le_bytes());
+            }
+        }
+        V128ConvertKind::TruncSatF64x2SZero => {
+            for (d, s) in dst.chunks_exact_mut(4).take(2).zip(src.chunks_exact(8)) {
+                let v = f64::from_bits(u64::from_le_bytes(s.try_into().expect("width")));
+                d.copy_from_slice(&(v as i32).to_le_bytes());
+            }
+            for d in dst[8..].chunks_exact_mut(4) {
+                d.copy_from_slice(&0i32.to_le_bytes());
+            }
+        }
+        V128ConvertKind::TruncSatF64x2UZero => {
+            for (d, s) in dst.chunks_exact_mut(4).take(2).zip(src.chunks_exact(8)) {
+                let v = f64::from_bits(u64::from_le_bytes(s.try_into().expect("width")));
+                d.copy_from_slice(&(v as u32).to_le_bytes());
+            }
+            for d in dst[8..].chunks_exact_mut(4) {
+                d.copy_from_slice(&0u32.to_le_bytes());
+            }
+        }
+        V128ConvertKind::DemoteF64x2Zero => {
+            for (d, s) in dst.chunks_exact_mut(4).take(2).zip(src.chunks_exact(8)) {
+                let v = f64::from_bits(u64::from_le_bytes(s.try_into().expect("width")));
+                d.copy_from_slice(&((v as f32).to_bits()).to_le_bytes());
+            }
+            for d in dst[8..].chunks_exact_mut(4) {
+                d.copy_from_slice(&0f32.to_bits().to_le_bytes());
+            }
+        }
+        V128ConvertKind::PromoteLowF32x4 => {
+            for (d, s) in dst.chunks_exact_mut(8).zip(src.chunks_exact(4).take(2)) {
+                let v = f32::from_bits(u32::from_le_bytes(s.try_into().expect("width")));
+                d.copy_from_slice(&((v as f64).to_bits()).to_le_bytes());
+            }
+        }
+        V128ConvertKind::ConvertLowI32x4S => {
+            for (d, s) in dst.chunks_exact_mut(8).zip(src.chunks_exact(4).take(2)) {
+                let v = i32::from_le_bytes(s.try_into().expect("width"));
+                d.copy_from_slice(&((v as f64).to_bits()).to_le_bytes());
+            }
+        }
+        V128ConvertKind::ConvertLowI32x4U => {
+            for (d, s) in dst.chunks_exact_mut(8).zip(src.chunks_exact(4).take(2)) {
+                let v = u32::from_le_bytes(s.try_into().expect("width"));
+                d.copy_from_slice(&((v as f64).to_bits()).to_le_bytes());
+            }
+        }
+    }
+}
+
+/// result[i] = b[i] < 16 ? a[b[i]] : 0.
+fn v128_swizzle(dst: &mut [u8], a: &[u8], b: &[u8]) {
+    for i in 0..16 {
+        dst[i] = if b[i] < 16 { a[b[i] as usize] } else { 0 };
+    }
+}
+
+/// result[i] = lanes[i] < 16 ? a[lanes[i]] : b[lanes[i] - 16]. Lane
+/// bounds are validated (< 32) before lowering.
+fn v128_shuffle(dst: &mut [u8], a: &[u8], b: &[u8], lanes: &[u8; 16]) {
+    for i in 0..16 {
+        let idx = lanes[i];
+        dst[i] = if idx < 16 {
+            a[idx as usize]
+        } else {
+            b[(idx - 16) as usize]
+        };
     }
 }
 

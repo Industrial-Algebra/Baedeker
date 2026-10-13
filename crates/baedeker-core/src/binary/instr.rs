@@ -345,6 +345,40 @@ pub enum Instr {
     I64x2GtS,
     I64x2LeS,
     I64x2GeS,
+    F32x4Abs,
+    F32x4Neg,
+    F32x4Sqrt,
+    F32x4Ceil,
+    F32x4Floor,
+    F32x4Trunc,
+    F32x4Nearest,
+    F64x2Abs,
+    F64x2Neg,
+    F64x2Sqrt,
+    F64x2Ceil,
+    F64x2Floor,
+    F64x2Trunc,
+    F64x2Nearest,
+    F32x4Min,
+    F32x4Max,
+    F32x4PMin,
+    F32x4PMax,
+    F64x2Min,
+    F64x2Max,
+    F64x2PMin,
+    F64x2PMax,
+    I32x4TruncSatF32x4S,
+    I32x4TruncSatF32x4U,
+    F32x4ConvertI32x4S,
+    F32x4ConvertI32x4U,
+    I32x4TruncSatF64x2SZero,
+    I32x4TruncSatF64x2UZero,
+    F32x4DemoteF64x2Zero,
+    F64x2PromoteLowF32x4,
+    F64x2ConvertLowI32x4S,
+    F64x2ConvertLowI32x4U,
+    I8x16Swizzle,
+    I8x16Shuffle([u8; 16]),
     I32Eqz,
     I32Eq,
     I32Ne,
@@ -1098,6 +1132,46 @@ fn decode_simd_instr(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Inst
         217 => Ok(Instr::I64x2GtS),
         218 => Ok(Instr::I64x2LeS),
         219 => Ok(Instr::I64x2GeS),
+        13 => {
+            let mut lanes = [0u8; 16];
+            for lane in lanes.iter_mut() {
+                *lane = parse_lane_idx(cursor, base_offset)?;
+            }
+            Ok(Instr::I8x16Shuffle(lanes))
+        }
+        14 => Ok(Instr::I8x16Swizzle),
+        94 => Ok(Instr::F32x4DemoteF64x2Zero),
+        95 => Ok(Instr::F64x2PromoteLowF32x4),
+        103 => Ok(Instr::F32x4Ceil),
+        104 => Ok(Instr::F32x4Floor),
+        105 => Ok(Instr::F32x4Trunc),
+        106 => Ok(Instr::F32x4Nearest),
+        116 => Ok(Instr::F64x2Ceil),
+        117 => Ok(Instr::F64x2Floor),
+        122 => Ok(Instr::F64x2Trunc),
+        148 => Ok(Instr::F64x2Nearest),
+        224 => Ok(Instr::F32x4Abs),
+        225 => Ok(Instr::F32x4Neg),
+        227 => Ok(Instr::F32x4Sqrt),
+        232 => Ok(Instr::F32x4Min),
+        233 => Ok(Instr::F32x4Max),
+        234 => Ok(Instr::F32x4PMin),
+        235 => Ok(Instr::F32x4PMax),
+        236 => Ok(Instr::F64x2Abs),
+        237 => Ok(Instr::F64x2Neg),
+        239 => Ok(Instr::F64x2Sqrt),
+        244 => Ok(Instr::F64x2Min),
+        245 => Ok(Instr::F64x2Max),
+        246 => Ok(Instr::F64x2PMin),
+        247 => Ok(Instr::F64x2PMax),
+        248 => Ok(Instr::I32x4TruncSatF32x4S),
+        249 => Ok(Instr::I32x4TruncSatF32x4U),
+        250 => Ok(Instr::F32x4ConvertI32x4S),
+        251 => Ok(Instr::F32x4ConvertI32x4U),
+        252 => Ok(Instr::I32x4TruncSatF64x2SZero),
+        253 => Ok(Instr::I32x4TruncSatF64x2UZero),
+        254 => Ok(Instr::F64x2ConvertLowI32x4S),
+        255 => Ok(Instr::F64x2ConvertLowI32x4U),
         _ => Err(DecodeError {
             offset: ByteOffset(base_offset),
             context: DecodeContext::CodeSection,
@@ -1756,8 +1830,8 @@ mod tests {
 
     #[test]
     fn reject_unknown_simd_opcode() {
-        let err = decode_instr_sequence(&[0xFD, 0x0E, 0x0B], 410).unwrap_err();
-        assert_eq!(err.kind, DecodeErrorKind::UnknownSimdOpcode { opcode: 14 });
+        let err = decode_instr_sequence(&[0xFD, 0xE2, 0x01, 0x0B], 410).unwrap_err();
+        assert_eq!(err.kind, DecodeErrorKind::UnknownSimdOpcode { opcode: 226 });
     }
 
     #[test]

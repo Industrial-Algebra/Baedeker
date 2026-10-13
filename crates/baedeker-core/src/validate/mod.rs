@@ -2311,7 +2311,16 @@ fn validate_instr(
         | Instr::I64x2LtS
         | Instr::I64x2GtS
         | Instr::I64x2LeS
-        | Instr::I64x2GeS => validate_numeric_binary(
+        | Instr::I64x2GeS
+        | Instr::F32x4Min
+        | Instr::F32x4Max
+        | Instr::F32x4PMin
+        | Instr::F32x4PMax
+        | Instr::F64x2Min
+        | Instr::F64x2Max
+        | Instr::F64x2PMin
+        | Instr::F64x2PMax
+        | Instr::I8x16Swizzle => validate_numeric_binary(
             function,
             state,
             offset,
@@ -2343,7 +2352,31 @@ fn validate_instr(
         | Instr::I64x2ExtendLowI32x4S
         | Instr::I64x2ExtendHighI32x4S
         | Instr::I64x2ExtendLowI32x4U
-        | Instr::I64x2ExtendHighI32x4U => validate_numeric_unary(
+        | Instr::I64x2ExtendHighI32x4U
+        | Instr::F32x4Abs
+        | Instr::F32x4Neg
+        | Instr::F32x4Sqrt
+        | Instr::F32x4Ceil
+        | Instr::F32x4Floor
+        | Instr::F32x4Trunc
+        | Instr::F32x4Nearest
+        | Instr::F64x2Abs
+        | Instr::F64x2Neg
+        | Instr::F64x2Sqrt
+        | Instr::F64x2Ceil
+        | Instr::F64x2Floor
+        | Instr::F64x2Trunc
+        | Instr::F64x2Nearest
+        | Instr::I32x4TruncSatF32x4S
+        | Instr::I32x4TruncSatF32x4U
+        | Instr::F32x4ConvertI32x4S
+        | Instr::F32x4ConvertI32x4U
+        | Instr::I32x4TruncSatF64x2SZero
+        | Instr::I32x4TruncSatF64x2UZero
+        | Instr::F32x4DemoteF64x2Zero
+        | Instr::F64x2PromoteLowF32x4
+        | Instr::F64x2ConvertLowI32x4S
+        | Instr::F64x2ConvertLowI32x4U => validate_numeric_unary(
             function,
             state,
             offset,
@@ -2400,6 +2433,27 @@ fn validate_instr(
             state
                 .operands
                 .push(ValType::Vec(crate::types::VecType::V128));
+        }
+        Instr::I8x16Shuffle(lanes) => {
+            if let Some(&found) = lanes.iter().find(|&&lane| lane >= 32) {
+                return Err(ValidationError {
+                    offset: ByteOffset(offset),
+                    function: Some(function),
+                    kind: ValidationErrorKind::InvalidSimdLaneIdx {
+                        op: "i8x16.shuffle",
+                        max: 31,
+                        found,
+                    },
+                });
+            }
+            validate_numeric_binary(
+                function,
+                state,
+                offset,
+                "i8x16.shuffle",
+                ValType::Vec(crate::types::VecType::V128),
+                ValType::Vec(crate::types::VecType::V128),
+            )?;
         }
         Instr::I8x16Shl
         | Instr::I8x16ShrS
