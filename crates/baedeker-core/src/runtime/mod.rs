@@ -340,6 +340,16 @@ fn execute_funcref(
     call_args: &[Value],
     depth: usize,
 ) -> Result<Vec<Value>, RuntimeError> {
+    // The declared type index belongs to the CALLER's module — resolve the
+    // expected signature before any remote-module shadowing. A
+    // cross-instance target must be checked structurally against the
+    // caller's declared type, whatever the remote module's own type
+    // numbering is.
+    let expected = module.types.get(type_idx.0 as usize).ok_or(RuntimeError {
+        kind: RuntimeErrorKind::UnknownType {
+            type_idx: type_idx.0,
+        },
+    })?;
     if instance_id != store.instance_id() {
         // Cross-instance funcref: resolve through the link group and execute
         // against the owning instance (structural type check against the
@@ -360,11 +370,6 @@ fn execute_funcref(
             };
             (module.clone(), store.clone())
         };
-        let expected = module.types.get(type_idx.0 as usize).ok_or(RuntimeError {
-            kind: RuntimeErrorKind::UnknownType {
-                type_idx: type_idx.0,
-            },
-        })?;
         let actual = if func_idx < module.imported_func_count {
             &module
                 .imported_funcs
@@ -416,11 +421,6 @@ fn execute_funcref(
     // Structural type check: the callee's type must match the declared
     // one — for imported targets, the import declaration's type; for
     // defined targets, the function's type entry.
-    let expected = module.types.get(type_idx.0 as usize).ok_or(RuntimeError {
-        kind: RuntimeErrorKind::UnknownType {
-            type_idx: type_idx.0,
-        },
-    })?;
     if func_idx < module.imported_func_count {
         let import_ty = &module
             .imported_funcs
@@ -635,8 +635,9 @@ pub(crate) fn execute_func_in(
     let mut use_owned_args = false;
     // Backstop against true infinite loops when no fuel budget is set (the
     // coarse guard predates configurable fuel; with fuel, exhaustion is the
-    // honest `FuelExhausted` error instead of `MissingReturn`). The cap
-    // spans tail hops: an unbounded no-fuel tail loop is still bounded.
+    // honest `FuelExhausted` error instead of `MissingReturn`, so the cap is
+    // skipped entirely while a budget is active). The cap spans tail hops:
+    // an unbounded no-fuel tail loop is still bounded.
     let max_iterations = 10_000_000;
     let mut iteration: usize = 0;
 
@@ -695,7 +696,10 @@ pub(crate) fn execute_func_in(
         let mut block_idx: u32 = 0;
         loop {
             iteration += 1;
-            if iteration > max_iterations {
+            // The coarse backstop applies only when no fuel budget is set;
+            // with a budget, fuel exhaustion is the honest bound — a large
+            // budget must not surface as `MissingReturn` with fuel left.
+            if iteration > max_iterations && store.is_none_or(|store| store.fuel().is_none()) {
                 return Err(RuntimeError {
                     kind: RuntimeErrorKind::MissingReturn,
                 });
