@@ -23,7 +23,7 @@ pub use store::{Imports, LinkGroup, PAGE_SIZE, Store};
 
 use crate::lower::{
     BinaryOp, LaneShape, Reg, RegFunc, RegInstr, RegModule, RegOp, RegTerm, UnaryOp,
-    V128BinaryKind, V128UnaryKind,
+    V128BinaryKind, V128CompareKind, V128ShiftKind, V128UnaryKind,
 };
 use crate::types::{FuncIdx, MemArg, NumType, RefType, TableIdx, ValType};
 
@@ -1719,6 +1719,44 @@ fn execute_reg_op(
             }
             set_reg(registers, *dst, Value::I32(bits as i32))?;
         }
+        RegOp::V128Compare {
+            dst,
+            a,
+            b,
+            shape,
+            kind,
+        } => {
+            let (Value::V128(a), Value::V128(b)) =
+                (get_reg(registers, *a)?, get_reg(registers, *b)?)
+            else {
+                return Err(type_mismatch_v128(registers, *b));
+            };
+            let mut out = [0u8; 16];
+            v128_compare(*shape, *kind, &mut out, &a, &b);
+            set_reg(registers, *dst, Value::V128(out))?;
+        }
+        RegOp::V128Shift {
+            dst,
+            src,
+            amount,
+            shape,
+            kind,
+        } => {
+            let Value::V128(bytes) = get_reg(registers, *src)? else {
+                return Err(type_mismatch_v128(registers, *src));
+            };
+            let Value::I32(amount) = get_reg(registers, *amount)? else {
+                return Err(RuntimeError {
+                    kind: RuntimeErrorKind::TypeMismatch {
+                        expected: ValType::Num(NumType::I32),
+                        found: get_reg(registers, *amount)?.val_type(),
+                    },
+                });
+            };
+            let mut out = [0u8; 16];
+            v128_shift(*shape, *kind, &mut out, &bytes, amount);
+            set_reg(registers, *dst, Value::V128(out))?;
+        }
     }
     Ok(())
 }
@@ -2203,6 +2241,196 @@ fn v128_unary(shape: LaneShape, kind: V128UnaryKind, dst: &mut [u8], src: &[u8])
             }
         }
         LaneShape::F32x4 | LaneShape::F64x2 => unreachable!("float unary is a later unit"),
+    }
+}
+
+/// Lane-wise compare. Result lanes are all-ones (true) or all-zeros
+/// (false) at the operand lane width. Integer shapes route s/u kinds
+/// through the signed/unsigned lane view; float shapes use Rust's
+/// ordered/unordered semantics (NaN compares false except `ne`;
+/// -0.0 == +0.0).
+fn v128_compare(shape: LaneShape, kind: V128CompareKind, dst: &mut [u8], a: &[u8], b: &[u8]) {
+    let int_kind = |x: i64, y: i64, signed: bool| -> bool {
+        match kind {
+            V128CompareKind::Eq => x == y,
+            V128CompareKind::Ne => x != y,
+            V128CompareKind::LtS | V128CompareKind::Lt if signed => x < y,
+            V128CompareKind::GtS | V128CompareKind::Gt if signed => x > y,
+            V128CompareKind::LeS | V128CompareKind::Le if signed => x <= y,
+            V128CompareKind::GeS | V128CompareKind::Ge if signed => x >= y,
+            _ => unreachable!("unsigned kind on signed view"),
+        }
+    };
+    let uint_kind = |x: u64, y: u64| -> bool {
+        match kind {
+            V128CompareKind::Eq => x == y,
+            V128CompareKind::Ne => x != y,
+            V128CompareKind::LtU => x < y,
+            V128CompareKind::GtU => x > y,
+            V128CompareKind::LeU => x <= y,
+            V128CompareKind::GeU => x >= y,
+            _ => unreachable!("signed/float kind on unsigned view"),
+        }
+    };
+    let float_kind = |x: f64, y: f64| -> bool {
+        match kind {
+            V128CompareKind::Eq => x == y,
+            V128CompareKind::Ne => x != y,
+            V128CompareKind::Lt => x < y,
+            V128CompareKind::Gt => x > y,
+            V128CompareKind::Le => x <= y,
+            V128CompareKind::Ge => x >= y,
+            _ => unreachable!("integer kind on float shape"),
+        }
+    };
+    let write = |d: &mut [u8], truth: bool| {
+        for byte in d.iter_mut() {
+            *byte = if truth { 0xFF } else { 0x00 };
+        }
+    };
+    match shape {
+        LaneShape::I8x16 => {
+            for i in 0..16 {
+                let (x, y) = (a[i] as i8, b[i] as i8);
+                let truth = if uses_unsigned_compare(kind) {
+                    uint_kind(a[i] as u64, b[i] as u64)
+                } else {
+                    int_kind(x as i64, y as i64, true)
+                };
+                write(&mut dst[i..i + 1], truth);
+            }
+        }
+        LaneShape::I16x8 => {
+            for i in 0..8 {
+                let (x, y) = (
+                    i16::from_le_bytes(a[i * 2..i * 2 + 2].try_into().expect("width")),
+                    i16::from_le_bytes(b[i * 2..i * 2 + 2].try_into().expect("width")),
+                );
+                let truth = if uses_unsigned_compare(kind) {
+                    uint_kind(x as u16 as u64, y as u16 as u64)
+                } else {
+                    int_kind(x as i64, y as i64, true)
+                };
+                write(&mut dst[i * 2..i * 2 + 2], truth);
+            }
+        }
+        LaneShape::I32x4 => {
+            for i in 0..4 {
+                let (x, y) = (
+                    i32::from_le_bytes(a[i * 4..i * 4 + 4].try_into().expect("width")),
+                    i32::from_le_bytes(b[i * 4..i * 4 + 4].try_into().expect("width")),
+                );
+                let truth = if uses_unsigned_compare(kind) {
+                    uint_kind(x as u32 as u64, y as u32 as u64)
+                } else {
+                    int_kind(x as i64, y as i64, true)
+                };
+                write(&mut dst[i * 4..i * 4 + 4], truth);
+            }
+        }
+        LaneShape::I64x2 => {
+            for i in 0..2 {
+                let (x, y) = (
+                    i64::from_le_bytes(a[i * 8..i * 8 + 8].try_into().expect("width")),
+                    i64::from_le_bytes(b[i * 8..i * 8 + 8].try_into().expect("width")),
+                );
+                let truth = if uses_unsigned_compare(kind) {
+                    uint_kind(x as u64, y as u64)
+                } else {
+                    int_kind(x, y, true)
+                };
+                write(&mut dst[i * 8..i * 8 + 8], truth);
+            }
+        }
+        LaneShape::F32x4 => {
+            for i in 0..4 {
+                let (x, y) = (
+                    f32::from_bits(u32::from_le_bytes(
+                        a[i * 4..i * 4 + 4].try_into().expect("width"),
+                    )),
+                    f32::from_bits(u32::from_le_bytes(
+                        b[i * 4..i * 4 + 4].try_into().expect("width"),
+                    )),
+                );
+                let truth = float_kind(x as f64, y as f64);
+                write(&mut dst[i * 4..i * 4 + 4], truth);
+            }
+        }
+        LaneShape::F64x2 => {
+            for i in 0..2 {
+                let (x, y) = (
+                    f64::from_bits(u64::from_le_bytes(
+                        a[i * 8..i * 8 + 8].try_into().expect("width"),
+                    )),
+                    f64::from_bits(u64::from_le_bytes(
+                        b[i * 8..i * 8 + 8].try_into().expect("width"),
+                    )),
+                );
+                let truth = float_kind(x, y);
+                write(&mut dst[i * 8..i * 8 + 8], truth);
+            }
+        }
+    }
+}
+
+/// Whether the compare kind interprets integer lanes as unsigned.
+fn uses_unsigned_compare(kind: V128CompareKind) -> bool {
+    matches!(
+        kind,
+        V128CompareKind::LtU | V128CompareKind::GtU | V128CompareKind::LeU | V128CompareKind::GeU
+    )
+}
+
+/// Lane-wise shift by a scalar amount taken modulo the lane bit width.
+fn v128_shift(shape: LaneShape, kind: V128ShiftKind, dst: &mut [u8], src: &[u8], amount: i32) {
+    let bits = shape.lane_width() as u32 * 8;
+    let s = (amount as u32) % bits;
+    match shape {
+        LaneShape::I8x16 => {
+            for i in 0..16 {
+                let x = src[i] as i8;
+                let out: i8 = match kind {
+                    V128ShiftKind::Shl => ((x as u8) << s) as i8,
+                    V128ShiftKind::ShrS => x >> s,
+                    V128ShiftKind::ShrU => ((x as u8) >> s) as i8,
+                };
+                dst[i] = out as u8;
+            }
+        }
+        LaneShape::I16x8 => {
+            for (d, chunk) in dst.chunks_exact_mut(2).zip(src.chunks_exact(2)) {
+                let x = i16::from_le_bytes(chunk.try_into().expect("width"));
+                let out: i16 = match kind {
+                    V128ShiftKind::Shl => ((x as u16) << s) as i16,
+                    V128ShiftKind::ShrS => x >> s,
+                    V128ShiftKind::ShrU => ((x as u16) >> s) as i16,
+                };
+                d.copy_from_slice(&out.to_le_bytes());
+            }
+        }
+        LaneShape::I32x4 => {
+            for (d, chunk) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+                let x = i32::from_le_bytes(chunk.try_into().expect("width"));
+                let out: i32 = match kind {
+                    V128ShiftKind::Shl => ((x as u32) << s) as i32,
+                    V128ShiftKind::ShrS => x >> s,
+                    V128ShiftKind::ShrU => ((x as u32) >> s) as i32,
+                };
+                d.copy_from_slice(&out.to_le_bytes());
+            }
+        }
+        LaneShape::I64x2 => {
+            for (d, chunk) in dst.chunks_exact_mut(8).zip(src.chunks_exact(8)) {
+                let x = i64::from_le_bytes(chunk.try_into().expect("width"));
+                let out: i64 = match kind {
+                    V128ShiftKind::Shl => ((x as u64) << s) as i64,
+                    V128ShiftKind::ShrS => x >> s,
+                    V128ShiftKind::ShrU => ((x as u64) >> s) as i64,
+                };
+                d.copy_from_slice(&out.to_le_bytes());
+            }
+        }
+        LaneShape::F32x4 | LaneShape::F64x2 => unreachable!("no float shifts"),
     }
 }
 

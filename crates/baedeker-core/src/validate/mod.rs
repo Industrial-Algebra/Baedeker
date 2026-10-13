@@ -2263,7 +2263,55 @@ fn validate_instr(
         | Instr::I32x4MinS
         | Instr::I32x4MinU
         | Instr::I32x4MaxS
-        | Instr::I32x4MaxU => validate_numeric_binary(
+        | Instr::I32x4MaxU
+        | Instr::I8x16Eq
+        | Instr::I8x16Ne
+        | Instr::I8x16LtS
+        | Instr::I8x16LtU
+        | Instr::I8x16GtS
+        | Instr::I8x16GtU
+        | Instr::I8x16LeS
+        | Instr::I8x16LeU
+        | Instr::I8x16GeS
+        | Instr::I8x16GeU
+        | Instr::I16x8Eq
+        | Instr::I16x8Ne
+        | Instr::I16x8LtS
+        | Instr::I16x8LtU
+        | Instr::I16x8GtS
+        | Instr::I16x8GtU
+        | Instr::I16x8LeS
+        | Instr::I16x8LeU
+        | Instr::I16x8GeS
+        | Instr::I16x8GeU
+        | Instr::I32x4Eq
+        | Instr::I32x4Ne
+        | Instr::I32x4LtS
+        | Instr::I32x4LtU
+        | Instr::I32x4GtS
+        | Instr::I32x4GtU
+        | Instr::I32x4LeS
+        | Instr::I32x4LeU
+        | Instr::I32x4GeS
+        | Instr::I32x4GeU
+        | Instr::F32x4Eq
+        | Instr::F32x4Ne
+        | Instr::F32x4Lt
+        | Instr::F32x4Gt
+        | Instr::F32x4Le
+        | Instr::F32x4Ge
+        | Instr::F64x2Eq
+        | Instr::F64x2Ne
+        | Instr::F64x2Lt
+        | Instr::F64x2Gt
+        | Instr::F64x2Le
+        | Instr::F64x2Ge
+        | Instr::I64x2Eq
+        | Instr::I64x2Ne
+        | Instr::I64x2LtS
+        | Instr::I64x2GtS
+        | Instr::I64x2LeS
+        | Instr::I64x2GeS => validate_numeric_binary(
             function,
             state,
             offset,
@@ -2348,6 +2396,36 @@ fn validate_instr(
                 ValType::Vec(crate::types::VecType::V128),
                 offset,
                 "v128.bitselect",
+            )?;
+            state
+                .operands
+                .push(ValType::Vec(crate::types::VecType::V128));
+        }
+        Instr::I8x16Shl
+        | Instr::I8x16ShrS
+        | Instr::I8x16ShrU
+        | Instr::I16x8Shl
+        | Instr::I16x8ShrS
+        | Instr::I16x8ShrU
+        | Instr::I32x4Shl
+        | Instr::I32x4ShrS
+        | Instr::I32x4ShrU
+        | Instr::I64x2Shl
+        | Instr::I64x2ShrS
+        | Instr::I64x2ShrU => {
+            pop_expect(
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I32),
+                offset,
+                "simd.shift",
+            )?;
+            pop_expect(
+                function,
+                state,
+                ValType::Vec(crate::types::VecType::V128),
+                offset,
+                "simd.shift",
             )?;
             state
                 .operands

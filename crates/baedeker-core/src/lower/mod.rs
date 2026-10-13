@@ -508,6 +508,24 @@ pub enum RegOp {
         src: Reg,
         shape: LaneShape,
     },
+    /// Lane-wise compare; dst lanes are all-ones/all-zeros at the
+    /// operand lane width.
+    V128Compare {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+        shape: LaneShape,
+        kind: V128CompareKind,
+    },
+    /// Lane-wise shift by an i32 scalar `amount`, taken modulo the lane
+    /// bit width (spec semantics; e.g. i8x16.shl by 9 == by 1).
+    V128Shift {
+        dst: Reg,
+        src: Reg,
+        amount: Reg,
+        shape: LaneShape,
+        kind: V128ShiftKind,
+    },
     /// Linear-memory store: mem[effective(addr)..+width] = value per `op`.
     Store {
         op: StoreOp,
@@ -719,6 +737,38 @@ pub enum V128UnaryKind {
     Abs,
     Neg,
     Popcnt,
+}
+
+/// Lane-wise compare kinds. Integer shapes use the s/u variants; float
+/// shapes use the plain variants. Result lanes are all-ones/all-zeros at
+/// the OPERAND lane width.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum V128CompareKind {
+    Eq,
+    Ne,
+    LtS,
+    LtU,
+    GtS,
+    GtU,
+    LeS,
+    LeU,
+    GeS,
+    GeU,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+}
+
+/// Lane-wise shift kinds (`shr_s` is arithmetic on the signed lane
+/// view; `shr_u` is logical on the unsigned view).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum V128ShiftKind {
+    Shl,
+    ShrS,
+    ShrU,
 }
 
 /// Linear-memory load operations.
@@ -3502,6 +3552,186 @@ impl<'b> FuncBuilder<'b> {
                 self.lower_v128_extmul(offset, LaneShape::I32x4, true, false)?
             }
             Instr::I32x4DotI16x8S => self.lower_v128_dot(offset)?,
+            Instr::I8x16Eq => {
+                self.lower_v128_compare(offset, LaneShape::I8x16, V128CompareKind::Eq)?
+            }
+            Instr::I8x16Ne => {
+                self.lower_v128_compare(offset, LaneShape::I8x16, V128CompareKind::Ne)?
+            }
+            Instr::I8x16LtS => {
+                self.lower_v128_compare(offset, LaneShape::I8x16, V128CompareKind::LtS)?
+            }
+            Instr::I8x16LtU => {
+                self.lower_v128_compare(offset, LaneShape::I8x16, V128CompareKind::LtU)?
+            }
+            Instr::I8x16GtS => {
+                self.lower_v128_compare(offset, LaneShape::I8x16, V128CompareKind::GtS)?
+            }
+            Instr::I8x16GtU => {
+                self.lower_v128_compare(offset, LaneShape::I8x16, V128CompareKind::GtU)?
+            }
+            Instr::I8x16LeS => {
+                self.lower_v128_compare(offset, LaneShape::I8x16, V128CompareKind::LeS)?
+            }
+            Instr::I8x16LeU => {
+                self.lower_v128_compare(offset, LaneShape::I8x16, V128CompareKind::LeU)?
+            }
+            Instr::I8x16GeS => {
+                self.lower_v128_compare(offset, LaneShape::I8x16, V128CompareKind::GeS)?
+            }
+            Instr::I8x16GeU => {
+                self.lower_v128_compare(offset, LaneShape::I8x16, V128CompareKind::GeU)?
+            }
+            Instr::I16x8Eq => {
+                self.lower_v128_compare(offset, LaneShape::I16x8, V128CompareKind::Eq)?
+            }
+            Instr::I16x8Ne => {
+                self.lower_v128_compare(offset, LaneShape::I16x8, V128CompareKind::Ne)?
+            }
+            Instr::I16x8LtS => {
+                self.lower_v128_compare(offset, LaneShape::I16x8, V128CompareKind::LtS)?
+            }
+            Instr::I16x8LtU => {
+                self.lower_v128_compare(offset, LaneShape::I16x8, V128CompareKind::LtU)?
+            }
+            Instr::I16x8GtS => {
+                self.lower_v128_compare(offset, LaneShape::I16x8, V128CompareKind::GtS)?
+            }
+            Instr::I16x8GtU => {
+                self.lower_v128_compare(offset, LaneShape::I16x8, V128CompareKind::GtU)?
+            }
+            Instr::I16x8LeS => {
+                self.lower_v128_compare(offset, LaneShape::I16x8, V128CompareKind::LeS)?
+            }
+            Instr::I16x8LeU => {
+                self.lower_v128_compare(offset, LaneShape::I16x8, V128CompareKind::LeU)?
+            }
+            Instr::I16x8GeS => {
+                self.lower_v128_compare(offset, LaneShape::I16x8, V128CompareKind::GeS)?
+            }
+            Instr::I16x8GeU => {
+                self.lower_v128_compare(offset, LaneShape::I16x8, V128CompareKind::GeU)?
+            }
+            Instr::I32x4Eq => {
+                self.lower_v128_compare(offset, LaneShape::I32x4, V128CompareKind::Eq)?
+            }
+            Instr::I32x4Ne => {
+                self.lower_v128_compare(offset, LaneShape::I32x4, V128CompareKind::Ne)?
+            }
+            Instr::I32x4LtS => {
+                self.lower_v128_compare(offset, LaneShape::I32x4, V128CompareKind::LtS)?
+            }
+            Instr::I32x4LtU => {
+                self.lower_v128_compare(offset, LaneShape::I32x4, V128CompareKind::LtU)?
+            }
+            Instr::I32x4GtS => {
+                self.lower_v128_compare(offset, LaneShape::I32x4, V128CompareKind::GtS)?
+            }
+            Instr::I32x4GtU => {
+                self.lower_v128_compare(offset, LaneShape::I32x4, V128CompareKind::GtU)?
+            }
+            Instr::I32x4LeS => {
+                self.lower_v128_compare(offset, LaneShape::I32x4, V128CompareKind::LeS)?
+            }
+            Instr::I32x4LeU => {
+                self.lower_v128_compare(offset, LaneShape::I32x4, V128CompareKind::LeU)?
+            }
+            Instr::I32x4GeS => {
+                self.lower_v128_compare(offset, LaneShape::I32x4, V128CompareKind::GeS)?
+            }
+            Instr::I32x4GeU => {
+                self.lower_v128_compare(offset, LaneShape::I32x4, V128CompareKind::GeU)?
+            }
+            Instr::F32x4Eq => {
+                self.lower_v128_compare(offset, LaneShape::F32x4, V128CompareKind::Eq)?
+            }
+            Instr::F32x4Ne => {
+                self.lower_v128_compare(offset, LaneShape::F32x4, V128CompareKind::Ne)?
+            }
+            Instr::F32x4Lt => {
+                self.lower_v128_compare(offset, LaneShape::F32x4, V128CompareKind::Lt)?
+            }
+            Instr::F32x4Gt => {
+                self.lower_v128_compare(offset, LaneShape::F32x4, V128CompareKind::Gt)?
+            }
+            Instr::F32x4Le => {
+                self.lower_v128_compare(offset, LaneShape::F32x4, V128CompareKind::Le)?
+            }
+            Instr::F32x4Ge => {
+                self.lower_v128_compare(offset, LaneShape::F32x4, V128CompareKind::Ge)?
+            }
+            Instr::F64x2Eq => {
+                self.lower_v128_compare(offset, LaneShape::F64x2, V128CompareKind::Eq)?
+            }
+            Instr::F64x2Ne => {
+                self.lower_v128_compare(offset, LaneShape::F64x2, V128CompareKind::Ne)?
+            }
+            Instr::F64x2Lt => {
+                self.lower_v128_compare(offset, LaneShape::F64x2, V128CompareKind::Lt)?
+            }
+            Instr::F64x2Gt => {
+                self.lower_v128_compare(offset, LaneShape::F64x2, V128CompareKind::Gt)?
+            }
+            Instr::F64x2Le => {
+                self.lower_v128_compare(offset, LaneShape::F64x2, V128CompareKind::Le)?
+            }
+            Instr::F64x2Ge => {
+                self.lower_v128_compare(offset, LaneShape::F64x2, V128CompareKind::Ge)?
+            }
+            Instr::I64x2Eq => {
+                self.lower_v128_compare(offset, LaneShape::I64x2, V128CompareKind::Eq)?
+            }
+            Instr::I64x2Ne => {
+                self.lower_v128_compare(offset, LaneShape::I64x2, V128CompareKind::Ne)?
+            }
+            Instr::I64x2LtS => {
+                self.lower_v128_compare(offset, LaneShape::I64x2, V128CompareKind::LtS)?
+            }
+            Instr::I64x2GtS => {
+                self.lower_v128_compare(offset, LaneShape::I64x2, V128CompareKind::GtS)?
+            }
+            Instr::I64x2LeS => {
+                self.lower_v128_compare(offset, LaneShape::I64x2, V128CompareKind::LeS)?
+            }
+            Instr::I64x2GeS => {
+                self.lower_v128_compare(offset, LaneShape::I64x2, V128CompareKind::GeS)?
+            }
+            Instr::I8x16Shl => {
+                self.lower_v128_shift(offset, LaneShape::I8x16, V128ShiftKind::Shl)?
+            }
+            Instr::I8x16ShrS => {
+                self.lower_v128_shift(offset, LaneShape::I8x16, V128ShiftKind::ShrS)?
+            }
+            Instr::I8x16ShrU => {
+                self.lower_v128_shift(offset, LaneShape::I8x16, V128ShiftKind::ShrU)?
+            }
+            Instr::I16x8Shl => {
+                self.lower_v128_shift(offset, LaneShape::I16x8, V128ShiftKind::Shl)?
+            }
+            Instr::I16x8ShrS => {
+                self.lower_v128_shift(offset, LaneShape::I16x8, V128ShiftKind::ShrS)?
+            }
+            Instr::I16x8ShrU => {
+                self.lower_v128_shift(offset, LaneShape::I16x8, V128ShiftKind::ShrU)?
+            }
+            Instr::I32x4Shl => {
+                self.lower_v128_shift(offset, LaneShape::I32x4, V128ShiftKind::Shl)?
+            }
+            Instr::I32x4ShrS => {
+                self.lower_v128_shift(offset, LaneShape::I32x4, V128ShiftKind::ShrS)?
+            }
+            Instr::I32x4ShrU => {
+                self.lower_v128_shift(offset, LaneShape::I32x4, V128ShiftKind::ShrU)?
+            }
+            Instr::I64x2Shl => {
+                self.lower_v128_shift(offset, LaneShape::I64x2, V128ShiftKind::Shl)?
+            }
+            Instr::I64x2ShrS => {
+                self.lower_v128_shift(offset, LaneShape::I64x2, V128ShiftKind::ShrS)?
+            }
+            Instr::I64x2ShrU => {
+                self.lower_v128_shift(offset, LaneShape::I64x2, V128ShiftKind::ShrU)?
+            }
             instr => {
                 if let Some(op) = unary_op(&instr) {
                     self.lower_unary_op(offset, op)?;
@@ -3813,6 +4043,54 @@ impl<'b> FuncBuilder<'b> {
             RegOp::V128Unary {
                 dst,
                 src: src.reg,
+                shape,
+                kind,
+            },
+        );
+        Ok(())
+    }
+
+    fn lower_v128_compare(
+        &mut self,
+        offset: ByteOffset,
+        shape: LaneShape,
+        kind: V128CompareKind,
+    ) -> Result<(), LowerError> {
+        let v128 = ValType::Vec(crate::types::VecType::V128);
+        let b = self.pop_expect(offset, "simd.compare", v128)?;
+        let a = self.pop_expect(offset, "simd.compare", v128)?;
+        let dst = self.alloc_reg(v128);
+        self.stack.push(RegValue { reg: dst, ty: v128 });
+        self.emit(
+            offset,
+            RegOp::V128Compare {
+                dst,
+                a: a.reg,
+                b: b.reg,
+                shape,
+                kind,
+            },
+        );
+        Ok(())
+    }
+
+    fn lower_v128_shift(
+        &mut self,
+        offset: ByteOffset,
+        shape: LaneShape,
+        kind: V128ShiftKind,
+    ) -> Result<(), LowerError> {
+        let v128 = ValType::Vec(crate::types::VecType::V128);
+        let amount = self.pop_expect(offset, "simd.shift", ValType::Num(NumType::I32))?;
+        let src = self.pop_expect(offset, "simd.shift", v128)?;
+        let dst = self.alloc_reg(v128);
+        self.stack.push(RegValue { reg: dst, ty: v128 });
+        self.emit(
+            offset,
+            RegOp::V128Shift {
+                dst,
+                src: src.reg,
+                amount: amount.reg,
                 shape,
                 kind,
             },
