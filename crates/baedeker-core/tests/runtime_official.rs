@@ -53,8 +53,6 @@ const DEFERRED_FILES: &[(&str, &str)] = &[
     ("imports.wast", "tag section (exceptions) not implemented"),
     // The wast parser rejects the confusable unicode names.wast needs.
     ("names.wast", "parser rejects confusable unicode in names"),
-    // Full SIMD surface beyond the current core subset.
-    ("simd", "full SIMD surface not implemented"),
 ];
 
 #[derive(Debug, Default)]
