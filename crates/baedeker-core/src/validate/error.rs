@@ -169,6 +169,10 @@ pub enum ValidationErrorKind {
     DuplicateExportName {
         name: alloc::string::String,
     },
+    /// A feature that is decoded but not yet implemented/validated.
+    Unsupported {
+        feature: &'static str,
+    },
 }
 
 impl fmt::Display for ValidationError {
@@ -426,6 +430,9 @@ impl fmt::Display for ValidationErrorKind {
             ValidationErrorKind::TableTypeMismatch => write!(f, "type mismatch"),
             ValidationErrorKind::DuplicateExportName { name } => {
                 write!(f, "duplicate export name {:?}", name)
+            }
+            ValidationErrorKind::Unsupported { feature } => {
+                write!(f, "unsupported feature: {feature}")
             }
         }
     }

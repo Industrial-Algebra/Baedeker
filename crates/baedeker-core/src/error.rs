@@ -116,6 +116,8 @@ pub enum DecodeErrorKind {
     UnknownImportDesc { byte: u8 },
     /// Unknown export descriptor tag.
     UnknownExportDesc { byte: u8 },
+    /// Tag section entry had a non-zero attribute byte.
+    InvalidTagAttribute { byte: u8 },
     /// Invalid global mutability encoding.
     InvalidMutability { byte: u8 },
     /// Invalid UTF-8 in a name string.
@@ -181,6 +183,9 @@ impl fmt::Display for DecodeErrorKind {
             }
             DecodeErrorKind::UnknownExportDesc { byte } => {
                 write!(f, "unknown export descriptor {byte:#04x}")
+            }
+            DecodeErrorKind::InvalidTagAttribute { byte } => {
+                write!(f, "invalid tag attribute {byte:#04x}")
             }
             DecodeErrorKind::InvalidMutability { byte } => {
                 write!(f, "invalid mutability {byte:#04x}")

@@ -200,7 +200,9 @@ fn parse_init_expr<'a>(
             e
         })?;
         match instr {
-            Instr::Block(_) | Instr::Loop(_) | Instr::If(_) => block_depth += 1,
+            Instr::Block(_) | Instr::Loop(_) | Instr::If(_) | Instr::TryTable(_) => {
+                block_depth += 1
+            }
             Instr::End => {
                 if block_depth == 0 {
                     return Ok(&cursor.original()[start..cursor.position()]);

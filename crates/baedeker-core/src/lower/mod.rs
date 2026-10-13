@@ -16,7 +16,7 @@ use crate::error::{ByteOffset, DecodeContext, DecodeErrorKind};
 use crate::types::{
     BlockType, CodeBody, DataMode, ElemIdx, ElementInit, ElementMode, ExportDesc, FuncIdx,
     FuncType, GlobalIdx, ImportDesc, LabelIdx, LocalDecl, LocalIdx, MemArg, MemIdx, MemType,
-    Mutability, NumType, RefType, TableIdx, TableType, TypeIdx, ValType,
+    Mutability, NumType, RefType, TableIdx, TableType, TagIdx, TypeIdx, ValType,
 };
 use crate::validate;
 use crate::validate::error::{ValidationError, ValidationErrorKind};
@@ -215,6 +215,8 @@ pub enum RegExportDesc {
     Table(TableIdx),
     Mem(MemIdx),
     Global(GlobalIdx),
+    /// Exported exception tag (placeholder; lowering lands with U4).
+    Tag(TagIdx),
 }
 
 /// A defined function lowered into register IR.
@@ -1816,6 +1818,7 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
                 ExportDesc::Table(idx) => RegExportDesc::Table(idx),
                 ExportDesc::Mem(idx) => RegExportDesc::Mem(idx),
                 ExportDesc::Global(idx) => RegExportDesc::Global(idx),
+                ExportDesc::Tag(idx) => RegExportDesc::Tag(idx),
             },
         })
         .collect();
@@ -2128,6 +2131,7 @@ fn ref_compatible(found: ValType, expected: ValType) -> bool {
             crate::types::RefType::Typed { heap, .. } => match heap {
                 crate::types::HeapType::Func | crate::types::HeapType::Type(_) => 0,
                 crate::types::HeapType::Extern => 1,
+                crate::types::HeapType::Exn => 2,
             },
         }
     }

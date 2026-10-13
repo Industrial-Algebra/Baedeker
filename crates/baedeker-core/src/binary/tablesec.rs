@@ -73,7 +73,8 @@ fn parse_table_type(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Table
             match instr {
                 crate::binary::instr::Instr::Block(_)
                 | crate::binary::instr::Instr::Loop(_)
-                | crate::binary::instr::Instr::If(_) => block_depth += 1,
+                | crate::binary::instr::Instr::If(_)
+                | crate::binary::instr::Instr::TryTable(_) => block_depth += 1,
                 crate::binary::instr::Instr::End => {
                     if block_depth == 0 {
                         break;

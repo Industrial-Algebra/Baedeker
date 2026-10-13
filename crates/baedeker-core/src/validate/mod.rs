@@ -116,6 +116,15 @@ fn validate_imports(module: &Module<'_>) -> Result<(), ValidationError> {
                 validate_valtype_type_indices(module, global.val_type, None, offset)?;
             }
             ImportDesc::Mem(_) => {}
+            ImportDesc::Tag(_) => {
+                return Err(ValidationError {
+                    offset: ByteOffset(offset),
+                    function: None,
+                    kind: ValidationErrorKind::Unsupported {
+                        feature: "exception handling",
+                    },
+                });
+            }
         }
     }
 
@@ -647,6 +656,15 @@ fn validate_exports(module: &Module<'_>) -> Result<(), ValidationError> {
             }
             ExportDesc::Global(idx) => {
                 let _ = resolve_global_type_for_module(module, idx, offset)?;
+            }
+            ExportDesc::Tag(_) => {
+                return Err(ValidationError {
+                    offset: ByteOffset(offset),
+                    function: None,
+                    kind: ValidationErrorKind::Unsupported {
+                        feature: "exception handling",
+                    },
+                });
             }
         }
     }
@@ -2903,6 +2921,15 @@ fn validate_instr(
             ValType::Num(crate::types::NumType::F64),
             ValType::Num(crate::types::NumType::I64),
         )?,
+        Instr::TryTable(_) | Instr::Throw(_) | Instr::ThrowRef => {
+            return Err(ValidationError {
+                offset: ByteOffset(offset),
+                function: Some(function),
+                kind: ValidationErrorKind::Unsupported {
+                    feature: "exception handling",
+                },
+            });
+        }
     }
 
     Ok(())
@@ -5582,8 +5609,8 @@ mod tests {
     fn reject_unknown_data_index_in_memory_init() {
         let bytes = [
             0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
-            0x03, 0x02, 0x01, 0x00, 0x05, 0x03, 0x01, 0x00, 0x01, 0x0A, 0x0E, 0x01, 0x0C, 0x00,
-            0x41, 0x00, 0x41, 0x00, 0x41, 0x01, 0xFC, 0x08, 0x00, 0x00, 0x0B, 0x0C, 0x01, 0x00,
+            0x03, 0x02, 0x01, 0x00, 0x05, 0x03, 0x01, 0x00, 0x01, 0x0C, 0x01, 0x00, 0x0A, 0x0E,
+            0x01, 0x0C, 0x00, 0x41, 0x00, 0x41, 0x00, 0x41, 0x01, 0xFC, 0x08, 0x00, 0x00, 0x0B,
         ];
         let module = Module::decode(&bytes).unwrap();
         let err = module.validate().unwrap_err();

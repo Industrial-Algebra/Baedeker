@@ -23,6 +23,7 @@ use crate::binary::memorysec;
 use crate::binary::section::{self, RawSection, SectionId};
 use crate::binary::startsec;
 use crate::binary::tablesec;
+use crate::binary::tagsec;
 use crate::binary::typesec;
 use crate::error::{ByteOffset, DecodeError, DecodeErrorKind};
 use crate::types::{
@@ -54,6 +55,8 @@ pub struct Module<'a> {
     pub globals: Vec<Global<'a>>,
     /// Defined memories from the memory section.
     pub memories: Vec<MemType>,
+    /// Type indices for module-defined (non-imported) tags.
+    pub tags: Vec<TypeIdx>,
     /// Defined data segments from the data section.
     pub data: Vec<DataSegment<'a>>,
     /// Optional declared start function.
@@ -106,6 +109,10 @@ impl<'a> Module<'a> {
             Some(section) => memorysec::parse_memory_section(section)?,
             None => Vec::new(),
         };
+        let tags = match sections.iter().find(|s| s.id == SectionId::Tag) {
+            Some(section) => tagsec::parse_tag_section(section)?,
+            None => Vec::new(),
+        };
         let data = match sections.iter().find(|s| s.id == SectionId::Data) {
             Some(section) => datasec::parse_data_section(section)?,
             None => Vec::new(),
@@ -144,6 +151,7 @@ impl<'a> Module<'a> {
             elements,
             globals,
             memories,
+            tags,
             data,
             start,
             data_count,
