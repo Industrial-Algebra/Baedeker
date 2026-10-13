@@ -413,6 +413,7 @@ pub enum RegOp {
         shape: LaneShape,
         src: Reg,
         lane: u8,
+        signed: bool,
     },
     /// Replace one lane of a vector with a scalar.
     V128ReplaceLane {
@@ -625,6 +626,17 @@ pub enum V128BinaryKind {
     And,
     Or,
     Xor,
+    Andnot,
+    AddSatS,
+    AddSatU,
+    SubSatS,
+    SubSatU,
+    MinS,
+    MinU,
+    MaxS,
+    MaxU,
+    AvgrU,
+    Q15MulrSatS,
 }
 
 /// Linear-memory load operations.
@@ -3098,16 +3110,46 @@ impl<'b> FuncBuilder<'b> {
             Instr::F32x4Splat => self.lower_splat(offset, LaneShape::F32x4)?,
             Instr::F64x2Splat => self.lower_splat(offset, LaneShape::F64x2)?,
             Instr::I32x4ExtractLane(lane) => {
-                self.lower_extract_lane(offset, LaneShape::I32x4, lane)?
+                self.lower_extract_lane(offset, LaneShape::I32x4, lane, true)?
             }
             Instr::F32x4ExtractLane(lane) => {
-                self.lower_extract_lane(offset, LaneShape::F32x4, lane)?
+                self.lower_extract_lane(offset, LaneShape::F32x4, lane, true)?
             }
             Instr::I32x4ReplaceLane(lane) => {
                 self.lower_replace_lane(offset, LaneShape::I32x4, lane)?
             }
             Instr::F32x4ReplaceLane(lane) => {
                 self.lower_replace_lane(offset, LaneShape::F32x4, lane)?
+            }
+            Instr::I8x16ExtractLaneS(lane) => {
+                self.lower_extract_lane(offset, LaneShape::I8x16, lane, true)?
+            }
+            Instr::I8x16ExtractLaneU(lane) => {
+                self.lower_extract_lane(offset, LaneShape::I8x16, lane, false)?
+            }
+            Instr::I8x16ReplaceLane(lane) => {
+                self.lower_replace_lane(offset, LaneShape::I8x16, lane)?
+            }
+            Instr::I16x8ExtractLaneS(lane) => {
+                self.lower_extract_lane(offset, LaneShape::I16x8, lane, true)?
+            }
+            Instr::I16x8ExtractLaneU(lane) => {
+                self.lower_extract_lane(offset, LaneShape::I16x8, lane, false)?
+            }
+            Instr::I16x8ReplaceLane(lane) => {
+                self.lower_replace_lane(offset, LaneShape::I16x8, lane)?
+            }
+            Instr::I64x2ExtractLane(lane) => {
+                self.lower_extract_lane(offset, LaneShape::I64x2, lane, true)?
+            }
+            Instr::I64x2ReplaceLane(lane) => {
+                self.lower_replace_lane(offset, LaneShape::I64x2, lane)?
+            }
+            Instr::F64x2ExtractLane(lane) => {
+                self.lower_extract_lane(offset, LaneShape::F64x2, lane, true)?
+            }
+            Instr::F64x2ReplaceLane(lane) => {
+                self.lower_replace_lane(offset, LaneShape::F64x2, lane)?
             }
             Instr::V128Not => {
                 let src = self.pop_expect(
@@ -3128,6 +3170,9 @@ impl<'b> FuncBuilder<'b> {
             }
             Instr::V128Xor => {
                 self.lower_v128_binary(offset, LaneShape::I8x16, V128BinaryKind::Xor)?
+            }
+            Instr::V128Andnot => {
+                self.lower_v128_binary(offset, LaneShape::I8x16, V128BinaryKind::Andnot)?
             }
             Instr::I8x16Add => {
                 self.lower_v128_binary(offset, LaneShape::I8x16, V128BinaryKind::Add)?
@@ -3179,6 +3224,75 @@ impl<'b> FuncBuilder<'b> {
             }
             Instr::F64x2Div => {
                 self.lower_v128_binary(offset, LaneShape::F64x2, V128BinaryKind::Div)?
+            }
+            Instr::I8x16AddSatS => {
+                self.lower_v128_binary(offset, LaneShape::I8x16, V128BinaryKind::AddSatS)?
+            }
+            Instr::I8x16AddSatU => {
+                self.lower_v128_binary(offset, LaneShape::I8x16, V128BinaryKind::AddSatU)?
+            }
+            Instr::I8x16SubSatS => {
+                self.lower_v128_binary(offset, LaneShape::I8x16, V128BinaryKind::SubSatS)?
+            }
+            Instr::I8x16SubSatU => {
+                self.lower_v128_binary(offset, LaneShape::I8x16, V128BinaryKind::SubSatU)?
+            }
+            Instr::I8x16MinS => {
+                self.lower_v128_binary(offset, LaneShape::I8x16, V128BinaryKind::MinS)?
+            }
+            Instr::I8x16MinU => {
+                self.lower_v128_binary(offset, LaneShape::I8x16, V128BinaryKind::MinU)?
+            }
+            Instr::I8x16MaxS => {
+                self.lower_v128_binary(offset, LaneShape::I8x16, V128BinaryKind::MaxS)?
+            }
+            Instr::I8x16MaxU => {
+                self.lower_v128_binary(offset, LaneShape::I8x16, V128BinaryKind::MaxU)?
+            }
+            Instr::I8x16AvgrU => {
+                self.lower_v128_binary(offset, LaneShape::I8x16, V128BinaryKind::AvgrU)?
+            }
+            Instr::I16x8AddSatS => {
+                self.lower_v128_binary(offset, LaneShape::I16x8, V128BinaryKind::AddSatS)?
+            }
+            Instr::I16x8AddSatU => {
+                self.lower_v128_binary(offset, LaneShape::I16x8, V128BinaryKind::AddSatU)?
+            }
+            Instr::I16x8SubSatS => {
+                self.lower_v128_binary(offset, LaneShape::I16x8, V128BinaryKind::SubSatS)?
+            }
+            Instr::I16x8SubSatU => {
+                self.lower_v128_binary(offset, LaneShape::I16x8, V128BinaryKind::SubSatU)?
+            }
+            Instr::I16x8MinS => {
+                self.lower_v128_binary(offset, LaneShape::I16x8, V128BinaryKind::MinS)?
+            }
+            Instr::I16x8MinU => {
+                self.lower_v128_binary(offset, LaneShape::I16x8, V128BinaryKind::MinU)?
+            }
+            Instr::I16x8MaxS => {
+                self.lower_v128_binary(offset, LaneShape::I16x8, V128BinaryKind::MaxS)?
+            }
+            Instr::I16x8MaxU => {
+                self.lower_v128_binary(offset, LaneShape::I16x8, V128BinaryKind::MaxU)?
+            }
+            Instr::I16x8AvgrU => {
+                self.lower_v128_binary(offset, LaneShape::I16x8, V128BinaryKind::AvgrU)?
+            }
+            Instr::I16x8Q15MulrSatS => {
+                self.lower_v128_binary(offset, LaneShape::I16x8, V128BinaryKind::Q15MulrSatS)?
+            }
+            Instr::I32x4MinS => {
+                self.lower_v128_binary(offset, LaneShape::I32x4, V128BinaryKind::MinS)?
+            }
+            Instr::I32x4MinU => {
+                self.lower_v128_binary(offset, LaneShape::I32x4, V128BinaryKind::MinU)?
+            }
+            Instr::I32x4MaxS => {
+                self.lower_v128_binary(offset, LaneShape::I32x4, V128BinaryKind::MaxS)?
+            }
+            Instr::I32x4MaxU => {
+                self.lower_v128_binary(offset, LaneShape::I32x4, V128BinaryKind::MaxU)?
             }
             instr => {
                 if let Some(op) = unary_op(&instr) {
@@ -3401,6 +3515,7 @@ impl<'b> FuncBuilder<'b> {
         offset: ByteOffset,
         shape: LaneShape,
         lane: u8,
+        signed: bool,
     ) -> Result<(), LowerError> {
         let src = self.pop_expect(
             offset,
@@ -3417,6 +3532,7 @@ impl<'b> FuncBuilder<'b> {
                 shape,
                 src: src.reg,
                 lane,
+                signed,
             },
         );
         Ok(())

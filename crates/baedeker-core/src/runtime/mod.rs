@@ -1515,6 +1515,7 @@ fn execute_reg_op(
             shape,
             src,
             lane,
+            signed,
         } => {
             let Value::V128(bytes) = get_reg(registers, *src)? else {
                 return Err(RuntimeError {
@@ -1524,7 +1525,7 @@ fn execute_reg_op(
                     },
                 });
             };
-            let value = extract_lane(*shape, &bytes, *lane)?;
+            let value = extract_lane(*shape, &bytes, *lane, *signed)?;
             set_reg(registers, *dst, value)?;
         }
         RegOp::V128ReplaceLane {
@@ -1762,7 +1763,28 @@ macro_rules! lane_int_op {
             V128BinaryKind::Sub => a.wrapping_sub(b),
             V128BinaryKind::Mul => a.wrapping_mul(b),
             V128BinaryKind::Div => a.wrapping_div(b),
-            _ => unreachable!("bitwise kinds handled separately"),
+            V128BinaryKind::AddSatS => a.saturating_add(b),
+            V128BinaryKind::SubSatS => a.saturating_sub(b),
+            V128BinaryKind::MinS => a.min(b),
+            V128BinaryKind::MaxS => a.max(b),
+            _ => unreachable!("unsigned kinds handled by lane_uint_op!"),
+        }
+    }};
+}
+
+/// Lane-wise unsigned-interpretation integer arithmetic. The `_u` variants
+/// reinterpret the lane bytes as unsigned before operating; `avgr_u`
+/// widens so `(a + b + 1)` cannot overflow.
+macro_rules! lane_uint_op {
+    ($kind:expr, $a:expr, $b:expr, $ty:ty) => {{
+        let (a, b) = ($a as $ty, $b as $ty);
+        match $kind {
+            V128BinaryKind::AddSatU => a.saturating_add(b),
+            V128BinaryKind::SubSatU => a.saturating_sub(b),
+            V128BinaryKind::MinU => a.min(b),
+            V128BinaryKind::MaxU => a.max(b),
+            V128BinaryKind::AvgrU => (a as u32 + b as u32).div_ceil(2) as $ty,
+            _ => unreachable!("signed kinds handled by lane_int_op!"),
         }
     }};
 }
@@ -1817,8 +1839,15 @@ fn splat_bytes(shape: LaneShape, scalar: Value) -> Result<[u8; 16], RuntimeError
     Ok(out)
 }
 
-/// Read one lane as a scalar Value.
-fn extract_lane(shape: LaneShape, bytes: &[u8; 16], lane: u8) -> Result<Value, RuntimeError> {
+/// Read one lane as a scalar Value. `signed` only affects 8/16-bit int
+/// lanes (`_s` sign-extends, `_u` zero-extends); wider/float shapes ignore
+/// it.
+fn extract_lane(
+    shape: LaneShape,
+    bytes: &[u8; 16],
+    lane: u8,
+    signed: bool,
+) -> Result<Value, RuntimeError> {
     let width = shape.lane_width();
     let start = lane as usize * width;
     if start + width > 16 {
@@ -1828,9 +1857,20 @@ fn extract_lane(shape: LaneShape, bytes: &[u8; 16], lane: u8) -> Result<Value, R
     }
     let lane_bytes = &bytes[start..start + width];
     Ok(match shape {
-        LaneShape::I8x16 => Value::I32(lane_bytes[0] as i8 as i32),
+        LaneShape::I8x16 => {
+            if signed {
+                Value::I32(lane_bytes[0] as i8 as i32)
+            } else {
+                Value::I32(lane_bytes[0] as i32)
+            }
+        }
         LaneShape::I16x8 => {
-            Value::I32(i16::from_le_bytes(lane_bytes.try_into().expect("width")) as i32)
+            let value = i16::from_le_bytes(lane_bytes.try_into().expect("width"));
+            if signed {
+                Value::I32(value as i32)
+            } else {
+                Value::I32(value as u16 as i32)
+            }
         }
         LaneShape::I32x4 => Value::I32(i32::from_le_bytes(lane_bytes.try_into().expect("width"))),
         LaneShape::I64x2 => Value::I64(i64::from_le_bytes(lane_bytes.try_into().expect("width"))),
@@ -1881,6 +1921,11 @@ fn v128_binary(shape: LaneShape, kind: V128BinaryKind, lhs: &[u8; 16], rhs: &[u8
                 out[i] = lhs[i] ^ rhs[i];
             }
         }
+        V128BinaryKind::Andnot => {
+            for i in 0..16 {
+                out[i] = lhs[i] & !rhs[i];
+            }
+        }
         _ => {
             let width = shape.lane_width();
             for ((dst_lane, lhs_lane), rhs_lane) in out
@@ -1902,25 +1947,54 @@ fn apply_lane_binary(
     lhs: &[u8],
     rhs: &[u8],
 ) {
+    // Unsigned-interpretation kinds route through `lane_uint_op!` on the
+    // unsigned view of the lane width; everything else keeps the signed
+    // path. q15mulr is i16-only and needs i32 intermediates.
     match shape {
         LaneShape::I8x16 => {
-            dst[0] = lane_int_op!(kind, lhs[0], rhs[0], i8) as u8;
+            if kind == V128BinaryKind::Q15MulrSatS {
+                unreachable!("q15mulr_sat_s is i16x8-only");
+            }
+            if uses_unsigned_view(kind) {
+                dst[0] = lane_uint_op!(kind, lhs[0], rhs[0], u8);
+            } else {
+                dst[0] = lane_int_op!(kind, lhs[0], rhs[0], i8) as u8;
+            }
         }
         LaneShape::I16x8 => {
-            let a = i16::from_le_bytes(lhs.try_into().expect("width"));
-            let b = i16::from_le_bytes(rhs.try_into().expect("width"));
-            let result = lane_int_op!(kind, a, b, i16);
+            let (a, b) = (
+                i16::from_le_bytes(lhs.try_into().expect("width")),
+                i16::from_le_bytes(rhs.try_into().expect("width")),
+            );
+            let result = if kind == V128BinaryKind::Q15MulrSatS {
+                // q15: saturate_i16((a*b + 0x4000) >> 15) on i32 lanes.
+                let product = a as i32 * b as i32;
+                let shifted = (product + 0x4000) >> 15;
+                shifted.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+            } else if uses_unsigned_view(kind) {
+                lane_uint_op!(kind, a, b, u16) as i16
+            } else {
+                lane_int_op!(kind, a, b, i16)
+            };
             dst.copy_from_slice(&result.to_le_bytes());
         }
         LaneShape::I32x4 => {
-            let a = i32::from_le_bytes(lhs.try_into().expect("width"));
-            let b = i32::from_le_bytes(rhs.try_into().expect("width"));
-            let result = lane_int_op!(kind, a, b, i32);
+            let (a, b) = (
+                i32::from_le_bytes(lhs.try_into().expect("width")),
+                i32::from_le_bytes(rhs.try_into().expect("width")),
+            );
+            let result = if uses_unsigned_view(kind) {
+                lane_uint_op!(kind, a, b, u32) as i32
+            } else {
+                lane_int_op!(kind, a, b, i32)
+            };
             dst.copy_from_slice(&result.to_le_bytes());
         }
         LaneShape::I64x2 => {
-            let a = i64::from_le_bytes(lhs.try_into().expect("width"));
-            let b = i64::from_le_bytes(rhs.try_into().expect("width"));
+            let (a, b) = (
+                i64::from_le_bytes(lhs.try_into().expect("width")),
+                i64::from_le_bytes(rhs.try_into().expect("width")),
+            );
             let result = lane_int_op!(kind, a, b, i64);
             dst.copy_from_slice(&result.to_le_bytes());
         }
@@ -1937,6 +2011,18 @@ fn apply_lane_binary(
             dst.copy_from_slice(&result.to_bits().to_le_bytes());
         }
     }
+}
+
+/// Whether the kind interprets lanes as unsigned (the `_u` families).
+fn uses_unsigned_view(kind: V128BinaryKind) -> bool {
+    matches!(
+        kind,
+        V128BinaryKind::AddSatU
+            | V128BinaryKind::SubSatU
+            | V128BinaryKind::MinU
+            | V128BinaryKind::MaxU
+            | V128BinaryKind::AvgrU
+    )
 }
 
 fn set_reg(registers: &mut [Option<Value>], reg: Reg, value: Value) -> Result<(), RuntimeError> {

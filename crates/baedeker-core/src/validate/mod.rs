@@ -2077,6 +2077,33 @@ fn validate_instr(
             ValType::Vec(crate::types::VecType::V128),
             ValType::Num(crate::types::NumType::I32),
         )?,
+        Instr::I8x16ExtractLaneS(_)
+        | Instr::I8x16ExtractLaneU(_)
+        | Instr::I16x8ExtractLaneS(_)
+        | Instr::I16x8ExtractLaneU(_) => validate_numeric_unary(
+            function,
+            state,
+            offset,
+            "simd.extract_lane",
+            ValType::Vec(crate::types::VecType::V128),
+            ValType::Num(crate::types::NumType::I32),
+        )?,
+        Instr::I64x2ExtractLane(_) => validate_numeric_unary(
+            function,
+            state,
+            offset,
+            "i64x2.extract_lane",
+            ValType::Vec(crate::types::VecType::V128),
+            ValType::Num(crate::types::NumType::I64),
+        )?,
+        Instr::F64x2ExtractLane(_) => validate_numeric_unary(
+            function,
+            state,
+            offset,
+            "f64x2.extract_lane",
+            ValType::Vec(crate::types::VecType::V128),
+            ValType::Num(crate::types::NumType::F64),
+        )?,
         Instr::F32x4ExtractLane(_) => validate_numeric_unary(
             function,
             state,
@@ -2104,6 +2131,25 @@ fn validate_instr(
                 .operands
                 .push(ValType::Vec(crate::types::VecType::V128));
         }
+        Instr::I8x16ReplaceLane(_) | Instr::I16x8ReplaceLane(_) => {
+            pop_expect(
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I32),
+                offset,
+                "simd.replace_lane",
+            )?;
+            pop_expect(
+                function,
+                state,
+                ValType::Vec(crate::types::VecType::V128),
+                offset,
+                "simd.replace_lane",
+            )?;
+            state
+                .operands
+                .push(ValType::Vec(crate::types::VecType::V128));
+        }
         Instr::F32x4ReplaceLane(_) => {
             pop_expect(
                 function,
@@ -2118,6 +2164,44 @@ fn validate_instr(
                 ValType::Vec(crate::types::VecType::V128),
                 offset,
                 "f32x4.replace_lane",
+            )?;
+            state
+                .operands
+                .push(ValType::Vec(crate::types::VecType::V128));
+        }
+        Instr::I64x2ReplaceLane(_) => {
+            pop_expect(
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I64),
+                offset,
+                "i64x2.replace_lane",
+            )?;
+            pop_expect(
+                function,
+                state,
+                ValType::Vec(crate::types::VecType::V128),
+                offset,
+                "i64x2.replace_lane",
+            )?;
+            state
+                .operands
+                .push(ValType::Vec(crate::types::VecType::V128));
+        }
+        Instr::F64x2ReplaceLane(_) => {
+            pop_expect(
+                function,
+                state,
+                ValType::Num(crate::types::NumType::F64),
+                offset,
+                "f64x2.replace_lane",
+            )?;
+            pop_expect(
+                function,
+                state,
+                ValType::Vec(crate::types::VecType::V128),
+                offset,
+                "f64x2.replace_lane",
             )?;
             state
                 .operands
@@ -2155,7 +2239,31 @@ fn validate_instr(
         | Instr::F64x2Add
         | Instr::F64x2Sub
         | Instr::F64x2Mul
-        | Instr::F64x2Div => validate_numeric_binary(
+        | Instr::F64x2Div
+        | Instr::V128Andnot
+        | Instr::I8x16AddSatS
+        | Instr::I8x16AddSatU
+        | Instr::I8x16SubSatS
+        | Instr::I8x16SubSatU
+        | Instr::I8x16MinS
+        | Instr::I8x16MinU
+        | Instr::I8x16MaxS
+        | Instr::I8x16MaxU
+        | Instr::I8x16AvgrU
+        | Instr::I16x8AddSatS
+        | Instr::I16x8AddSatU
+        | Instr::I16x8SubSatS
+        | Instr::I16x8SubSatU
+        | Instr::I16x8MinS
+        | Instr::I16x8MinU
+        | Instr::I16x8MaxS
+        | Instr::I16x8MaxU
+        | Instr::I16x8AvgrU
+        | Instr::I16x8Q15MulrSatS
+        | Instr::I32x4MinS
+        | Instr::I32x4MinU
+        | Instr::I32x4MaxS
+        | Instr::I32x4MaxU => validate_numeric_binary(
             function,
             state,
             offset,
