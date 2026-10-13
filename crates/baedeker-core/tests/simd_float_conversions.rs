@@ -201,13 +201,17 @@ fn swizzle_out_of_range_indices_yield_zero() {
 
 #[test]
 fn shuffle_selects_from_both_operands() {
+    // Non-identity operand bytes: an implementation that echoes the
+    // immediate indices (instead of indexing the operands) must fail.
     let got = run_v128(
         "(i8x16.shuffle 0 15 16 31 3 4 17 18 5 6 7 8 19 20 21 22 \
-         (v128.const i8x16 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15) \
-         (v128.const i8x16 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31))",
+         (v128.const i8x16 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25) \
+         (v128.const i8x16 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45))",
     );
     assert_eq!(
         got,
-        [0, 15, 16, 31, 3, 4, 17, 18, 5, 6, 7, 8, 19, 20, 21, 22]
+        [
+            10, 25, 30, 45, 13, 14, 31, 32, 15, 16, 17, 18, 33, 34, 35, 36
+        ]
     );
 }
