@@ -53,8 +53,6 @@ const DEFERRED_FILES: &[(&str, &str)] = &[
     ("imports.wast", "tag section (exceptions) not implemented"),
     // The wast parser rejects the confusable unicode names.wast needs.
     ("names.wast", "parser rejects confusable unicode in names"),
-    // Full SIMD surface beyond the current core subset.
-    ("simd", "full SIMD surface not implemented"),
 ];
 
 #[derive(Debug, Default)]
@@ -572,6 +570,7 @@ fn invoke_args(args: &[WastArg<'_>]) -> Vec<Value> {
             WastArg::Core(WastArgCore::I64(value)) => Value::I64(*value),
             WastArg::Core(WastArgCore::F32(value)) => Value::F32(f32::from_bits(value.bits)),
             WastArg::Core(WastArgCore::F64(value)) => Value::F64(f64::from_bits(value.bits)),
+            WastArg::Core(WastArgCore::V128(value)) => Value::V128(value.to_le_bytes()),
             WastArg::Core(WastArgCore::RefNull(ty)) => match ty {
                 wast::core::HeapType::Abstract {
                     ty: wast::core::AbstractHeapType::Extern,

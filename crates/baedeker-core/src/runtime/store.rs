@@ -1195,6 +1195,7 @@ fn eval_const(
             RegConstInstr::I64Const(value) => stack.push(Value::I64(value)),
             RegConstInstr::F32Const(bits) => stack.push(Value::F32(f32::from_bits(bits))),
             RegConstInstr::F64Const(bits) => stack.push(Value::F64(f64::from_bits(bits))),
+            RegConstInstr::V128Const(bytes) => stack.push(Value::V128(bytes)),
             RegConstInstr::RefNull => stack.push(Value::FuncRef(None)),
             RegConstInstr::RefFunc(func) => {
                 stack.push(Value::FuncRef(Some((instance_id, func.0))));
