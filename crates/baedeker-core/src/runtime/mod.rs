@@ -1097,6 +1097,85 @@ fn execute_reg_op(
                     Value::I64(u32::from_le_bytes(bytes.try_into().expect("width checked")) as i64)
                 }
                 crate::lower::LoadOp::V128 => Value::V128(bytes.try_into().expect("width checked")),
+                crate::lower::LoadOp::V128Load8x8S => {
+                    let mut out = [0u8; 16];
+                    for (lane, byte) in out.chunks_exact_mut(2).zip(bytes.iter()) {
+                        let extended = (*byte as i8) as i16;
+                        lane.copy_from_slice(&extended.to_le_bytes());
+                    }
+                    Value::V128(out)
+                }
+                crate::lower::LoadOp::V128Load8x8U => {
+                    let mut out = [0u8; 16];
+                    for (lane, byte) in out.chunks_exact_mut(2).zip(bytes.iter()) {
+                        lane.copy_from_slice(&(*byte as u16).to_le_bytes());
+                    }
+                    Value::V128(out)
+                }
+                crate::lower::LoadOp::V128Load16x4S => {
+                    let mut out = [0u8; 16];
+                    for (lane, chunk) in out.chunks_exact_mut(4).zip(bytes.chunks_exact(2)) {
+                        let extended = i16::from_le_bytes(chunk.try_into().expect("width")) as i32;
+                        lane.copy_from_slice(&extended.to_le_bytes());
+                    }
+                    Value::V128(out)
+                }
+                crate::lower::LoadOp::V128Load16x4U => {
+                    let mut out = [0u8; 16];
+                    for (lane, chunk) in out.chunks_exact_mut(4).zip(bytes.chunks_exact(2)) {
+                        let extended = u16::from_le_bytes(chunk.try_into().expect("width")) as u32;
+                        lane.copy_from_slice(&extended.to_le_bytes());
+                    }
+                    Value::V128(out)
+                }
+                crate::lower::LoadOp::V128Load32x2S => {
+                    let mut out = [0u8; 16];
+                    for (lane, chunk) in out.chunks_exact_mut(8).zip(bytes.chunks_exact(4)) {
+                        let extended = i32::from_le_bytes(chunk.try_into().expect("width")) as i64;
+                        lane.copy_from_slice(&extended.to_le_bytes());
+                    }
+                    Value::V128(out)
+                }
+                crate::lower::LoadOp::V128Load32x2U => {
+                    let mut out = [0u8; 16];
+                    for (lane, chunk) in out.chunks_exact_mut(8).zip(bytes.chunks_exact(4)) {
+                        let extended = u32::from_le_bytes(chunk.try_into().expect("width")) as u64;
+                        lane.copy_from_slice(&extended.to_le_bytes());
+                    }
+                    Value::V128(out)
+                }
+                crate::lower::LoadOp::V128Load8Splat => Value::V128([bytes[0]; 16]),
+                crate::lower::LoadOp::V128Load16Splat => {
+                    let mut out = [0u8; 16];
+                    for lane in out.chunks_exact_mut(2) {
+                        lane.copy_from_slice(&bytes[..2]);
+                    }
+                    Value::V128(out)
+                }
+                crate::lower::LoadOp::V128Load32Splat => {
+                    let mut out = [0u8; 16];
+                    for lane in out.chunks_exact_mut(4) {
+                        lane.copy_from_slice(&bytes[..4]);
+                    }
+                    Value::V128(out)
+                }
+                crate::lower::LoadOp::V128Load64Splat => {
+                    let mut out = [0u8; 16];
+                    for lane in out.chunks_exact_mut(8) {
+                        lane.copy_from_slice(&bytes[..8]);
+                    }
+                    Value::V128(out)
+                }
+                crate::lower::LoadOp::V128Load32Zero => {
+                    let mut out = [0u8; 16];
+                    out[..4].copy_from_slice(&bytes[..4]);
+                    Value::V128(out)
+                }
+                crate::lower::LoadOp::V128Load64Zero => {
+                    let mut out = [0u8; 16];
+                    out[..8].copy_from_slice(&bytes[..8]);
+                    Value::V128(out)
+                }
             };
             set_reg(registers, *dst, value)?;
         }
@@ -1157,6 +1236,53 @@ fn execute_reg_op(
                     });
                 }
             }
+        }
+        RegOp::V128LoadLane {
+            width,
+            dst,
+            vec,
+            addr,
+            memarg,
+            lane,
+        } => {
+            let addr = expect_addr(get_reg(registers, *addr)?)?;
+            let Value::V128(mut bytes) = get_reg(registers, *vec)? else {
+                return Err(type_mismatch_v128(registers, *vec));
+            };
+            let store = require_store(store)?;
+            let mem = store.shared_memory(memarg.memory.0).ok_or(RuntimeError {
+                kind: RuntimeErrorKind::UnknownMemory {
+                    memory: memarg.memory.0,
+                },
+            })?;
+            let mem = mem.borrow();
+            let range = memory_bounds(&mem, memarg, addr, *width as usize)?;
+            let start = *lane as usize * *width as usize;
+            bytes[start..start + *width as usize].copy_from_slice(&mem[range]);
+            drop(mem);
+            set_reg(registers, *dst, Value::V128(bytes))?;
+        }
+        RegOp::V128StoreLane {
+            width,
+            addr,
+            vec,
+            memarg,
+            lane,
+        } => {
+            let addr = expect_addr(get_reg(registers, *addr)?)?;
+            let Value::V128(bytes) = get_reg(registers, *vec)? else {
+                return Err(type_mismatch_v128(registers, *vec));
+            };
+            let store = require_store(store)?;
+            let mem = store.shared_memory(memarg.memory.0).ok_or(RuntimeError {
+                kind: RuntimeErrorKind::UnknownMemory {
+                    memory: memarg.memory.0,
+                },
+            })?;
+            let mut mem = mem.borrow_mut();
+            let range = memory_bounds(&mem, memarg, addr, *width as usize)?;
+            let start = *lane as usize * *width as usize;
+            mem[range].copy_from_slice(&bytes[start..start + *width as usize]);
         }
         RegOp::GlobalGet { dst, global } => {
             let store = require_store(store)?;

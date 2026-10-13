@@ -396,6 +396,23 @@ pub enum RegOp {
         addr: Reg,
         memarg: MemArg,
     },
+    /// v128.loadN_lane: read N bytes into `lane` of the operand vector.
+    V128LoadLane {
+        width: u8,
+        dst: Reg,
+        vec: Reg,
+        addr: Reg,
+        memarg: MemArg,
+        lane: u8,
+    },
+    /// v128.storeN_lane: write `lane`'s low N bytes to memory.
+    V128StoreLane {
+        width: u8,
+        addr: Reg,
+        vec: Reg,
+        memarg: MemArg,
+        lane: u8,
+    },
     /// v128 constant.
     V128Const {
         dst: Reg,
@@ -850,6 +867,18 @@ pub enum LoadOp {
     I64Load32S,
     I64Load32U,
     V128,
+    V128Load8x8S,
+    V128Load8x8U,
+    V128Load16x4S,
+    V128Load16x4U,
+    V128Load32x2S,
+    V128Load32x2U,
+    V128Load8Splat,
+    V128Load16Splat,
+    V128Load32Splat,
+    V128Load64Splat,
+    V128Load32Zero,
+    V128Load64Zero,
 }
 
 impl LoadOp {
@@ -857,6 +886,13 @@ impl LoadOp {
     pub fn byte_width(self) -> usize {
         match self {
             LoadOp::V128 => 16,
+            LoadOp::V128Load8x8S | LoadOp::V128Load8x8U => 8,
+            LoadOp::V128Load16x4S | LoadOp::V128Load16x4U => 8,
+            LoadOp::V128Load32x2S | LoadOp::V128Load32x2U => 8,
+            LoadOp::V128Load8Splat => 1,
+            LoadOp::V128Load16Splat => 2,
+            LoadOp::V128Load32Splat | LoadOp::V128Load32Zero => 4,
+            LoadOp::V128Load64Splat | LoadOp::V128Load64Zero => 8,
             LoadOp::I32 | LoadOp::F32 | LoadOp::I64Load32S | LoadOp::I64Load32U => 4,
             LoadOp::I64 | LoadOp::F64 => 8,
             LoadOp::I32Load8S | LoadOp::I32Load8U | LoadOp::I64Load8S | LoadOp::I64Load8U => 1,
@@ -867,7 +903,19 @@ impl LoadOp {
     /// Value type produced by the load.
     pub fn result_type(self) -> ValType {
         match self {
-            LoadOp::V128 => ValType::Vec(crate::types::VecType::V128),
+            LoadOp::V128
+            | LoadOp::V128Load8x8S
+            | LoadOp::V128Load8x8U
+            | LoadOp::V128Load16x4S
+            | LoadOp::V128Load16x4U
+            | LoadOp::V128Load32x2S
+            | LoadOp::V128Load32x2U
+            | LoadOp::V128Load8Splat
+            | LoadOp::V128Load16Splat
+            | LoadOp::V128Load32Splat
+            | LoadOp::V128Load64Splat
+            | LoadOp::V128Load32Zero
+            | LoadOp::V128Load64Zero => ValType::Vec(crate::types::VecType::V128),
             LoadOp::I32
             | LoadOp::I32Load8S
             | LoadOp::I32Load8U
@@ -3890,6 +3938,30 @@ impl<'b> FuncBuilder<'b> {
             }
             Instr::I8x16Swizzle => self.lower_v128_swizzle(offset)?,
             Instr::I8x16Shuffle(lanes) => self.lower_v128_shuffle(offset, lanes)?,
+            Instr::V128Load8Lane { memarg, lane } => {
+                self.lower_v128_load_lane(offset, 1, memarg, lane)?
+            }
+            Instr::V128Load16Lane { memarg, lane } => {
+                self.lower_v128_load_lane(offset, 2, memarg, lane)?
+            }
+            Instr::V128Load32Lane { memarg, lane } => {
+                self.lower_v128_load_lane(offset, 4, memarg, lane)?
+            }
+            Instr::V128Load64Lane { memarg, lane } => {
+                self.lower_v128_load_lane(offset, 8, memarg, lane)?
+            }
+            Instr::V128Store8Lane { memarg, lane } => {
+                self.lower_v128_store_lane(offset, 1, memarg, lane)?
+            }
+            Instr::V128Store16Lane { memarg, lane } => {
+                self.lower_v128_store_lane(offset, 2, memarg, lane)?
+            }
+            Instr::V128Store32Lane { memarg, lane } => {
+                self.lower_v128_store_lane(offset, 4, memarg, lane)?
+            }
+            Instr::V128Store64Lane { memarg, lane } => {
+                self.lower_v128_store_lane(offset, 8, memarg, lane)?
+            }
             instr => {
                 if let Some(op) = unary_op(&instr) {
                     self.lower_unary_op(offset, op)?;
@@ -4591,6 +4663,64 @@ impl<'b> FuncBuilder<'b> {
         Ok(())
     }
 
+    fn lower_v128_load_lane(
+        &mut self,
+        offset: ByteOffset,
+        width: u8,
+        memarg: MemArg,
+        lane: u8,
+    ) -> Result<(), LowerError> {
+        // Spec stack order `[i32 v128]`: the v128 operand is on top.
+        let vec = self.pop_expect(
+            offset,
+            "v128.load_lane",
+            ValType::Vec(crate::types::VecType::V128),
+        )?;
+        let addr = self.pop_expect(offset, "v128.load_lane", ValType::Num(NumType::I32))?;
+        let ty = ValType::Vec(crate::types::VecType::V128);
+        let dst = self.alloc_reg(ty);
+        self.stack.push(RegValue { reg: dst, ty });
+        self.emit(
+            offset,
+            RegOp::V128LoadLane {
+                width,
+                dst,
+                vec: vec.reg,
+                addr: addr.reg,
+                memarg,
+                lane,
+            },
+        );
+        Ok(())
+    }
+
+    fn lower_v128_store_lane(
+        &mut self,
+        offset: ByteOffset,
+        width: u8,
+        memarg: MemArg,
+        lane: u8,
+    ) -> Result<(), LowerError> {
+        // Spec stack order `[i32 v128]`: the v128 operand is on top.
+        let vec = self.pop_expect(
+            offset,
+            "v128.store_lane",
+            ValType::Vec(crate::types::VecType::V128),
+        )?;
+        let addr = self.pop_expect(offset, "v128.store_lane", ValType::Num(NumType::I32))?;
+        self.emit(
+            offset,
+            RegOp::V128StoreLane {
+                width,
+                addr: addr.reg,
+                vec: vec.reg,
+                memarg,
+                lane,
+            },
+        );
+        Ok(())
+    }
+
     fn lower_unary_op(&mut self, offset: ByteOffset, op: UnaryOp) -> Result<(), LowerError> {
         let input = op.input_type();
         let output = op.result_type();
@@ -4683,6 +4813,18 @@ fn load_op(instr: &Instr) -> Option<(LoadOp, MemArg)> {
         Instr::I64Load32S(memarg) => (LoadOp::I64Load32S, memarg),
         Instr::I64Load32U(memarg) => (LoadOp::I64Load32U, memarg),
         Instr::V128Load(memarg) => (LoadOp::V128, memarg),
+        Instr::V128Load8x8S(memarg) => (LoadOp::V128Load8x8S, memarg),
+        Instr::V128Load8x8U(memarg) => (LoadOp::V128Load8x8U, memarg),
+        Instr::V128Load16x4S(memarg) => (LoadOp::V128Load16x4S, memarg),
+        Instr::V128Load16x4U(memarg) => (LoadOp::V128Load16x4U, memarg),
+        Instr::V128Load32x2S(memarg) => (LoadOp::V128Load32x2S, memarg),
+        Instr::V128Load32x2U(memarg) => (LoadOp::V128Load32x2U, memarg),
+        Instr::V128Load8Splat(memarg) => (LoadOp::V128Load8Splat, memarg),
+        Instr::V128Load16Splat(memarg) => (LoadOp::V128Load16Splat, memarg),
+        Instr::V128Load32Splat(memarg) => (LoadOp::V128Load32Splat, memarg),
+        Instr::V128Load64Splat(memarg) => (LoadOp::V128Load64Splat, memarg),
+        Instr::V128Load32Zero(memarg) => (LoadOp::V128Load32Zero, memarg),
+        Instr::V128Load64Zero(memarg) => (LoadOp::V128Load64Zero, memarg),
         _ => return None,
     };
     Some((op, memarg))
