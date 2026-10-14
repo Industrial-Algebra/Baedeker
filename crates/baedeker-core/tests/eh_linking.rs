@@ -14,8 +14,8 @@ use std::rc::Rc;
 use baedeker_core::binary::module::Module;
 use baedeker_core::lower::{RegExportDesc, RegModule};
 use baedeker_core::runtime::{
-    ExceptionRecord, Imports, LinkGroup, RuntimeError, RuntimeErrorKind, Store, Table, TagBinding,
-    Value, execute_export, link_func,
+    ExceptionRecord, Imports, LinkGroup, RecProvenance, RuntimeError, RuntimeErrorKind, Store,
+    Table, TagBinding, Value, execute_export, link_func,
 };
 use baedeker_core::types::{FuncIdx, FuncType, Limits, NumType, RefType, TableType, ValType};
 
@@ -169,9 +169,9 @@ fn cross_instance_catch_through_import() {
         "a",
         "e0",
         binding.identity,
-        binding.ty,
+        binding.ty.clone(),
         binding.expanded_params.clone(),
-        None,
+        RecProvenance::Bare,
     );
     let b_store = group.add(&b, &imports);
     link_export(&b_store, &a, &a_store, "a", "throw");
@@ -215,15 +215,15 @@ fn aliased_tag_imports_share_identity() {
             binding.identity,
             binding.ty.clone(),
             binding.expanded_params.clone(),
-            None,
+            RecProvenance::Bare,
         )
         .tag(
             "a",
             "e0",
             binding.identity,
-            binding.ty,
+            binding.ty.clone(),
             binding.expanded_params.clone(),
-            None,
+            RecProvenance::Bare,
         );
     let b_store = group.add(&b, &imports);
 
@@ -297,9 +297,9 @@ fn importer_throw_caught_in_exporter() {
             "a",
             "e0",
             binding.identity,
-            binding.ty,
+            binding.ty.clone(),
             binding.expanded_params.clone(),
-            None,
+            RecProvenance::Bare,
         );
     let b_store = group.add(&b, &b_imports);
     link_export(&b_store, &a, &a_store, "a", "wrap");
@@ -335,9 +335,9 @@ fn incompatible_tag_type_unlinkable() {
         "a",
         "e0",
         binding.identity,
-        binding.ty,
+        binding.ty.clone(),
         binding.expanded_params.clone(),
-        None,
+        RecProvenance::Bare,
     );
     let error = group
         .try_add(&b, &imports)
@@ -408,9 +408,9 @@ fn exnref_across_instances() {
         "a",
         "e0",
         binding.identity,
-        binding.ty,
+        binding.ty.clone(),
         binding.expanded_params.clone(),
-        None,
+        RecProvenance::Bare,
     );
     let b_store = group.add(&b, &b_imports);
     // A calls B's relay, which catch_ref's A's tag into an exnref, rethrows
@@ -483,7 +483,7 @@ fn multi_instance_ids_distinct() {
             a_binding.identity,
             a_binding.ty,
             a_binding.expanded_params.clone(),
-            None,
+            RecProvenance::Bare,
         )
         .tag(
             "b",
@@ -491,7 +491,7 @@ fn multi_instance_ids_distinct() {
             b_binding.identity,
             b_binding.ty,
             b_binding.expanded_params.clone(),
-            None,
+            RecProvenance::Bare,
         );
     let c_store = group.add(&c, &c_imports);
     link_export(&c_store, &a, &a_store, "a", "throw_a");
@@ -539,9 +539,9 @@ fn different_concrete_ref_params_do_not_link() {
         "a",
         "e0",
         binding.identity,
-        binding.ty,
+        binding.ty.clone(),
         binding.expanded_params.clone(),
-        None,
+        RecProvenance::Bare,
     );
     let error = group
         .try_add(&b, &imports)
@@ -582,11 +582,94 @@ fn identical_typed_tags_at_different_indices_link() {
         "a",
         "e0",
         binding.identity,
-        binding.ty,
+        binding.ty.clone(),
         binding.expanded_params.clone(),
-        None,
+        RecProvenance::Bare,
     );
     group
         .try_add(&b, &imports)
         .expect("structurally identical typed tags must link");
+}
+
+/// Review r2 P1-1: a reference to a type inside a rec group must not
+/// link-equal a reference to a bare type — nested rec-group identity
+/// needs canonicalization we do not have, so such tags reject
+/// conservatively.
+#[test]
+fn nested_rec_reference_rejects_against_bare() {
+    let a = Rc::new(wat_module(
+        r#"
+(module
+  (rec (type $t1 (func)) (type $t2 (func)))
+  (tag $e0 (param (ref null $t1)))
+  (export "e0" (tag $e0)))"#,
+    ));
+    let b = Rc::new(wat_module(
+        r#"
+(module
+  (type $t (func))
+  (import "a" "e0" (tag $e (param (ref null $t)))))"#,
+    ));
+
+    let mut group = Group::new();
+    let a_store = group.add(&a, &Imports::new());
+    let binding = tag_export_binding(&a_store.borrow(), &a, "e0").expect("tag export binding");
+    let imports = Imports::new().tag(
+        "a",
+        "e0",
+        binding.identity,
+        binding.ty,
+        binding.expanded_params.clone(),
+        binding.rec.clone(),
+    );
+    let error = group
+        .try_add(&b, &imports)
+        .expect_err("rec-referencing tag must not link against a bare type");
+    let msg = format!("{error:?}");
+    assert!(
+        msg.contains("ImportTypeMismatch"),
+        "expected import type mismatch, got {msg}"
+    );
+}
+
+/// Review r2 P1-2: a tag whose rec group contains an unexpandable
+/// (cyclic) sibling must itself be Unresolvable — it must not link as
+/// if it were a bare type.
+#[test]
+fn cyclic_sibling_group_tag_rejects_against_bare() {
+    let a = Rc::new(wat_module(
+        r#"
+(module
+  (rec
+    (type $a (func (param (ref null $a))))
+    (type $b (func)))
+  (tag $e0 (type $b))
+  (export "e0" (tag $e0)))"#,
+    ));
+    let b = Rc::new(wat_module(
+        r#"
+(module
+  (type $t (func))
+  (import "a" "e0" (tag $e (type $t))))"#,
+    ));
+
+    let mut group = Group::new();
+    let a_store = group.add(&a, &Imports::new());
+    let binding = tag_export_binding(&a_store.borrow(), &a, "e0").expect("tag export binding");
+    let imports = Imports::new().tag(
+        "a",
+        "e0",
+        binding.identity,
+        binding.ty,
+        binding.expanded_params.clone(),
+        binding.rec.clone(),
+    );
+    let error = group
+        .try_add(&b, &imports)
+        .expect_err("tag with cyclic sibling must not link as bare");
+    let msg = format!("{error:?}");
+    assert!(
+        msg.contains("ImportTypeMismatch"),
+        "expected import type mismatch, got {msg}"
+    );
 }

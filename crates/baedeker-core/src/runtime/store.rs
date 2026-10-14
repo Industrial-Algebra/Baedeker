@@ -140,7 +140,7 @@ impl Imports {
         identity: (u32, u32),
         ty: FuncType,
         expanded_params: Option<Vec<ExpandedVal>>,
-        rec: Option<(Vec<ExpandedFunc>, u32)>,
+        rec: RecProvenance,
     ) -> Self {
         self.tags.push(TagProvider {
             module: module.into(),
@@ -193,7 +193,7 @@ struct TagProvider {
     identity: (u32, u32),
     ty: FuncType,
     expanded_params: Option<Vec<ExpandedVal>>,
-    rec: Option<(Vec<ExpandedFunc>, u32)>,
+    rec: RecProvenance,
 }
 
 /// The null value for a table's element type.
@@ -356,11 +356,27 @@ pub struct ExpandedFunc {
     pub results: Vec<ExpandedVal>,
 }
 
+/// Rec-group provenance of a tag type, three-valued so that a FAILED
+/// expansion (cycle or nested rec reference among the group's members)
+/// never masquerades as "bare".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecProvenance {
+    /// The tag type is outside any rec group.
+    Bare,
+    /// The tag type sits at `position` in a group with these expanded
+    /// member signatures.
+    Group(Vec<ExpandedFunc>, u32),
+    /// The group's members did not fully expand; never link-compatible
+    /// (conservative rejection pending GC-era canonicalization).
+    Unresolvable,
+}
+
 /// Expand one function type; `None` when a concrete-reference cycle is
 /// reachable (iso-recursive canonicalization is GC-era: cyclic tag types
 /// link-reject conservatively).
 fn expand_func(
     types: &[crate::types::FuncType],
+    rec_groups: &[(u32, u32)],
     ty: &crate::types::FuncType,
     path: &mut Vec<u32>,
 ) -> Option<ExpandedFunc> {
@@ -368,18 +384,19 @@ fn expand_func(
         params: ty
             .params
             .iter()
-            .map(|v| expand_val(types, v, path))
+            .map(|v| expand_val(types, rec_groups, v, path))
             .collect::<Option<_>>()?,
         results: ty
             .results
             .iter()
-            .map(|v| expand_val(types, v, path))
+            .map(|v| expand_val(types, rec_groups, v, path))
             .collect::<Option<_>>()?,
     })
 }
 
 fn expand_val(
     types: &[crate::types::FuncType],
+    rec_groups: &[(u32, u32)],
     v: &crate::types::ValType,
     path: &mut Vec<u32>,
 ) -> Option<ExpandedVal> {
@@ -400,11 +417,21 @@ fn expand_val(
                 nullable: *nullable,
             }),
             HeapType::Type(idx) => {
+                // Nested references into rec groups would need full
+                // iso-recursive canonicalization to compare across
+                // modules (group identity, not structure); treat them
+                // as non-comparable, like cycles.
+                if rec_groups
+                    .iter()
+                    .any(|&(start, len)| idx.0 >= start && idx.0 < start + len)
+                {
+                    return None;
+                }
                 if path.contains(&idx.0) {
                     return None; // cyclic: reject conservatively
                 }
                 path.push(idx.0);
-                let func = expand_func(types, types.get(idx.0 as usize)?, path);
+                let func = expand_func(types, rec_groups, types.get(idx.0 as usize)?, path);
                 path.pop();
                 let func = func?;
                 Some(ExpandedVal::ConcreteFunc {
@@ -424,15 +451,12 @@ pub struct TagBinding {
     pub identity: (u32, u32),
     pub ty: FuncType,
     /// Recursively expanded parameter types (concrete references
-    /// resolved against the defining module's types); `None` when a
-    /// reference cycle makes the type non-comparable — such tags
-    /// link-reject conservatively.
+    /// resolved against the defining module's types); `None` when an
+    /// expansion failure (cycle or nested rec reference) makes the type
+    /// non-comparable — such tags link-reject conservatively.
     pub expanded_params: Option<Vec<ExpandedVal>>,
-    /// Rec-group provenance (expanded member signatures + position);
-    /// `None` for bare types. Link compatibility requires provenance
-    /// equality: bare-to-bare, or identical group signatures at the
-    /// same position (iso-recursive equality, flattened).
-    pub rec: Option<(Vec<ExpandedFunc>, u32)>,
+    /// Rec-group provenance of the tag type itself.
+    pub rec: RecProvenance,
 }
 
 /// Mutable state of an instantiated module.
@@ -729,6 +753,22 @@ impl Store {
         // Reference cycles expand to None and link-reject conservatively
         // (iso-recursive canonicalization is GC-era).
         let module_types = &module.types[..];
+        let module_recs = &module.rec_groups[..];
+        let rec_provenance = |raw: &Option<(Vec<FuncType>, u32)>| -> RecProvenance {
+            match raw {
+                None => RecProvenance::Bare,
+                Some((sig, pos)) => {
+                    let expanded: Option<Vec<ExpandedFunc>> = sig
+                        .iter()
+                        .map(|ty| expand_func(module_types, module_recs, ty, &mut Vec::new()))
+                        .collect();
+                    match expanded {
+                        Some(sig) => RecProvenance::Group(sig, *pos),
+                        None => RecProvenance::Unresolvable,
+                    }
+                }
+            }
+        };
         let mut tag_map = Vec::with_capacity(module.imported_tags.len() + module.tags.len());
         for declared in &module.imported_tags {
             let provider = imports
@@ -742,24 +782,15 @@ impl Store {
                 .ty
                 .params
                 .iter()
-                .map(|v| expand_val(module_types, v, &mut Vec::new()))
+                .map(|v| expand_val(module_types, module_recs, v, &mut Vec::new()))
                 .collect();
-            // Both sides' provenance flatten: bare stays bare; a rec
-            // group whose members expand cyclically is non-comparable.
-            let declared_rec: Option<Option<(Vec<ExpandedFunc>, u32)>> =
-                declared.rec.as_ref().map(|(sig, pos)| {
-                    let expanded: Option<Vec<ExpandedFunc>> = sig
-                        .iter()
-                        .map(|ty| expand_func(module_types, ty, &mut Vec::new()))
-                        .collect();
-                    expanded.map(|sig| (sig, *pos))
-                });
+            let declared_rec = rec_provenance(&declared.rec);
             let compatible = match (&provider.expanded_params, declared_params) {
                 (Some(a), Some(b)) => a == &b,
                 _ => false,
             } && match (&provider.rec, &declared_rec) {
-                (None, None) => true,
-                (Some((sig_a, pos_a)), Some(Some((sig_b, pos_b)))) => {
+                (RecProvenance::Bare, RecProvenance::Bare) => true,
+                (RecProvenance::Group(sig_a, pos_a), RecProvenance::Group(sig_b, pos_b)) => {
                     sig_a == sig_b && pos_a == pos_b
                 }
                 _ => false,
@@ -779,20 +810,19 @@ impl Store {
             let expanded_params: Option<Vec<ExpandedVal>> = module_types[type_idx.0 as usize]
                 .params
                 .iter()
-                .map(|v| expand_val(module_types, v, &mut Vec::new()))
+                .map(|v| expand_val(module_types, module_recs, v, &mut Vec::new()))
                 .collect();
-            let rec = module
+            let raw_rec = module
                 .rec_groups
                 .iter()
                 .find(|&&(start, len)| type_idx.0 >= start && type_idx.0 < start + len)
-                .and_then(|&(start, len)| {
-                    let expanded: Option<Vec<ExpandedFunc>> = module_types
-                        [start as usize..(start + len) as usize]
-                        .iter()
-                        .map(|ty| expand_func(module_types, ty, &mut Vec::new()))
-                        .collect();
-                    expanded.map(|sig| (sig, type_idx.0 - start))
+                .map(|&(start, len)| {
+                    (
+                        module_types[start as usize..(start + len) as usize].to_vec(),
+                        type_idx.0 - start,
+                    )
                 });
+            let rec = rec_provenance(&raw_rec);
             tag_map.push(TagBinding {
                 identity: (instance_id, imported_tag_count + i as u32),
                 ty: module_types[type_idx.0 as usize].clone(),

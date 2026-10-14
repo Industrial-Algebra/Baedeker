@@ -19,7 +19,7 @@ pub mod verify;
 pub use table::Table;
 
 pub use host::{HostFunction, link_func};
-pub use store::{ExceptionRecord, Imports, LinkGroup, PAGE_SIZE, Store, TagBinding};
+pub use store::{ExceptionRecord, Imports, LinkGroup, PAGE_SIZE, RecProvenance, Store, TagBinding};
 
 use crate::lower::{
     BinaryOp, LaneShape, Reg, RegFunc, RegInstr, RegModule, RegOp, RegTerm, UnaryOp,
