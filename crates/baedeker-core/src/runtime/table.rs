@@ -79,7 +79,12 @@ fn overwrite_fills(
             Some((pstart, pend, pval)) if fstart <= pend && pstart <= fend && fval == pval => {
                 pending = Some((pstart.min(fstart), pend.max(fend), pval));
             }
-            Some((pstart, pend, pval)) if fstart > pend => {
+            // `>=`: a right remainder starting exactly at pending's end
+            // with a different value is ADJACENT, not overlapping — it
+            // must be emitted after pending (review r5 P1: `>` emitted it
+            // first, breaking the sorted-by-construction invariant).
+            // Equal-valued adjacency already merged in the arm above.
+            Some((pstart, pend, pval)) if fstart >= pend => {
                 result.push((pstart, pend, pval));
                 pending = None;
                 result.push((fstart, fend, fval));
@@ -389,11 +394,10 @@ impl Table {
                 }
                 // `end <= len <= u32::MAX`, so both narrowings are exact.
                 let (start, end) = (start as u32, end as u32);
-                // Drop explicit entries in the span; they are overwritten.
-                elems.retain(|&(idx, _)| idx < start || idx >= end);
+                // Reserve and build BEFORE mutating anything: a refused
+                // reservation leaves the table untouched (review r5 P1
+                // discarded-restore discipline).
                 if value == self.default {
-                    // Punch the span out of any intersecting ranges,
-                    // reserving fallibly first (Vec growth aborts).
                     let mut rewritten = Vec::new();
                     // A straddling range splits into up to two remainders,
                     // so worst case is len+1 slots (review r4 P1).
@@ -412,10 +416,15 @@ impl Table {
                             }
                         }
                     }
+                    elems.retain(|&(idx, _)| idx < start || idx >= end);
                     *fills = rewritten;
                     true
                 } else {
-                    overwrite_fills(fills, start, end, value).is_some()
+                    if overwrite_fills(fills, start, end, value).is_none() {
+                        return false;
+                    }
+                    elems.retain(|&(idx, _)| idx < start || idx >= end);
+                    true
                 }
             }
         }

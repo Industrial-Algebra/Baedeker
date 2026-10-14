@@ -1920,18 +1920,30 @@ fn execute_reg_op(
                 kind: RuntimeErrorKind::UnknownTable { table: src_table.0 },
             })?;
             if dst_table.0 == src_table.0 || alloc::rc::Rc::ptr_eq(&dst_handle, &src_handle) {
-                // One table: overlap-preserving copy, no temporary.
-                store
+                // One table: overlap-preserving copy, no temporary. A
+                // refused allocation inside the copy is a CLEAN runtime
+                // failure — never a silent success with a partial
+                // destination (review r5 P1).
+                let copied = store
                     .with_table_mut(dst_table.0, |table| table.copy_within(dst, src, count))
                     .ok_or(RuntimeError {
                         kind: RuntimeErrorKind::UnknownTable { table: dst_table.0 },
                     })?;
+                if !copied {
+                    return Err(RuntimeError {
+                        kind: RuntimeErrorKind::ResourceLimitExceeded { what: "table copy" },
+                    });
+                }
             } else {
                 // Two tables: distinct handles, still no temporary — copy
                 // in runs straight across.
                 let src_ref = src_handle.borrow();
                 let mut dst_ref = dst_handle.borrow_mut();
-                dst_ref.copy_from(&src_ref, dst, src, count);
+                if !dst_ref.copy_from(&src_ref, dst, src, count) {
+                    return Err(RuntimeError {
+                        kind: RuntimeErrorKind::ResourceLimitExceeded { what: "table copy" },
+                    });
+                }
             }
         }
         RegOp::TableInit {

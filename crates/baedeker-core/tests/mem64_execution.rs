@@ -616,3 +616,39 @@ fn table_copy_between_aliased_imports_is_same_table() {
         execute_export(&importer, &importer_store.borrow(), "at", &[Value::I64(1)]).unwrap();
     assert_eq!(result, vec![Value::I32(9)]);
 }
+
+/// Review r5 P1-1: the second fill's adjacent unequal right remainder
+/// must land AFTER the pending range — both the emitted order and the
+/// public values are pinned.
+#[test]
+fn overwrite_fills_stays_sorted_on_adjacent_right_remainder() {
+    use baedeker_core::runtime::{Table, Value};
+    use baedeker_core::types::{Limits, RefType, TableType};
+    let ty = TableType {
+        elem: RefType::ExternRef,
+        limits: Limits {
+            min: 0,
+            max: None,
+            is64: true,
+        },
+        init: None,
+    };
+    let mut table = Table::new(ty, Value::ExternRef(None)).unwrap();
+    let v1 = Value::ExternRef(Some(1));
+    let v2 = Value::ExternRef(Some(2));
+    assert_eq!(table.grow(10, v1), Some(0));
+    // Overwrite [0,5) with v2: remainder [5,10) starts exactly at the
+    // new range's end.
+    assert!(table.fill(0, v2, 5));
+    for idx in 0..5u64 {
+        assert_eq!(table.get(idx), Some(v2), "index {idx}");
+    }
+    for idx in 5..10u64 {
+        assert_eq!(table.get(idx), Some(v1), "index {idx}");
+    }
+    // A third overwrite spanning the boundary keeps both sides exact.
+    assert!(table.fill(3, v1, 4));
+    assert_eq!(table.get(2), Some(v2));
+    assert_eq!(table.get(6), Some(v1));
+    assert_eq!(table.get(7), Some(v1));
+}
