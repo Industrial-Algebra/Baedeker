@@ -76,6 +76,8 @@ fn validation_kind_name(kind: &ValidationErrorKind) -> &'static str {
         ValidationErrorKind::UnknownElemIdx { .. } => "UnknownElemIdx",
         ValidationErrorKind::InvalidMemArgAlign { .. } => "InvalidMemArgAlign",
         ValidationErrorKind::MemArgOffsetOutOfRange => "MemArgOffsetOutOfRange",
+        ValidationErrorKind::TableSizeOutOfRange => "TableSizeOutOfRange",
+        ValidationErrorKind::TableMinExceedsMax => "TableMinExceedsMax",
         ValidationErrorKind::InvalidSimdLaneIdx { .. } => "InvalidSimdLaneIdx",
         ValidationErrorKind::UnknownLabelIdx { .. } => "UnknownLabelIdx",
         ValidationErrorKind::Decode { .. } => "Decode",

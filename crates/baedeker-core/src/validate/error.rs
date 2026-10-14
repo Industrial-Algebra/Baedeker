@@ -165,6 +165,8 @@ pub enum ValidationErrorKind {
     MemorySizeOutOfRange,
     /// A memarg offset beyond u32 on an i32-indexed memory.
     MemArgOffsetOutOfRange,
+    TableSizeOutOfRange,
+    TableMinExceedsMax,
     MemoryMinExceedsMax,
     /// A non-nullable-element table without an initializer.
     TableTypeMismatch,
@@ -435,6 +437,10 @@ impl fmt::Display for ValidationErrorKind {
             }
             ValidationErrorKind::MemorySizeOutOfRange => write!(f, "memory size"),
             ValidationErrorKind::MemArgOffsetOutOfRange => write!(f, "offset out of range"),
+            ValidationErrorKind::TableSizeOutOfRange => write!(f, "table size"),
+            ValidationErrorKind::TableMinExceedsMax => {
+                write!(f, "size minimum must not be greater than maximum")
+            }
             ValidationErrorKind::MemoryMinExceedsMax => {
                 write!(f, "size minimum must not be greater than maximum")
             }
