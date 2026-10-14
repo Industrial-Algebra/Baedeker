@@ -2323,7 +2323,7 @@ fn memory_bounds(
     addr: u32,
     width: usize,
 ) -> Result<core::ops::Range<usize>, RuntimeError> {
-    let ea = addr as u64 + memarg.offset as u64;
+    let ea = addr as u64 + memarg.offset;
     let end = ea
         .checked_add(width as u64)
         .ok_or(trap(RuntimeTrap::OutOfBoundsMemoryAccess))?;

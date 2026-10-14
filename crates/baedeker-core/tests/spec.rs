@@ -75,6 +75,7 @@ fn validation_kind_name(kind: &ValidationErrorKind) -> &'static str {
         ValidationErrorKind::UnknownDataIdx { .. } => "UnknownDataIdx",
         ValidationErrorKind::UnknownElemIdx { .. } => "UnknownElemIdx",
         ValidationErrorKind::InvalidMemArgAlign { .. } => "InvalidMemArgAlign",
+        ValidationErrorKind::MemArgOffsetOutOfRange => "MemArgOffsetOutOfRange",
         ValidationErrorKind::InvalidSimdLaneIdx { .. } => "InvalidSimdLaneIdx",
         ValidationErrorKind::UnknownLabelIdx { .. } => "UnknownLabelIdx",
         ValidationErrorKind::Decode { .. } => "Decode",

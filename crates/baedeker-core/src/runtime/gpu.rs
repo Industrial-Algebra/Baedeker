@@ -277,7 +277,11 @@ mod tests {
     fn memory_module() -> RegModule {
         let mut module = empty_module();
         module.memories.push(crate::types::MemType {
-            limits: crate::types::Limits { min: 1, max: None },
+            limits: crate::types::Limits {
+                min: 1,
+                max: None,
+                is64: false,
+            },
         });
         module
     }

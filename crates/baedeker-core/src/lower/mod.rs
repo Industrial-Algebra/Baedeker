@@ -6993,6 +6993,7 @@ mod tests {
                 limits: crate::types::Limits {
                     min: 1,
                     max: Some(2),
+                    is64: false,
                 },
             },
         );
@@ -7104,7 +7105,11 @@ mod tests {
             "tbl",
             crate::types::TableType {
                 elem: crate::types::RefType::FuncRef,
-                limits: crate::types::Limits { min: 2, max: None },
+                limits: crate::types::Limits {
+                    min: 2,
+                    max: None,
+                    is64: false,
+                },
                 init: None,
             },
         );
@@ -7165,7 +7170,11 @@ mod tests {
                 "env",
                 "mem",
                 crate::types::MemType {
-                    limits: crate::types::Limits { min: 1, max: None },
+                    limits: crate::types::Limits {
+                        min: 1,
+                        max: None,
+                        is64: false,
+                    },
                 },
             )
             .global(

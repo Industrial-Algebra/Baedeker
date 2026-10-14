@@ -596,8 +596,9 @@ impl Store {
             // size as the effective minimum (spec: external limits grow).
             let provided_limits = match &provider.shared {
                 Some(shared) => Limits {
-                    min: (shared.borrow().len() / PAGE_SIZE) as u32,
+                    min: (shared.borrow().len() / PAGE_SIZE) as u64,
                     max: provider.ty.limits.max,
+                    is64: provider.ty.limits.is64,
                 },
                 None => provider.ty.limits,
             };
@@ -607,7 +608,10 @@ impl Store {
             let entity = match provider.shared.clone() {
                 Some(shared) => shared,
                 None => {
-                    let bytes = try_alloc_n(provider.ty.limits.min as usize * PAGE_SIZE, 0u8)
+                    let bytes = usize::try_from(provider.ty.limits.min)
+                        .ok()
+                        .and_then(|pages| pages.checked_mul(PAGE_SIZE))
+                        .and_then(|bytes| try_alloc_n(bytes, 0u8))
                         .ok_or_else(|| allocation_failed("imported memory"))?;
                     alloc::rc::Rc::new(core::cell::RefCell::new(bytes))
                 }
@@ -657,8 +661,9 @@ impl Store {
                 .ok_or_else(|| unknown_import(&declared.module, &declared.name))?;
             let provided_limits = match &provider.shared {
                 Some(shared) => Limits {
-                    min: shared.borrow().len(),
+                    min: u64::from(shared.borrow().len()),
                     max: provider.ty.limits.max,
+                    is64: provider.ty.limits.is64,
                 },
                 None => provider.ty.limits,
             };
@@ -712,7 +717,10 @@ impl Store {
 
         let mut memories = Vec::with_capacity(module.memories.len());
         for mem in &module.memories {
-            let bytes = try_alloc_n(mem.limits.min as usize * PAGE_SIZE, 0u8)
+            let bytes = usize::try_from(mem.limits.min)
+                .ok()
+                .and_then(|pages| pages.checked_mul(PAGE_SIZE))
+                .and_then(|bytes| try_alloc_n(bytes, 0u8))
                 .ok_or_else(|| allocation_failed("memory"))?;
             memories.push(alloc::rc::Rc::new(core::cell::RefCell::new(bytes)));
         }

@@ -1233,7 +1233,7 @@ fn parse_memarg(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<MemArg, D
     } else {
         (flags, MemIdx(0))
     };
-    let offset = decode_u32(cursor, base_offset)?;
+    let offset = decode_u64(cursor, base_offset)?;
     Ok(MemArg {
         align,
         offset,
@@ -1424,6 +1424,14 @@ fn decode_block_type_idx(
 
 fn decode_u32(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<u32, DecodeError> {
     leb128::decode_u32(cursor).map_err(|mut e| {
+        e.context = DecodeContext::CodeSection;
+        e.offset = ByteOffset(base_offset + e.offset.0);
+        e
+    })
+}
+
+fn decode_u64(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<u64, DecodeError> {
+    leb128::decode_u64(cursor).map_err(|mut e| {
         e.context = DecodeContext::CodeSection;
         e.offset = ByteOffset(base_offset + e.offset.0);
         e

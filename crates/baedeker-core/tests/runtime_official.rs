@@ -354,6 +354,7 @@ fn spectest_memory(name: &str) -> Result<MemType, String> {
             limits: baedeker_core::types::Limits {
                 min: 1,
                 max: Some(2),
+                is64: false,
             },
         }),
         other => Err(format!("unknown spectest memory {other:?}")),
@@ -384,6 +385,7 @@ fn spectest_table(name: &str) -> Result<TableType, String> {
             limits: baedeker_core::types::Limits {
                 min: 10,
                 max: Some(20),
+                is64: false,
             },
             init: None,
         }),

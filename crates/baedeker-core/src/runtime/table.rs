@@ -43,7 +43,10 @@ impl Table {
     /// fallible (`None` on allocation failure); sparse storage never
     /// allocates eagerly.
     pub fn new(ty: TableType, default: Value) -> Option<Self> {
-        let min = ty.limits.min;
+        // Table storage is still 32-bit; a 64-bit min beyond the u32 range is
+        // not representable here and is reported as an allocation failure.
+        // 64-bit table indexing is the runtime unit's job.
+        let min = u32::try_from(ty.limits.min).ok()?;
         let storage = if min <= DENSE_LIMIT {
             let mut vec = Vec::new();
             vec.try_reserve(min as usize).ok()?;
@@ -123,7 +126,7 @@ impl Table {
         let old = self.len();
         let new = old.checked_add(delta)?;
         if let Some(max) = self.ty.limits.max
-            && new > max
+            && u64::from(new) > max
         {
             return None;
         }
@@ -254,10 +257,14 @@ mod tests {
     use super::*;
     use crate::types::{Limits, RefType};
 
-    fn funcref_table(min: u32, max: Option<u32>) -> TableType {
+    fn funcref_table(min: u64, max: Option<u64>) -> TableType {
         TableType {
             elem: RefType::FuncRef,
-            limits: Limits { min, max },
+            limits: Limits {
+                min,
+                max,
+                is64: false,
+            },
             init: None,
         }
     }
@@ -281,7 +288,11 @@ mod tests {
     #[test]
     fn huge_table_is_sparse_and_usable() {
         // u32::MAX entries must not allocate densely.
-        let mut table = Table::new(funcref_table(u32::MAX, None), Value::FuncRef(None)).unwrap();
+        let mut table = Table::new(
+            funcref_table(u64::from(u32::MAX), None),
+            Value::FuncRef(None),
+        )
+        .unwrap();
         assert_eq!(table.len(), u32::MAX);
         assert_eq!(table.get(4_000_000_000), Some(Value::FuncRef(None)));
         assert!(table.set(4_000_000_000, Value::FuncRef(Some((2, 5)))));

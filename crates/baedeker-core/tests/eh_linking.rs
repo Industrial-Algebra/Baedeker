@@ -280,7 +280,11 @@ fn importer_throw_caught_in_exporter() {
     let mut group = Group::new();
     let table_ty = TableType {
         elem: RefType::FuncRef,
-        limits: Limits { min: 1, max: None },
+        limits: Limits {
+            min: 1,
+            max: None,
+            is64: false,
+        },
         init: None,
     };
     let table = Rc::new(RefCell::new(
