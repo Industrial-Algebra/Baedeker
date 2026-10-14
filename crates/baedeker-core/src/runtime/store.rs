@@ -463,7 +463,6 @@ pub struct TagBinding {
 ///
 /// Defined memories and globals only; the imported index-space prefix is
 /// tracked so accesses to imported memories/globals can fail explicitly.
-#[derive(Debug)]
 pub struct Store {
     memories: Vec<alloc::rc::Rc<core::cell::RefCell<Vec<u8>>>>,
     memory_types: Vec<MemType>,
@@ -785,11 +784,35 @@ impl Store {
                 .map(|v| expand_val(module_types, module_recs, v, &mut Vec::new()))
                 .collect();
             let declared_rec = rec_provenance(&declared.rec);
+            // Bare types are implicit SINGLETON rec groups in the
+            // reference interpreter's canonicalization: a bare type and
+            // a one-member rec group of the same shape are canonically
+            // equal. Normalize both sides before comparing so that pair
+            // links, while bare-vs-multi-member still differs by group
+            // signature.
+            let singleton = |params: &[ExpandedVal]| {
+                RecProvenance::Group(
+                    alloc::vec![ExpandedFunc {
+                        params: params.to_vec(),
+                        results: Vec::new(),
+                    }],
+                    0,
+                )
+            };
+            let provider_rec = match &provider.rec {
+                RecProvenance::Bare => {
+                    singleton(provider.expanded_params.as_deref().unwrap_or(&[]))
+                }
+                other => other.clone(),
+            };
+            let declared_rec = match &declared_rec {
+                RecProvenance::Bare => singleton(declared_params.as_deref().unwrap_or(&[])),
+                other => other.clone(),
+            };
             let compatible = match (&provider.expanded_params, declared_params) {
                 (Some(a), Some(b)) => a == &b,
                 _ => false,
-            } && match (&provider.rec, &declared_rec) {
-                (RecProvenance::Bare, RecProvenance::Bare) => true,
+            } && match (&provider_rec, &declared_rec) {
                 (RecProvenance::Group(sig_a, pos_a), RecProvenance::Group(sig_b, pos_b)) => {
                     sig_a == sig_b && pos_a == pos_b
                 }
@@ -1626,6 +1649,27 @@ fn pop_i64_pair(stack: &mut Vec<Value>) -> Result<(i64, i64), RuntimeError> {
         });
     };
     Ok((lhs, rhs))
+}
+
+impl core::fmt::Debug for Store {
+    /// Non-recursive: the store links into a group whose members hold
+    /// stores back (Store -> LinkGroup -> Store), so a derived Debug
+    /// overflows the stack on any linked instance. Summarize instead.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Store")
+            .field("instance_id", &self.instance_id)
+            .field("memories", &self.memories.len())
+            .field("globals", &self.globals.len())
+            .field("tables", &self.tables.len())
+            .field("imported_funcs", &self.imported_funcs.len())
+            .field("exports", &self.exports.len())
+            .field("tags", &self.tag_map.len())
+            .field(
+                "link_group",
+                &self.link_group.as_ref().map(|g| g.borrow().len()),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 #[cfg(test)]

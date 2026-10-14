@@ -673,3 +673,37 @@ fn cyclic_sibling_group_tag_rejects_against_bare() {
         "expected import type mismatch, got {msg}"
     );
 }
+
+/// Review r3 P1: bare types are implicit singleton rec groups in the
+/// reference's canonicalization — a bare tag type and a one-member rec
+/// group of the same shape are canonically EQUAL and must link.
+#[test]
+fn singleton_rec_group_links_against_bare() {
+    let a = Rc::new(wat_module(
+        r#"
+(module
+  (rec (type $f (func (param i32))))
+  (tag (export "t") (type $f)))"#,
+    ));
+    let b = Rc::new(wat_module(
+        r#"
+(module
+  (type $f (func (param i32)))
+  (import "a" "t" (tag $e (type $f))))"#,
+    ));
+
+    let mut group = Group::new();
+    let a_store = group.add(&a, &Imports::new());
+    let binding = tag_export_binding(&a_store.borrow(), &a, "t").expect("tag export binding");
+    let imports = Imports::new().tag(
+        "a",
+        "t",
+        binding.identity,
+        binding.ty,
+        binding.expanded_params.clone(),
+        binding.rec.clone(),
+    );
+    group
+        .try_add(&b, &imports)
+        .expect("canonically equal singleton tag types must link");
+}
