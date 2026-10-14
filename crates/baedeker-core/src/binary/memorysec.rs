@@ -49,14 +49,36 @@ fn parse_limits(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Limits, D
     match tag {
         0x00 => {
             let min = decode_u32_in_section(cursor, base_offset)?;
-            Ok(Limits { min, max: None })
+            Ok(Limits {
+                min: u64::from(min),
+                max: None,
+                is64: false,
+            })
         }
         0x01 => {
             let min = decode_u32_in_section(cursor, base_offset)?;
             let max = decode_u32_in_section(cursor, base_offset)?;
             Ok(Limits {
+                min: u64::from(min),
+                max: Some(u64::from(max)),
+                is64: false,
+            })
+        }
+        0x04 => {
+            let min = decode_u64_in_section(cursor, base_offset)?;
+            Ok(Limits {
+                min,
+                max: None,
+                is64: true,
+            })
+        }
+        0x05 => {
+            let min = decode_u64_in_section(cursor, base_offset)?;
+            let max = decode_u64_in_section(cursor, base_offset)?;
+            Ok(Limits {
                 min,
                 max: Some(max),
+                is64: true,
             })
         }
         _ => Err(DecodeError {
@@ -72,6 +94,14 @@ fn parse_limits(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Limits, D
 
 fn decode_u32_in_section(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<u32, DecodeError> {
     leb128::decode_u32(cursor).map_err(|mut e| {
+        e.context = DecodeContext::MemorySection;
+        e.offset = ByteOffset(base_offset + e.offset.0);
+        e
+    })
+}
+
+fn decode_u64_in_section(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<u64, DecodeError> {
+    leb128::decode_u64(cursor).map_err(|mut e| {
         e.context = DecodeContext::MemorySection;
         e.offset = ByteOffset(base_offset + e.offset.0);
         e

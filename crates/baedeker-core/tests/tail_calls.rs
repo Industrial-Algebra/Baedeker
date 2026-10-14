@@ -159,7 +159,11 @@ fn cross_instance_tail_call_type_check_uses_callers_declared_type() {
     let group: Rc<RefCell<LinkGroup>> = Rc::new(RefCell::new(LinkGroup::new()));
     let table_ty = TableType {
         elem: RefType::FuncRef,
-        limits: Limits { min: 2, max: None },
+        limits: Limits {
+            min: 2,
+            max: None,
+            is64: false,
+        },
         init: None,
     };
     let shared = Rc::new(RefCell::new(

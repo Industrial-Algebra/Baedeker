@@ -240,8 +240,9 @@ pub struct Global<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Limits {
-    pub min: u32,
-    pub max: Option<u32>,
+    pub min: u64,
+    pub max: Option<u64>,
+    pub is64: bool,
 }
 
 /// Memory types.
@@ -258,7 +259,7 @@ pub struct MemType {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MemArg {
     pub align: u32,
-    pub offset: u32,
+    pub offset: u64,
     pub memory: MemIdx,
 }
 

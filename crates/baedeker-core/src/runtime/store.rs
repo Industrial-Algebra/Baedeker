@@ -224,6 +224,11 @@ fn try_alloc_n<T: Clone>(n: usize, value: T) -> Option<Vec<T>> {
 /// Spec limits matching: provided limits must be at least as permissive as
 /// declared import limits.
 fn limits_match(provided: &Limits, declared: &Limits) -> bool {
+    // Index type is part of the entity type: an i32 and an i64 memory
+    // (or table) are different types and never link.
+    if provided.is64 != declared.is64 {
+        return false;
+    }
     if provided.min < declared.min {
         return false;
     }
@@ -596,8 +601,9 @@ impl Store {
             // size as the effective minimum (spec: external limits grow).
             let provided_limits = match &provider.shared {
                 Some(shared) => Limits {
-                    min: (shared.borrow().len() / PAGE_SIZE) as u32,
+                    min: (shared.borrow().len() / PAGE_SIZE) as u64,
                     max: provider.ty.limits.max,
+                    is64: provider.ty.limits.is64,
                 },
                 None => provider.ty.limits,
             };
@@ -607,7 +613,10 @@ impl Store {
             let entity = match provider.shared.clone() {
                 Some(shared) => shared,
                 None => {
-                    let bytes = try_alloc_n(provider.ty.limits.min as usize * PAGE_SIZE, 0u8)
+                    let bytes = usize::try_from(provider.ty.limits.min)
+                        .ok()
+                        .and_then(|pages| pages.checked_mul(PAGE_SIZE))
+                        .and_then(|bytes| try_alloc_n(bytes, 0u8))
                         .ok_or_else(|| allocation_failed("imported memory"))?;
                     alloc::rc::Rc::new(core::cell::RefCell::new(bytes))
                 }
@@ -659,6 +668,7 @@ impl Store {
                 Some(shared) => Limits {
                     min: shared.borrow().len(),
                     max: provider.ty.limits.max,
+                    is64: provider.ty.limits.is64,
                 },
                 None => provider.ty.limits,
             };
@@ -712,7 +722,10 @@ impl Store {
 
         let mut memories = Vec::with_capacity(module.memories.len());
         for mem in &module.memories {
-            let bytes = try_alloc_n(mem.limits.min as usize * PAGE_SIZE, 0u8)
+            let bytes = usize::try_from(mem.limits.min)
+                .ok()
+                .and_then(|pages| pages.checked_mul(PAGE_SIZE))
+                .and_then(|bytes| try_alloc_n(bytes, 0u8))
                 .ok_or_else(|| allocation_failed("memory"))?;
             memories.push(alloc::rc::Rc::new(core::cell::RefCell::new(bytes)));
         }
@@ -941,15 +954,20 @@ impl Store {
                             break;
                         }
                     };
-                    let Value::I32(offset) = offset else {
-                        instantiation_error = Some(RuntimeError {
-                            kind: RuntimeErrorKind::InvalidConstExpr,
-                        });
-                        break;
+                    let is64 = store.table_type(table.0).is_some_and(|ty| ty.limits.is64);
+                    let offset = match (is64, offset) {
+                        (false, Value::I32(offset)) => u64::from(offset as u32),
+                        (true, Value::I64(offset)) => offset as u64,
+                        _ => {
+                            instantiation_error = Some(RuntimeError {
+                                kind: RuntimeErrorKind::InvalidConstExpr,
+                            });
+                            break;
+                        }
                     };
                     let applied = store
                         .with_table_mut(table.0, |target| {
-                            if target.write_slice(offset as u32, &values) {
+                            if target.write_slice(offset, &values) {
                                 Ok(())
                             } else {
                                 Err(trap(RuntimeTrap::OutOfBoundsTableAccess))
@@ -990,21 +1008,26 @@ impl Store {
                             break;
                         }
                     };
-                    let Value::I32(offset) = offset else {
-                        instantiation_error = Some(RuntimeError {
-                            kind: RuntimeErrorKind::InvalidConstExpr,
-                        });
-                        break;
+                    let is64 = store.memory_type(memory.0).is_some_and(|ty| ty.limits.is64);
+                    let offset = match (is64, offset) {
+                        (false, Value::I32(offset)) => u64::from(offset as u32),
+                        (true, Value::I64(offset)) => offset as u64,
+                        _ => {
+                            instantiation_error = Some(RuntimeError {
+                                kind: RuntimeErrorKind::InvalidConstExpr,
+                            });
+                            break;
+                        }
                     };
                     let applied = store
                         .with_memory_mut(memory.0, |mem| {
-                            let start = offset as usize;
-                            let Some(end) = start.checked_add(segment.bytes.len()) else {
+                            let Some(end) = offset.checked_add(segment.bytes.len() as u64) else {
                                 return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
                             };
-                            if end > mem.len() {
+                            if end > mem.len() as u64 {
                                 return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
                             }
+                            let (start, end) = (offset as usize, end as usize);
                             mem[start..end].copy_from_slice(&segment.bytes);
                             Ok(())
                         })
