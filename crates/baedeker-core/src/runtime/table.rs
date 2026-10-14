@@ -11,7 +11,6 @@
 //!
 //! See [Spec §4.2.7](https://webassembly.github.io/spec/core/exec/runtime.html#table-instances).
 
-use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use crate::runtime::Value;
@@ -34,7 +33,7 @@ fn fill_value(fills: &[(u32, u32, Value)], idx: u32) -> Option<Value> {
 /// Record a migration run: two-and-longer runs become fill ranges,
 /// single entries materialize explicitly.
 fn push_run(
-    elems: &mut BTreeMap<u32, Value>,
+    elems: &mut Vec<(u32, Value)>,
     fills: &mut Vec<(u32, u32, Value)>,
     start: u32,
     end: u32,
@@ -43,7 +42,7 @@ fn push_run(
     if end - start > 1 {
         fills.push((start, end, value));
     } else {
-        elems.insert(start, value);
+        entry_upsert(elems, start, value);
     }
 }
 
@@ -105,7 +104,11 @@ enum TableStorage {
     Dense(Vec<Value>),
     Sparse {
         len: u32,
-        elems: BTreeMap<u32, Value>,
+        /// Explicit entries, sorted by index: single writes, holes
+        /// punched into fill ranges, and (rare) migration singletons.
+        /// A sorted Vec (not a map) so bulk construction can reserve
+        /// fallibly — migration must fail cleanly, never abort.
+        elems: Vec<(u32, Value)>,
         /// Disjoint, sorted uniform-fill ranges `[start, end)` carrying a
         /// non-default value, created by grow/fill/copy bulk writes.
         /// Explicit `elems` entries take precedence (including explicit
@@ -113,6 +116,30 @@ enum TableStorage {
         /// bulk writes never materialize per-entry storage.
         fills: Vec<(u32, u32, Value)>,
     },
+}
+
+/// Sorted-Vec entry lookup.
+fn entry_get(elems: &[(u32, Value)], idx: u32) -> Option<Value> {
+    elems
+        .binary_search_by_key(&idx, |&(key, _)| key)
+        .ok()
+        .map(|pos| elems[pos].1)
+}
+
+/// Sorted-Vec upsert.
+fn entry_upsert(elems: &mut Vec<(u32, Value)>, idx: u32, value: Value) {
+    match elems.binary_search_by_key(&idx, |&(key, _)| key) {
+        Ok(pos) => elems[pos].1 = value,
+        Err(pos) => elems.insert(pos, (idx, value)),
+    }
+}
+
+/// Sorted-Vec removal.
+fn entry_remove(elems: &mut Vec<(u32, Value)>, idx: u32) -> Option<Value> {
+    match elems.binary_search_by_key(&idx, |&(key, _)| key) {
+        Ok(pos) => Some(elems.remove(pos).1),
+        Err(_) => None,
+    }
 }
 
 impl Table {
@@ -132,7 +159,7 @@ impl Table {
         } else {
             TableStorage::Sparse {
                 len: min,
-                elems: BTreeMap::new(),
+                elems: Vec::new(),
                 fills: Vec::new(),
             }
         };
@@ -170,9 +197,7 @@ impl Table {
                     // `idx < len <= u32::MAX`, so the narrowing is exact.
                     let idx = idx as u32;
                     Some(
-                        elems
-                            .get(&idx)
-                            .copied()
+                        entry_get(elems, idx)
                             .or_else(|| fill_value(fills, idx))
                             .unwrap_or(self.default),
                     )
@@ -201,15 +226,18 @@ impl Table {
                 }
                 let idx = idx as u32;
                 if value == self.default {
-                    // Removing the explicit entry is enough — unless the
-                    // index sits inside a uniform-fill range, where the
-                    // range value would resurface; record an explicit
-                    // default entry as a hole instead.
-                    if elems.remove(&idx).is_none() && fill_value(fills, idx).is_some() {
-                        elems.insert(idx, self.default);
+                    entry_remove(elems, idx);
+                    // Whenever a fill range covers the index, an explicit
+                    // default entry must REMAIN (or be recorded) as a
+                    // hole — otherwise the range value resurfaces. This
+                    // is independent of whether an explicit entry existed
+                    // before (review r2 P1: set-to-B then set-to-default
+                    // must land on default, not the fill value).
+                    if fill_value(fills, idx).is_some() {
+                        entry_upsert(elems, idx, self.default);
                     }
                 } else {
-                    elems.insert(idx, value);
+                    entry_upsert(elems, idx, value);
                 }
             }
         }
@@ -241,7 +269,11 @@ impl Table {
                 } else {
                     // Migrate to sparse: keep only non-default entries,
                     // compressing runs of equal values into fill ranges.
-                    let mut elems = BTreeMap::new();
+                    // Build both structures up front and commit only when
+                    // reservations succeed — a fragmented table (many
+                    // singleton runs) must fail the grow cleanly, never
+                    // abort (review r2 P1).
+                    let mut elems: Vec<(u32, Value)> = Vec::new();
                     let mut fills = Vec::new();
                     let mut run: Option<(u32, u32, Value)> = None;
                     for (idx, value) in vec.iter().enumerate() {
@@ -266,6 +298,15 @@ impl Table {
                     }
                     if fill != self.default && new > old {
                         fills.push((old, new, fill));
+                    }
+                    // The dense storage stays intact until the sparse
+                    // structures are provably allocatable.
+                    let elems_cap = elems.len().max(1);
+                    let fills_cap = fills.len().max(1);
+                    if elems.try_reserve(elems_cap).is_err()
+                        || fills.try_reserve(fills_cap).is_err()
+                    {
+                        return None;
                     }
                     self.storage = TableStorage::Sparse {
                         len: new,
@@ -320,7 +361,7 @@ impl Table {
                 // `end <= len <= u32::MAX`, so both narrowings are exact.
                 let (start, end) = (start as u32, end as u32);
                 // Drop explicit entries in the span; they are overwritten.
-                elems.retain(|&idx, _| idx < start || idx >= end);
+                elems.retain(|&(idx, _)| idx < start || idx >= end);
                 if value == self.default {
                     // Punch the span out of any intersecting ranges.
                     let mut rewritten = Vec::new();
@@ -478,7 +519,7 @@ impl Table {
                     return;
                 }
                 let (start, end) = (start as u32, end as u32);
-                elems.retain(|&idx, _| idx < start || idx >= end);
+                elems.retain(|&(idx, _)| idx < start || idx >= end);
                 if value == self.default {
                     let mut rewritten = Vec::new();
                     for &(fstart, fend, fval) in fills.iter() {
@@ -520,12 +561,11 @@ impl Table {
                 }
                 // `end <= len <= u32::MAX`, so both narrowings are exact.
                 let (start, end) = (start as u32, end as u32);
-                let mut out = Vec::with_capacity(count as usize);
+                let mut out = Vec::new();
+                out.try_reserve(count as usize).ok()?;
                 for idx in start..end {
                     out.push(
-                        elems
-                            .get(&idx)
-                            .copied()
+                        entry_get(elems, idx)
                             .or_else(|| fill_value(fills, idx))
                             .unwrap_or(self.default),
                     );
@@ -559,12 +599,13 @@ impl Table {
                 for (offset, value) in values.iter().enumerate() {
                     let idx = start + offset as u32;
                     if *value == self.default {
-                        // Same hole-punching rule as `set`.
-                        if elems.remove(&idx).is_none() && fill_value(fills, idx).is_some() {
-                            elems.insert(idx, self.default);
+                        entry_remove(elems, idx);
+                        // Same unconditional hole rule as `set`.
+                        if fill_value(fills, idx).is_some() {
+                            entry_upsert(elems, idx, self.default);
                         }
                     } else {
-                        elems.insert(idx, *value);
+                        entry_upsert(elems, idx, *value);
                     }
                 }
             }

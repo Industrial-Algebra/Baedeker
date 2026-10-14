@@ -1910,7 +1910,16 @@ fn execute_reg_op(
             if !dst_ok || !src_ok {
                 return Err(trap(RuntimeTrap::OutOfBoundsTableAccess));
             }
-            if dst_table.0 == src_table.0 {
+            // Aliased imports (one shared table bound at two indices)
+            // must take the same-table path too: borrowing one RefCell
+            // twice would panic (review r2 P1).
+            let dst_handle = store.shared_table(dst_table.0).ok_or(RuntimeError {
+                kind: RuntimeErrorKind::UnknownTable { table: dst_table.0 },
+            })?;
+            let src_handle = store.shared_table(src_table.0).ok_or(RuntimeError {
+                kind: RuntimeErrorKind::UnknownTable { table: src_table.0 },
+            })?;
+            if dst_table.0 == src_table.0 || alloc::rc::Rc::ptr_eq(&dst_handle, &src_handle) {
                 // One table: overlap-preserving copy, no temporary.
                 store
                     .with_table_mut(dst_table.0, |table| table.copy_within(dst, src, count))
@@ -1920,12 +1929,6 @@ fn execute_reg_op(
             } else {
                 // Two tables: distinct handles, still no temporary — copy
                 // in runs straight across.
-                let dst_handle = store.shared_table(dst_table.0).ok_or(RuntimeError {
-                    kind: RuntimeErrorKind::UnknownTable { table: dst_table.0 },
-                })?;
-                let src_handle = store.shared_table(src_table.0).ok_or(RuntimeError {
-                    kind: RuntimeErrorKind::UnknownTable { table: src_table.0 },
-                })?;
                 let src_ref = src_handle.borrow();
                 let mut dst_ref = dst_handle.borrow_mut();
                 dst_ref.copy_from(&src_ref, dst, src, count);

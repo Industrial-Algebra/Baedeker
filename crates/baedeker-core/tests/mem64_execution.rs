@@ -483,3 +483,136 @@ fn table64_overlapping_copy_preserves_source() {
         vec![Value::I32(2)]
     );
 }
+
+/// Review r2 P1-1: setting a value over a fill range and then setting
+/// the default must land on the default — the hole rule is
+/// unconditional, whether or not an explicit entry existed before.
+#[test]
+fn fill_range_set_then_default_lands_on_default() {
+    use baedeker_core::runtime::{Table, Value};
+    use baedeker_core::types::{Limits, RefType, TableType};
+    let ty = TableType {
+        elem: RefType::ExternRef,
+        limits: Limits {
+            min: 0,
+            max: None,
+            is64: true,
+        },
+        init: None,
+    };
+    let mut table = Table::new(ty, Value::ExternRef(None)).unwrap();
+    let a = Value::ExternRef(Some(1));
+    let b = Value::ExternRef(Some(2));
+    // Grow into a uniform non-default fill covering [0, 10).
+    assert_eq!(table.grow(10, a), Some(0));
+    assert_eq!(table.get(3), Some(a));
+    // Explicit non-default entry, then explicit default: must stay
+    // default — not the fill value.
+    assert!(table.set(3, b));
+    assert_eq!(table.get(3), Some(b));
+    assert!(table.set(3, Value::ExternRef(None)));
+    assert_eq!(
+        table.get(3),
+        Some(Value::ExternRef(None)),
+        "hole must stay default"
+    );
+    // Repeating the default assignment is idempotent.
+    assert!(table.set(3, Value::ExternRef(None)));
+    assert_eq!(table.get(3), Some(Value::ExternRef(None)));
+    // Sibling indices keep the fill value.
+    assert_eq!(table.get(2), Some(a));
+    assert_eq!(table.get(4), Some(a));
+}
+
+/// Review r2 P1-3: dense-to-sparse migration of a fragmented table
+/// (alternating values, all singleton runs) must not abort — the grow
+/// either succeeds with the entries preserved or fails cleanly.
+#[test]
+fn fragmented_dense_migration_is_fallible_or_exact() {
+    use baedeker_core::runtime::{Table, Value};
+    use baedeker_core::types::{Limits, RefType, TableType};
+    let ty = TableType {
+        elem: RefType::ExternRef,
+        limits: Limits {
+            min: 0,
+            max: None,
+            is64: true,
+        },
+        init: None,
+    };
+    let mut table = Table::new(ty, Value::ExternRef(None)).unwrap();
+    let a = Value::ExternRef(Some(1));
+    let b = Value::ExternRef(Some(2));
+    // 1M-entry dense table with alternating values: every run is a
+    // singleton, the worst case for migration compression.
+    assert_eq!(table.grow(1 << 20, a), Some(0));
+    for idx in 0..(1u64 << 20) {
+        if idx % 2 == 1 {
+            assert!(table.set(idx, b));
+        }
+    }
+    // Growing past the dense limit forces migration; with sufficient
+    // memory it must succeed and preserve every other entry exactly.
+    let result = table.grow(8, a);
+    assert!(
+        result.is_some(),
+        "migration must succeed under normal memory, got None"
+    );
+    for idx in 0..(1u64 << 20) {
+        let expected = if idx % 2 == 0 { a } else { b };
+        assert_eq!(table.get(idx), Some(expected), "index {idx}");
+    }
+    assert_eq!(table.len(), (1 << 20) + 8);
+}
+
+/// Review r2 P1-2: importing the SAME shared table at two indices and
+/// copying between the aliases must not double-borrow the RefCell — it
+/// takes the same-table path and behaves like a same-table copy.
+#[test]
+fn table_copy_between_aliased_imports_is_same_table() {
+    use baedeker_core::runtime::{Imports, LinkGroup, Store};
+    use std::cell::RefCell;
+    use std::collections::BTreeMap;
+    use std::rc::Rc;
+
+    fn wat_module(source: &str) -> Rc<baedeker_core::lower::RegModule> {
+        Rc::new(crate::wat_module(source))
+    }
+
+    let provider = wat_module(
+        r#"(module
+  (type $t (func (result i32)))
+  (table (export "tbl") i64 4 funcref)
+  (func $f (result i32) (i32.const 9))
+  (elem (i64.const 0) $f))"#,
+    );
+    let importer = wat_module(
+        r#"(module
+  (type $t (func (result i32)))
+  (import "m" "tbl" (table $a i64 4 funcref))
+  (import "m" "tbl" (table $b i64 4 funcref))
+  (func (export "shift") (table.copy $b $a (i64.const 1) (i64.const 0) (i64.const 2)))
+  (func (export "at") (param i64) (result i32)
+    (call_indirect $b (type $t) (local.get 0))))"#,
+    );
+
+    let group: Rc<RefCell<LinkGroup>> = Rc::new(RefCell::new(BTreeMap::new()));
+    let arena = Rc::new(RefCell::new(Vec::new()));
+    let provider_store = Store::instantiate_linked(&provider, &Imports::new(), &group, 1, &arena)
+        .expect("provider instantiates");
+    let (ty, shared) = {
+        let guard = provider_store.borrow();
+        guard.export_table("tbl").expect("table export")
+    };
+    let imports = Imports::new().shared_table("m", "tbl", ty, shared);
+    let importer_store = Store::instantiate_linked(&importer, &imports, &group, 2, &arena)
+        .expect("importer instantiates");
+
+    // Copy [0,2) of the alias to offset 1 — must succeed, not panic.
+    execute_export(&importer, &importer_store.borrow(), "shift", &[])
+        .expect("aliased copy executes");
+    // at(1) now holds the entry from index 0.
+    let result =
+        execute_export(&importer, &importer_store.borrow(), "at", &[Value::I64(1)]).unwrap();
+    assert_eq!(result, vec![Value::I32(9)]);
+}
