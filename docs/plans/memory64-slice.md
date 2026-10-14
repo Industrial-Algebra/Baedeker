@@ -52,10 +52,10 @@ Expected post-slice: 178 files, ~53.4k assertions, 0 failures, deferred still 7.
 
 | Unit | Content | Contract |
 |---|---|---|
-| U1 | Binary surface: u64+is64 limits (0x04/0x05), u64 LEBs, i64 const offsets in data/elem, fixtures | `docs/plans/memory64-unit1-contract.md` |
+| U1 | Binary surface: u64+is64 limits (0x04/0x05), u64 LEBs, `MemArg.offset`→u64, AOT v6 (limits/memarg serialization shape), i64 const offsets in data/elem flow-through, fixtures | `docs/plans/memory64-unit1-contract.md` |
 | U2 | Validation: limit ranges, memarg-offset rule, index-type-aware operand checks for all mem/table ops, segment offset types | `docs/plans/memory64-unit2-contract.md` |
 | U3 | IR + runtime: index-type-driven addressing, 64-bit bounds/grow, OOM-safe instantiate, table64 indexing, call_indirect64 | `docs/plans/memory64-unit3-contract.md` |
-| U4 | Linking compat (is64 must match), AOT v6, FFI verify, CLI/GPU sweep | `docs/plans/memory64-unit4-contract.md` |
+| U4 | Linking compat (is64 must match), FFI verify, CLI/GPU sweep | `docs/plans/memory64-unit4-contract.md` |
 | U5 | Vendor 25 corpus files, grind to zero failures | `docs/plans/memory64-unit5-contract.md` |
 
 Review loop after U5, per ia-moment doctrine (reviewer on gpt-6.1-sol+,
