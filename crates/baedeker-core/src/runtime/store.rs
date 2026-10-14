@@ -12,7 +12,7 @@ use crate::lower::{RegConstInstr, RegDataMode, RegElemValue, RegElementMode, Reg
 use crate::runtime::gpu::{GpuBackend, GpuError, GpuKernelId};
 use crate::runtime::host::HostFunction;
 use crate::runtime::{RuntimeError, RuntimeErrorKind, RuntimeTrap, Value, trap};
-use crate::types::{FuncIdx, GlobalType, Limits, MemType, TableType};
+use crate::types::{FuncIdx, FuncType, GlobalType, Limits, MemType, TableType};
 
 use crate::runtime::verify::F32_ADD_WGSL;
 
@@ -271,6 +271,14 @@ pub type LinkGroup = alloc::collections::BTreeMap<
     ),
 >;
 
+/// A thrown exception record. `tag` is `(instance_id, tag_idx)` — the
+/// throwing frame's module-local tag index qualified by its instance.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExceptionRecord {
+    pub tag: (u32, u32),
+    pub payload: Vec<Value>,
+}
+
 /// Mutable state of an instantiated module.
 ///
 /// Defined memories and globals only; the imported index-space prefix is
@@ -321,6 +329,14 @@ pub struct Store {
     imported_memory_count: u32,
     imported_global_count: u32,
     imported_table_count: u32,
+    /// Exception arena: indexed by `Value::ExnRef(Some(idx))` and by the
+    /// `Throw { exn }` error. Grows monotonically; reclamation is the GC
+    /// slice's concern.
+    exceptions: core::cell::RefCell<Vec<ExceptionRecord>>,
+    /// Function types of registered tags, indexed by a module-agnostic
+    /// tag id. Populated at instantiation (U4); used for host-side
+    /// inspection and cross-instance matching.
+    tag_types: Vec<FuncType>,
 }
 
 impl Store {
@@ -568,6 +584,8 @@ impl Store {
             imported_memory_count: module.imported_memory_count,
             imported_global_count: module.imported_global_count,
             imported_table_count: module.imported_table_count,
+            exceptions: core::cell::RefCell::new(Vec::new()),
+            tag_types: Vec::new(),
         };
 
         let mut instantiation_error: Option<RuntimeError> = None;
@@ -729,7 +747,14 @@ impl Store {
             .ok_or(RuntimeError {
                 kind: RuntimeErrorKind::UnknownFunction { func: start_idx.0 },
             })?;
-        crate::runtime::execute_func_in(Some(module), Some(self), func, &[], 0)?;
+        crate::runtime::execute_func_in(Some(module), Some(self), func, &[], 0).map_err(
+            |error| match error.kind {
+                RuntimeErrorKind::Throw { exn } => RuntimeError {
+                    kind: RuntimeErrorKind::UncaughtException { exn: Some(exn) },
+                },
+                _ => error,
+            },
+        )?;
         Ok(())
     }
 
@@ -1032,6 +1057,26 @@ impl Store {
         }
         self.fuel.set(Some(remaining - 1));
         true
+    }
+
+    /// Allocate an exception record in the arena, returning its index.
+    pub fn allocate_exception(&self, tag: (u32, u32), payload: Vec<Value>) -> u32 {
+        let mut exceptions = self.exceptions.borrow_mut();
+        let idx = exceptions.len() as u32;
+        exceptions.push(ExceptionRecord { tag, payload });
+        idx
+    }
+
+    /// Clone the exception record at `idx`, or `None` when out of range.
+    pub fn exception(&self, idx: u32) -> Option<ExceptionRecord> {
+        self.exceptions.borrow().get(idx as usize).cloned()
+    }
+
+    /// Register a tag's function type, returning its module-agnostic tag id.
+    pub fn register_tag_type(&mut self, ty: FuncType) -> u32 {
+        let id = self.tag_types.len() as u32;
+        self.tag_types.push(ty);
+        id
     }
 
     /// The link group this instance belongs to, if any.

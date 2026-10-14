@@ -24,7 +24,7 @@ pub const AOT_MAGIC: [u8; 7] = *b"BDKAOT1";
 const ENVELOPE_LEN: usize = AOT_MAGIC.len() + 4;
 
 /// Current artifact format version. Bump on any IR layout change.
-pub const AOT_FORMAT_VERSION: u32 = 2;
+pub const AOT_FORMAT_VERSION: u32 = 3;
 
 /// Errors deserializing an AOT artifact.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,6 +146,15 @@ mod tests {
         assert!(matches!(
             deserialize(&v1_artifact),
             Err(AotError::UnsupportedVersion { found: 1, .. })
+        ));
+
+        // v2 artifacts predate the EH protected regions / tag fields on the
+        // serialized IR; they must be rejected, never reinterpreted.
+        let mut v2_artifact = artifact.clone();
+        v2_artifact[AOT_MAGIC.len()..AOT_MAGIC.len() + 4].copy_from_slice(&2u32.to_le_bytes());
+        assert!(matches!(
+            deserialize(&v2_artifact),
+            Err(AotError::UnsupportedVersion { found: 2, .. })
         ));
 
         let truncated = &artifact[..artifact.len() - 3];

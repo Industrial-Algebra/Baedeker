@@ -4,13 +4,12 @@
 //! EH unit 2: `try_table` / `throw` / `throw_ref` validation fixtures.
 //!
 //! Runs the `eh-validation` spec-text corpus through decode + validation.
-//! Modules free of EH instructions (and tag imports) additionally run the full
-//! lower + instantiate pipeline; modules that use EH stop after validation
-//! because lowering lands in unit 3 and tag linking in unit 4.
+//! Modules free of tag imports additionally run the full lower + instantiate
+//! pipeline (EH instructions lower and execute as of unit 3); modules that
+//! import tags stop after validation because tag linking lands in unit 4.
 
 use std::path::Path;
 
-use baedeker_core::binary::instr::Instr;
 use baedeker_core::binary::module::Module;
 use baedeker_core::runtime::Store;
 use baedeker_core::types::ImportDesc;
@@ -30,30 +29,12 @@ fn encode_wat(mut wat: QuoteWat<'_>) -> Result<Vec<u8>, String> {
     wat.encode().map_err(|error| error.to_string())
 }
 
-/// Whether a module exercises features that lowering/linking do not yet
-/// support: any `try_table`/`throw`/`throw_ref` in a function body, or any
-/// imported tag (tag imports cannot link until unit 4).
-fn module_uses_eh(module: &Module<'_>) -> bool {
-    if module
+/// Whether a module imports a tag (tag imports cannot link until unit 4).
+fn module_imports_tag(module: &Module<'_>) -> bool {
+    module
         .imports()
         .iter()
         .any(|import| matches!(import.desc, ImportDesc::Tag(_)))
-    {
-        return true;
-    }
-
-    module.codes().iter().any(|code| {
-        code.instructions()
-            .map(|instrs| {
-                instrs.iter().any(|instr| {
-                    matches!(
-                        instr,
-                        Instr::TryTable(_) | Instr::Throw(_) | Instr::ThrowRef
-                    )
-                })
-            })
-            .unwrap_or(false)
-    })
 }
 
 fn directive_name(directive: &WastDirective<'_>) -> &'static str {
@@ -101,7 +82,7 @@ fn run_eh_validation_case(path: &Path, stats: &mut EhValidationStats) {
                 module.validate().unwrap_or_else(|error| {
                     panic!("{}: expected module to validate: {error}", path.display())
                 });
-                if module_uses_eh(&module) {
+                if module_imports_tag(&module) {
                     stats.validated_only += 1;
                 } else {
                     let lowered = module.lower().unwrap_or_else(|error| {
@@ -190,7 +171,7 @@ fn eh_validation_cases() {
         "unexpected EH validation assertion count"
     );
     assert_eq!(
-        stats.validated_only, 2,
+        stats.validated_only, 1,
         "unexpected EH validated-only module count"
     );
 }
