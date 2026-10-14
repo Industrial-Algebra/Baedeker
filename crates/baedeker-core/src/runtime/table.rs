@@ -49,8 +49,14 @@ fn push_run(
 /// Overwrite `[start, end)` with a uniform non-default `value`: split or
 /// drop intersecting ranges, then splice in the new range (merging with
 /// equal-valued neighbors when contiguous).
-fn overwrite_fills(fills: &mut Vec<(u32, u32, Value)>, start: u32, end: u32, value: Value) {
-    let mut rewritten: Vec<(u32, u32, Value)> = Vec::with_capacity(fills.len() + 1);
+fn overwrite_fills(
+    fills: &mut Vec<(u32, u32, Value)>,
+    start: u32,
+    end: u32,
+    value: Value,
+) -> Option<()> {
+    let mut rewritten: Vec<(u32, u32, Value)> = Vec::new();
+    rewritten.try_reserve(fills.len() + 1).ok()?;
     for &(fstart, fend, fval) in fills.iter() {
         if fend <= start || fstart >= end {
             rewritten.push((fstart, fend, fval));
@@ -64,7 +70,8 @@ fn overwrite_fills(fills: &mut Vec<(u32, u32, Value)>, start: u32, end: u32, val
         }
     }
     // Splice the new range in, merging with contiguous equal neighbors.
-    let mut result: Vec<(u32, u32, Value)> = Vec::with_capacity(rewritten.len() + 1);
+    let mut result: Vec<(u32, u32, Value)> = Vec::new();
+    result.try_reserve(rewritten.len() + 1).ok()?;
     let mut pending = Some((start, end, value));
     for &(fstart, fend, fval) in rewritten.iter() {
         match pending {
@@ -89,6 +96,7 @@ fn overwrite_fills(fills: &mut Vec<(u32, u32, Value)>, start: u32, end: u32, val
     // Re-sort: neighbors merged above keep order, but be defensive.
     result.sort_by_key(|&(start, _, _)| start);
     *fills = result;
+    Some(())
 }
 
 /// A WebAssembly table instance.
@@ -269,12 +277,18 @@ impl Table {
                 } else {
                     // Migrate to sparse: keep only non-default entries,
                     // compressing runs of equal values into fill ranges.
-                    // Build both structures up front and commit only when
-                    // reservations succeed — a fragmented table (many
-                    // singleton runs) must fail the grow cleanly, never
-                    // abort (review r2 P1).
+                    // Capacity is reserved FALLIBLY before a single push —
+                    // Vec growth during construction would abort rather
+                    // than fail the grow cleanly (review r3 P1; the r2 fix
+                    // reserved only after the fact).
+                    let non_default = vec.iter().filter(|value| **value != self.default).count();
                     let mut elems: Vec<(u32, Value)> = Vec::new();
                     let mut fills = Vec::new();
+                    if elems.try_reserve(non_default.max(1)).is_err()
+                        || fills.try_reserve(non_default.max(1)).is_err()
+                    {
+                        return None;
+                    }
                     let mut run: Option<(u32, u32, Value)> = None;
                     for (idx, value) in vec.iter().enumerate() {
                         if *value != self.default {
@@ -297,17 +311,16 @@ impl Table {
                         push_run(&mut elems, &mut fills, start, end, v);
                     }
                     if fill != self.default && new > old {
+                        // Appending the grown range is covered by the
+                        // pre-reserved capacity plus one more slot.
+                        if fills.try_reserve(1).is_err() {
+                            return None;
+                        }
                         fills.push((old, new, fill));
                     }
                     // The dense storage stays intact until the sparse
-                    // structures are provably allocatable.
-                    let elems_cap = elems.len().max(1);
-                    let fills_cap = fills.len().max(1);
-                    if elems.try_reserve(elems_cap).is_err()
-                        || fills.try_reserve(fills_cap).is_err()
-                    {
-                        return None;
-                    }
+                    // structures are fully built; every allocation above
+                    // was reserved fallibly.
                     self.storage = TableStorage::Sparse {
                         len: new,
                         elems,
@@ -329,6 +342,9 @@ impl Table {
                             last.1 = new;
                         }
                     } else {
+                        if fills.try_reserve(1).is_err() {
+                            return None;
+                        }
                         fills.push((old, new, fill));
                     }
                 }
@@ -353,6 +369,7 @@ impl Table {
                     return false;
                 }
                 vec[start..end].fill(value);
+                true
             }
             TableStorage::Sparse { len, elems, fills } => {
                 if end > u64::from(*len) {
@@ -363,8 +380,12 @@ impl Table {
                 // Drop explicit entries in the span; they are overwritten.
                 elems.retain(|&(idx, _)| idx < start || idx >= end);
                 if value == self.default {
-                    // Punch the span out of any intersecting ranges.
+                    // Punch the span out of any intersecting ranges,
+                    // reserving fallibly first (Vec growth aborts).
                     let mut rewritten = Vec::new();
+                    if rewritten.try_reserve(fills.len()).is_err() {
+                        return false;
+                    }
                     for &(fstart, fend, fval) in fills.iter() {
                         if fend <= start || fstart >= end {
                             rewritten.push((fstart, fend, fval));
@@ -378,12 +399,12 @@ impl Table {
                         }
                     }
                     *fills = rewritten;
+                    true
                 } else {
-                    overwrite_fills(fills, start, end, value);
+                    overwrite_fills(fills, start, end, value).is_some()
                 }
             }
         }
-        true
     }
 
     /// Same-table `table.copy`: `[dst, dst+count)` receives
@@ -450,7 +471,9 @@ impl Table {
                         (idx + 1 - step, step)
                     };
                     let dst_start = dst + (run_start - src);
-                    self.overwrite_range(dst_start, run_len, value);
+                    if !self.overwrite_range(dst_start, run_len, value) {
+                        return false;
+                    }
                     if forward {
                         if run_start + step >= src_end {
                             break;
@@ -492,7 +515,9 @@ impl Table {
                 run_end += 1;
             }
             let dst_start = dst + (idx - src);
-            self.overwrite_range(dst_start, run_end - idx, value);
+            if !self.overwrite_range(dst_start, run_end - idx, value) {
+                return false;
+            }
             idx = run_end;
         }
         true
@@ -501,27 +526,31 @@ impl Table {
     /// Overwrite `[start, start+count)` with a uniform `value` (bounds
     /// pre-checked by callers when they need whole-range checking; this
     /// helper also guards per-range to keep invariants local).
-    fn overwrite_range(&mut self, start: u64, count: u64, value: Value) {
+    fn overwrite_range(&mut self, start: u64, count: u64, value: Value) -> bool {
         let Some(end) = start.checked_add(count) else {
-            return;
+            return false;
         };
         match &mut self.storage {
             TableStorage::Dense(vec) => {
                 let (Ok(start), Ok(end)) = (usize::try_from(start), usize::try_from(end)) else {
-                    return;
+                    return false;
                 };
                 if end <= vec.len() {
                     vec[start..end].fill(value);
                 }
+                return true;
             }
             TableStorage::Sparse { len, elems, fills } => {
                 if end > u64::from(*len) {
-                    return;
+                    return false;
                 }
                 let (start, end) = (start as u32, end as u32);
                 elems.retain(|&(idx, _)| idx < start || idx >= end);
                 if value == self.default {
                     let mut rewritten = Vec::new();
+                    if rewritten.try_reserve(fills.len()).is_err() {
+                        return false;
+                    }
                     for &(fstart, fend, fval) in fills.iter() {
                         if fend <= start || fstart >= end {
                             rewritten.push((fstart, fend, fval));
@@ -536,10 +565,13 @@ impl Table {
                     }
                     *fills = rewritten;
                 } else {
-                    overwrite_fills(fills, start, end, value);
+                    if overwrite_fills(fills, start, end, value).is_none() {
+                        return false;
+                    }
                 }
             }
         }
+        true
     }
 
     /// Snapshot entries in `start..start + count`; `None` on out of bounds.
