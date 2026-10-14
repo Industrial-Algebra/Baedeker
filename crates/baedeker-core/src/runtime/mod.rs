@@ -300,7 +300,7 @@ fn execute_call_indirect(
     store: Option<&Store>,
     type_idx: &crate::types::TypeIdx,
     table: &TableIdx,
-    idx: u32,
+    idx: u64,
     call_args: &[Value],
     depth: usize,
 ) -> Result<Vec<Value>, RuntimeError> {
@@ -618,7 +618,7 @@ fn resolve_tail_funcref<'a>(
 fn table_lookup_target(
     store: Option<&Store>,
     table: &TableIdx,
-    idx: u32,
+    idx: u64,
 ) -> Result<(u32, u32), RuntimeError> {
     let store = store.ok_or(RuntimeError {
         kind: RuntimeErrorKind::MissingStore,
@@ -908,7 +908,12 @@ pub(crate) fn execute_func_in(
                     results,
                 } = &instr.op
                 {
-                    let idx = expect_addr(get_reg(&registers, *index)?)?;
+                    let idx = read_addr(
+                        get_reg(&registers, *index)?,
+                        store
+                            .and_then(|s| s.table_type(table.0))
+                            .is_some_and(|ty| ty.limits.is64),
+                    )?;
                     let call_args = arg_regs
                         .iter()
                         .map(|&reg| get_reg(&registers, reg))
@@ -1092,7 +1097,12 @@ pub(crate) fn execute_func_in(
                     index,
                     args: arg_regs,
                 } => {
-                    let idx = expect_addr(get_reg(&registers, *index)?)?;
+                    let idx = read_addr(
+                        get_reg(&registers, *index)?,
+                        store
+                            .and_then(|s| s.table_type(table.0))
+                            .is_some_and(|ty| ty.limits.is64),
+                    )?;
                     let call_args = arg_regs
                         .iter()
                         .map(|&reg| get_reg(&registers, reg))
@@ -1329,8 +1339,11 @@ fn execute_reg_op(
             addr,
             memarg,
         } => {
-            let addr = expect_addr(get_reg(registers, *addr)?)?;
             let store = require_store(store)?;
+            let is64 = store
+                .memory_type(memarg.memory.0)
+                .is_some_and(|ty| ty.limits.is64);
+            let addr = read_addr(get_reg(registers, *addr)?, is64)?;
             let mem = store.shared_memory(memarg.memory.0).ok_or(RuntimeError {
                 kind: RuntimeErrorKind::UnknownMemory {
                     memory: memarg.memory.0,
@@ -1463,9 +1476,12 @@ fn execute_reg_op(
             value,
             memarg,
         } => {
-            let addr = expect_addr(get_reg(registers, *addr)?)?;
-            let value = get_reg(registers, *value)?;
             let store = require_store(store)?;
+            let is64 = store
+                .memory_type(memarg.memory.0)
+                .is_some_and(|ty| ty.limits.is64);
+            let addr = read_addr(get_reg(registers, *addr)?, is64)?;
+            let value = get_reg(registers, *value)?;
             let mem = store.shared_memory(memarg.memory.0).ok_or(RuntimeError {
                 kind: RuntimeErrorKind::UnknownMemory {
                     memory: memarg.memory.0,
@@ -1523,11 +1539,14 @@ fn execute_reg_op(
             memarg,
             lane,
         } => {
-            let addr = expect_addr(get_reg(registers, *addr)?)?;
+            let store = require_store(store)?;
+            let is64 = store
+                .memory_type(memarg.memory.0)
+                .is_some_and(|ty| ty.limits.is64);
+            let addr = read_addr(get_reg(registers, *addr)?, is64)?;
             let Value::V128(mut bytes) = get_reg(registers, *vec)? else {
                 return Err(type_mismatch_v128(registers, *vec));
             };
-            let store = require_store(store)?;
             let mem = store.shared_memory(memarg.memory.0).ok_or(RuntimeError {
                 kind: RuntimeErrorKind::UnknownMemory {
                     memory: memarg.memory.0,
@@ -1547,11 +1566,14 @@ fn execute_reg_op(
             memarg,
             lane,
         } => {
-            let addr = expect_addr(get_reg(registers, *addr)?)?;
+            let store = require_store(store)?;
+            let is64 = store
+                .memory_type(memarg.memory.0)
+                .is_some_and(|ty| ty.limits.is64);
+            let addr = read_addr(get_reg(registers, *addr)?, is64)?;
             let Value::V128(bytes) = get_reg(registers, *vec)? else {
                 return Err(type_mismatch_v128(registers, *vec));
             };
-            let store = require_store(store)?;
             let mem = store.shared_memory(memarg.memory.0).ok_or(RuntimeError {
                 kind: RuntimeErrorKind::UnknownMemory {
                     memory: memarg.memory.0,
@@ -1578,37 +1600,52 @@ fn execute_reg_op(
         }
         RegOp::MemorySize { dst, memory } => {
             let store = require_store(store)?;
+            let is64 = store.memory_type(memory.0).is_some_and(|ty| ty.limits.is64);
             let pages = store
                 .with_memory(memory.0, |mem| mem.len())
                 .ok_or(RuntimeError {
                     kind: RuntimeErrorKind::UnknownMemory { memory: memory.0 },
                 })?
                 / PAGE_SIZE;
-            set_reg(registers, *dst, Value::I32(pages as i32))?;
+            let value = if is64 {
+                Value::I64(pages as i64)
+            } else {
+                Value::I32(pages as i32)
+            };
+            set_reg(registers, *dst, value)?;
         }
         RegOp::MemoryGrow { dst, memory, delta } => {
             let store = require_store(store)?;
-            let delta = expect_addr(get_reg(registers, *delta)?)?;
+            let is64 = store.memory_type(memory.0).is_some_and(|ty| ty.limits.is64);
+            let delta = read_addr(get_reg(registers, *delta)?, is64)?;
             let max_pages = store
                 .memory_type(memory.0)
                 .and_then(|ty| ty.limits.max)
-                .unwrap_or(65536) as usize;
+                .unwrap_or(if is64 { 1 << 48 } else { 1 << 16 });
             let mem = store.shared_memory(memory.0).ok_or(RuntimeError {
                 kind: RuntimeErrorKind::UnknownMemory { memory: memory.0 },
             })?;
-            let result = {
+            let result: u64 = {
                 let mut mem = mem.borrow_mut();
-                let old_pages = mem.len() / PAGE_SIZE;
-                match old_pages.checked_add(delta as usize) {
+                let old_pages = (mem.len() / PAGE_SIZE) as u64;
+                match old_pages.checked_add(delta) {
                     Some(new_pages)
-                        if new_pages <= max_pages && grow_memory_fallible(&mut mem, new_pages) =>
+                        if new_pages <= max_pages
+                            && usize::try_from(new_pages)
+                                .map(|pages| grow_memory_fallible(&mut mem, pages))
+                                .unwrap_or(false) =>
                     {
-                        old_pages as i32
+                        old_pages
                     }
-                    _ => -1,
+                    _ => u64::MAX,
                 }
             };
-            set_reg(registers, *dst, Value::I32(result))?;
+            let value = if is64 {
+                Value::I64(result as i64)
+            } else {
+                Value::I32(result as i32)
+            };
+            set_reg(registers, *dst, value)?;
         }
         RegOp::MemoryInit {
             memory,
@@ -1618,9 +1655,10 @@ fn execute_reg_op(
             count,
         } => {
             let store = require_store(store)?;
-            let dst = expect_addr(get_reg(registers, *dst)?)? as usize;
-            let src = expect_addr(get_reg(registers, *src)?)? as usize;
-            let count = expect_addr(get_reg(registers, *count)?)? as usize;
+            let is64 = store.memory_type(memory.0).is_some_and(|ty| ty.limits.is64);
+            let dst = read_addr(get_reg(registers, *dst)?, is64)?;
+            let src = u64::from(expect_addr(get_reg(registers, *src)?)?);
+            let count = u64::from(expect_addr(get_reg(registers, *count)?)?);
             // Bounds-check and copy the segment range before borrowing memory.
             let (bytes, dst_end) = {
                 let segment = store
@@ -1635,17 +1673,17 @@ fn execute_reg_op(
                 else {
                     return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
                 };
-                if src_end > segment.len() {
+                if src_end > segment.len() as u64 {
                     return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
                 }
-                (segment[src..src_end].to_vec(), dst_end)
+                (segment[src as usize..src_end as usize].to_vec(), dst_end)
             };
             store
                 .with_memory_mut(memory.0, |mem| {
-                    if dst_end > mem.len() {
+                    if dst_end > mem.len() as u64 {
                         return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
                     }
-                    mem[dst..dst_end].copy_from_slice(&bytes);
+                    mem[dst as usize..dst_end as usize].copy_from_slice(&bytes);
                     Ok(())
                 })
                 .ok_or(RuntimeError {
@@ -1666,9 +1704,15 @@ fn execute_reg_op(
             count,
         } => {
             let store = require_store(store)?;
-            let dst = expect_addr(get_reg(registers, *dst)?)? as usize;
-            let src = expect_addr(get_reg(registers, *src)?)? as usize;
-            let count = expect_addr(get_reg(registers, *count)?)? as usize;
+            let dst_is64 = store
+                .memory_type(dst_memory.0)
+                .is_some_and(|ty| ty.limits.is64);
+            let src_is64 = store
+                .memory_type(src_memory.0)
+                .is_some_and(|ty| ty.limits.is64);
+            let dst = read_addr(get_reg(registers, *dst)?, dst_is64)?;
+            let src = read_addr(get_reg(registers, *src)?, src_is64)?;
+            let count = read_addr(get_reg(registers, *count)?, dst_is64 && src_is64)?;
             // Bounds-check both ranges before copying (via a temporary, so
             // overlapping regions copy per spec).
             let src_len = store
@@ -1689,11 +1733,13 @@ fn execute_reg_op(
             else {
                 return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
             };
-            if src_end > src_len || dst_end > dst_len {
+            if src_end > src_len as u64 || dst_end > dst_len as u64 {
                 return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
             }
             let temp: Vec<u8> = store
-                .with_memory(src_memory.0, |mem| mem[src..src_end].to_vec())
+                .with_memory(src_memory.0, |mem| {
+                    mem[src as usize..src_end as usize].to_vec()
+                })
                 .ok_or(RuntimeError {
                     kind: RuntimeErrorKind::UnknownMemory {
                         memory: src_memory.0,
@@ -1701,7 +1747,7 @@ fn execute_reg_op(
                 })?;
             store
                 .with_memory_mut(dst_memory.0, |mem| {
-                    mem[dst..dst_end].copy_from_slice(&temp);
+                    mem[dst as usize..dst_end as usize].copy_from_slice(&temp);
                 })
                 .ok_or(RuntimeError {
                     kind: RuntimeErrorKind::UnknownMemory {
@@ -1716,18 +1762,19 @@ fn execute_reg_op(
             count,
         } => {
             let store = require_store(store)?;
-            let dst = expect_addr(get_reg(registers, *dst)?)? as usize;
-            let count = expect_addr(get_reg(registers, *count)?)? as usize;
+            let is64 = store.memory_type(memory.0).is_some_and(|ty| ty.limits.is64);
+            let dst = read_addr(get_reg(registers, *dst)?, is64)?;
+            let count = read_addr(get_reg(registers, *count)?, is64)?;
             let value = expect_addr(get_reg(registers, *value)?)? as u8;
             store
                 .with_memory_mut(memory.0, |mem| {
                     let Some(end) = dst.checked_add(count) else {
                         return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
                     };
-                    if end > mem.len() {
+                    if end > mem.len() as u64 {
                         return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
                     }
-                    mem[dst..end].fill(value);
+                    mem[dst as usize..end as usize].fill(value);
                     Ok(())
                 })
                 .ok_or(RuntimeError {
@@ -1736,7 +1783,8 @@ fn execute_reg_op(
         }
         RegOp::TableGet { dst, table, index } => {
             let store = require_store(store)?;
-            let idx = expect_addr(get_reg(registers, *index)?)?;
+            let is64 = store.table_type(table.0).is_some_and(|ty| ty.limits.is64);
+            let idx = read_addr(get_reg(registers, *index)?, is64)?;
             let value = store
                 .with_table(table.0, |table| table.get(idx))
                 .ok_or(RuntimeError {
@@ -1751,7 +1799,8 @@ fn execute_reg_op(
             value,
         } => {
             let store = require_store(store)?;
-            let idx = expect_addr(get_reg(registers, *index)?)?;
+            let is64 = store.table_type(table.0).is_some_and(|ty| ty.limits.is64);
+            let idx = read_addr(get_reg(registers, *index)?, is64)?;
             let value = get_reg(registers, *value)?;
             store
                 .with_table_mut(table.0, |table| {
@@ -1767,12 +1816,18 @@ fn execute_reg_op(
         }
         RegOp::TableSize { dst, table } => {
             let store = require_store(store)?;
+            let is64 = store.table_type(table.0).is_some_and(|ty| ty.limits.is64);
             let len = store
                 .with_table(table.0, |table| table.len())
                 .ok_or(RuntimeError {
                     kind: RuntimeErrorKind::UnknownTable { table: table.0 },
                 })?;
-            set_reg(registers, *dst, Value::I32(len as i32))?;
+            let value = if is64 {
+                Value::I64(len as i64)
+            } else {
+                Value::I32(len as i32)
+            };
+            set_reg(registers, *dst, value)?;
         }
         RegOp::TableGrow {
             dst,
@@ -1781,19 +1836,19 @@ fn execute_reg_op(
             delta,
         } => {
             let store = require_store(store)?;
-            let delta = expect_addr(get_reg(registers, *delta)?)?;
+            let is64 = store.table_type(table.0).is_some_and(|ty| ty.limits.is64);
+            let delta = read_addr(get_reg(registers, *delta)?, is64)?;
             let value = get_reg(registers, *value)?;
             let tbl = store.shared_table(table.0).ok_or(RuntimeError {
                 kind: RuntimeErrorKind::UnknownTable { table: table.0 },
             })?;
-            let result = {
-                let mut tbl = tbl.borrow_mut();
-                match tbl.grow(delta, value) {
-                    Some(old) => old as i32,
-                    None => -1,
-                }
+            let result: u64 = tbl.borrow_mut().grow(delta, value).unwrap_or(u64::MAX);
+            let value = if is64 {
+                Value::I64(result as i64)
+            } else {
+                Value::I32(result as i32)
             };
-            set_reg(registers, *dst, Value::I32(result))?;
+            set_reg(registers, *dst, value)?;
         }
         RegOp::TableFill {
             table,
@@ -1802,8 +1857,9 @@ fn execute_reg_op(
             count,
         } => {
             let store = require_store(store)?;
-            let dst = expect_addr(get_reg(registers, *dst)?)?;
-            let count = expect_addr(get_reg(registers, *count)?)?;
+            let is64 = store.table_type(table.0).is_some_and(|ty| ty.limits.is64);
+            let dst = read_addr(get_reg(registers, *dst)?, is64)?;
+            let count = read_addr(get_reg(registers, *count)?, is64)?;
             let value = get_reg(registers, *value)?;
             store
                 .with_table_mut(table.0, |tbl| {
@@ -1825,9 +1881,15 @@ fn execute_reg_op(
             count,
         } => {
             let store = require_store(store)?;
-            let dst = expect_addr(get_reg(registers, *dst)?)?;
-            let src = expect_addr(get_reg(registers, *src)?)?;
-            let count = expect_addr(get_reg(registers, *count)?)?;
+            let dst_is64 = store
+                .table_type(dst_table.0)
+                .is_some_and(|ty| ty.limits.is64);
+            let src_is64 = store
+                .table_type(src_table.0)
+                .is_some_and(|ty| ty.limits.is64);
+            let dst = read_addr(get_reg(registers, *dst)?, dst_is64)?;
+            let src = read_addr(get_reg(registers, *src)?, src_is64)?;
+            let count = read_addr(get_reg(registers, *count)?, dst_is64 && src_is64)?;
             // Bounds-check both ranges before copying (via a temporary, so
             // overlapping copies within one table behave per spec).
             let temp: Vec<Value> = store
@@ -1852,9 +1914,10 @@ fn execute_reg_op(
             count,
         } => {
             let store = require_store(store)?;
-            let dst = expect_addr(get_reg(registers, *dst)?)? as usize;
-            let src = expect_addr(get_reg(registers, *src)?)? as usize;
-            let count = expect_addr(get_reg(registers, *count)?)? as usize;
+            let is64 = store.table_type(table.0).is_some_and(|ty| ty.limits.is64);
+            let dst = read_addr(get_reg(registers, *dst)?, is64)?;
+            let src = u64::from(expect_addr(get_reg(registers, *src)?)?);
+            let count = u64::from(expect_addr(get_reg(registers, *count)?)?);
             let segment = store
                 .with_elem(elem.0, |segment| segment.cloned())
                 .ok_or(RuntimeError {
@@ -1871,13 +1934,13 @@ fn execute_reg_op(
             else {
                 return Err(trap(RuntimeTrap::OutOfBoundsTableAccess));
             };
-            if src_end > segment.len() || dst_end as u32 > table_len {
+            if src_end > segment.len() as u64 || dst_end > table_len {
                 return Err(trap(RuntimeTrap::OutOfBoundsTableAccess));
             }
-            let temp: Vec<Value> = segment[src..src_end].to_vec();
+            let temp: Vec<Value> = segment[src as usize..src_end as usize].to_vec();
             store
                 .with_table_mut(table.0, |table| {
-                    if table.write_slice(dst as u32, &temp) {
+                    if table.write_slice(dst, &temp) {
                         Ok(())
                     } else {
                         Err(trap(RuntimeTrap::OutOfBoundsTableAccess))
@@ -2320,14 +2383,21 @@ fn grow_memory_fallible(mem: &mut Vec<u8>, new_pages: usize) -> bool {
 fn memory_bounds(
     mem: &[u8],
     memarg: &MemArg,
-    addr: u32,
+    addr: u64,
     width: usize,
 ) -> Result<core::ops::Range<usize>, RuntimeError> {
-    let ea = addr as u64 + memarg.offset;
+    let ea = addr
+        .checked_add(memarg.offset)
+        .ok_or(trap(RuntimeTrap::OutOfBoundsMemoryAccess))?;
     let end = ea
         .checked_add(width as u64)
         .ok_or(trap(RuntimeTrap::OutOfBoundsMemoryAccess))?;
     if end > mem.len() as u64 {
+        return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
+    }
+    // On 32-bit targets the in-bounds range may still not be addressable;
+    // guard before narrowing to `usize` (trivially true on 64-bit).
+    if ea > usize::MAX as u64 || end > usize::MAX as u64 {
         return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
     }
     Ok(ea as usize..end as usize)
@@ -2351,6 +2421,36 @@ fn expect_addr(value: Value) -> Result<u32, RuntimeError> {
                 found: other.val_type(),
             },
         }),
+    }
+}
+
+/// Read a memory/table address operand by the target's index type.
+///
+/// `is64` selects the expected register width: 64-bit memories and tables
+/// carry addresses in `I64`, 32-bit ones in `I32`. Validation already
+/// guarantees the width matches, so a wrong-width register is reported as a
+/// defensive `TypeMismatch`.
+fn read_addr(value: Value, is64: bool) -> Result<u64, RuntimeError> {
+    if is64 {
+        match value {
+            Value::I64(value) => Ok(value as u64),
+            other => Err(RuntimeError {
+                kind: RuntimeErrorKind::TypeMismatch {
+                    expected: ValType::Num(NumType::I64),
+                    found: other.val_type(),
+                },
+            }),
+        }
+    } else {
+        match value {
+            Value::I32(value) => Ok(value as u32 as u64),
+            other => Err(RuntimeError {
+                kind: RuntimeErrorKind::TypeMismatch {
+                    expected: ValType::Num(NumType::I32),
+                    found: other.val_type(),
+                },
+            }),
+        }
     }
 }
 

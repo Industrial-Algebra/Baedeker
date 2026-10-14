@@ -71,10 +71,10 @@ impl Table {
     }
 
     /// Current entry count.
-    pub fn len(&self) -> u32 {
+    pub fn len(&self) -> u64 {
         match &self.storage {
-            TableStorage::Dense(vec) => vec.len() as u32,
-            TableStorage::Sparse { len, .. } => *len,
+            TableStorage::Dense(vec) => vec.len() as u64,
+            TableStorage::Sparse { len, .. } => u64::from(*len),
         }
     }
 
@@ -84,12 +84,13 @@ impl Table {
     }
 
     /// Read the entry at `idx`, or `None` when out of bounds.
-    pub fn get(&self, idx: u32) -> Option<Value> {
+    pub fn get(&self, idx: u64) -> Option<Value> {
         match &self.storage {
-            TableStorage::Dense(vec) => vec.get(idx as usize).copied(),
+            TableStorage::Dense(vec) => vec.get(usize::try_from(idx).ok()?).copied(),
             TableStorage::Sparse { len, elems } => {
-                if idx < *len {
-                    Some(elems.get(&idx).copied().unwrap_or(self.default))
+                if idx < u64::from(*len) {
+                    // `idx < len <= u32::MAX`, so the narrowing is exact.
+                    Some(elems.get(&(idx as u32)).copied().unwrap_or(self.default))
                 } else {
                     None
                 }
@@ -98,18 +99,22 @@ impl Table {
     }
 
     /// Write `value` at `idx`; `false` on out of bounds.
-    pub fn set(&mut self, idx: u32, value: Value) -> bool {
+    pub fn set(&mut self, idx: u64, value: Value) -> bool {
         match &mut self.storage {
             TableStorage::Dense(vec) => {
-                let Some(slot) = vec.get_mut(idx as usize) else {
+                let Ok(idx) = usize::try_from(idx) else {
+                    return false;
+                };
+                let Some(slot) = vec.get_mut(idx) else {
                     return false;
                 };
                 *slot = value;
             }
             TableStorage::Sparse { len, elems } => {
-                if idx >= *len {
+                if idx >= u64::from(*len) {
                     return false;
                 }
+                let idx = idx as u32;
                 if value == self.default {
                     elems.remove(&idx);
                 } else {
@@ -122,14 +127,18 @@ impl Table {
 
     /// Grow by `delta` entries filled with `fill`, returning the previous
     /// length, or `None` when the declared max (or allocation) rejects.
-    pub fn grow(&mut self, delta: u32, fill: Value) -> Option<u32> {
+    pub fn grow(&mut self, delta: u64, fill: Value) -> Option<u64> {
         let old = self.len();
         let new = old.checked_add(delta)?;
         if let Some(max) = self.ty.limits.max
-            && u64::from(new) > max
+            && new > max
         {
             return None;
         }
+        // Internal storage is bounded to `u32::MAX` entries; a larger growth
+        // is an allocation failure (yields -1, never aborts).
+        let new = u32::try_from(new).ok()?;
+        let old = u32::try_from(old).ok()?;
         match &mut self.storage {
             TableStorage::Dense(vec) => {
                 if new <= DENSE_LIMIT {
@@ -163,26 +172,31 @@ impl Table {
                 *len = new;
             }
         }
-        Some(old)
+        Some(u64::from(old))
     }
 
     /// Fill `count` entries starting at `start` with `value`; `false` on
     /// out of bounds.
-    pub fn fill(&mut self, start: u32, value: Value, count: u32) -> bool {
+    pub fn fill(&mut self, start: u64, value: Value, count: u64) -> bool {
         let Some(end) = start.checked_add(count) else {
             return false;
         };
         match &mut self.storage {
             TableStorage::Dense(vec) => {
-                if end as usize > vec.len() {
+                let (Ok(start), Ok(end)) = (usize::try_from(start), usize::try_from(end)) else {
+                    return false;
+                };
+                if end > vec.len() {
                     return false;
                 }
-                vec[start as usize..end as usize].fill(value);
+                vec[start..end].fill(value);
             }
             TableStorage::Sparse { len, elems } => {
-                if end > *len {
+                if end > u64::from(*len) {
                     return false;
                 }
+                // `end <= len <= u32::MAX`, so both narrowings are exact.
+                let (start, end) = (start as u32, end as u32);
                 if value == self.default {
                     for idx in start..end {
                         elems.remove(&idx);
@@ -198,19 +212,24 @@ impl Table {
     }
 
     /// Snapshot entries in `start..start + count`; `None` on out of bounds.
-    pub fn read_slice(&self, start: u32, count: u32) -> Option<Vec<Value>> {
+    pub fn read_slice(&self, start: u64, count: u64) -> Option<Vec<Value>> {
         let end = start.checked_add(count)?;
         match &self.storage {
             TableStorage::Dense(vec) => {
-                if end as usize > vec.len() {
+                let (Ok(start), Ok(end)) = (usize::try_from(start), usize::try_from(end)) else {
+                    return None;
+                };
+                if end > vec.len() {
                     return None;
                 }
-                Some(vec[start as usize..end as usize].to_vec())
+                Some(vec[start..end].to_vec())
             }
             TableStorage::Sparse { len, elems } => {
-                if end > *len {
+                if end > u64::from(*len) {
                     return None;
                 }
+                // `end <= len <= u32::MAX`, so both narrowings are exact.
+                let (start, end) = (start as u32, end as u32);
                 let mut out = Vec::with_capacity(count as usize);
                 for idx in start..end {
                     out.push(elems.get(&idx).copied().unwrap_or(self.default));
@@ -221,21 +240,26 @@ impl Table {
     }
 
     /// Write `values` starting at `start`; `false` on out of bounds.
-    pub fn write_slice(&mut self, start: u32, values: &[Value]) -> bool {
-        let Some(end) = start.checked_add(values.len() as u32) else {
+    pub fn write_slice(&mut self, start: u64, values: &[Value]) -> bool {
+        let Some(end) = start.checked_add(values.len() as u64) else {
             return false;
         };
         match &mut self.storage {
             TableStorage::Dense(vec) => {
-                if end as usize > vec.len() {
+                let (Ok(start), Ok(end)) = (usize::try_from(start), usize::try_from(end)) else {
+                    return false;
+                };
+                if end > vec.len() {
                     return false;
                 }
-                vec[start as usize..end as usize].copy_from_slice(values);
+                vec[start..end].copy_from_slice(values);
             }
             TableStorage::Sparse { len, elems } => {
-                if end > *len {
+                if end > u64::from(*len) {
                     return false;
                 }
+                // `end <= len <= u32::MAX`, so `start + offset` cannot wrap.
+                let start = start as u32;
                 for (offset, value) in values.iter().enumerate() {
                     let idx = start + offset as u32;
                     if *value == self.default {
@@ -293,7 +317,7 @@ mod tests {
             Value::FuncRef(None),
         )
         .unwrap();
-        assert_eq!(table.len(), u32::MAX);
+        assert_eq!(table.len(), u64::from(u32::MAX));
         assert_eq!(table.get(4_000_000_000), Some(Value::FuncRef(None)));
         assert!(table.set(4_000_000_000, Value::FuncRef(Some((2, 5)))));
         assert_eq!(table.get(4_000_000_000), Some(Value::FuncRef(Some((2, 5)))));
@@ -306,12 +330,17 @@ mod tests {
     fn grow_past_dense_limit_migrates() {
         let mut table = Table::new(funcref_table(4, None), Value::FuncRef(None)).unwrap();
         assert!(table.set(2, Value::FuncRef(Some((7, 7)))));
-        let old = table.grow(DENSE_LIMIT, Value::FuncRef(None)).unwrap();
+        let old = table
+            .grow(u64::from(DENSE_LIMIT), Value::FuncRef(None))
+            .unwrap();
         assert_eq!(old, 4);
         assert!(matches!(table.storage, TableStorage::Sparse { .. }));
         // Contents survive the migration.
         assert_eq!(table.get(2), Some(Value::FuncRef(Some((7, 7)))));
-        assert_eq!(table.get(DENSE_LIMIT), Some(Value::FuncRef(None)));
+        assert_eq!(
+            table.get(u64::from(DENSE_LIMIT)),
+            Some(Value::FuncRef(None))
+        );
     }
 
     #[test]

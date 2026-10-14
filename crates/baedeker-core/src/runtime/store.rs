@@ -661,7 +661,7 @@ impl Store {
                 .ok_or_else(|| unknown_import(&declared.module, &declared.name))?;
             let provided_limits = match &provider.shared {
                 Some(shared) => Limits {
-                    min: u64::from(shared.borrow().len()),
+                    min: shared.borrow().len(),
                     max: provider.ty.limits.max,
                     is64: provider.ty.limits.is64,
                 },
@@ -949,15 +949,20 @@ impl Store {
                             break;
                         }
                     };
-                    let Value::I32(offset) = offset else {
-                        instantiation_error = Some(RuntimeError {
-                            kind: RuntimeErrorKind::InvalidConstExpr,
-                        });
-                        break;
+                    let is64 = store.table_type(table.0).is_some_and(|ty| ty.limits.is64);
+                    let offset = match (is64, offset) {
+                        (false, Value::I32(offset)) => u64::from(offset as u32),
+                        (true, Value::I64(offset)) => offset as u64,
+                        _ => {
+                            instantiation_error = Some(RuntimeError {
+                                kind: RuntimeErrorKind::InvalidConstExpr,
+                            });
+                            break;
+                        }
                     };
                     let applied = store
                         .with_table_mut(table.0, |target| {
-                            if target.write_slice(offset as u32, &values) {
+                            if target.write_slice(offset, &values) {
                                 Ok(())
                             } else {
                                 Err(trap(RuntimeTrap::OutOfBoundsTableAccess))
@@ -998,21 +1003,26 @@ impl Store {
                             break;
                         }
                     };
-                    let Value::I32(offset) = offset else {
-                        instantiation_error = Some(RuntimeError {
-                            kind: RuntimeErrorKind::InvalidConstExpr,
-                        });
-                        break;
+                    let is64 = store.memory_type(memory.0).is_some_and(|ty| ty.limits.is64);
+                    let offset = match (is64, offset) {
+                        (false, Value::I32(offset)) => u64::from(offset as u32),
+                        (true, Value::I64(offset)) => offset as u64,
+                        _ => {
+                            instantiation_error = Some(RuntimeError {
+                                kind: RuntimeErrorKind::InvalidConstExpr,
+                            });
+                            break;
+                        }
                     };
                     let applied = store
                         .with_memory_mut(memory.0, |mem| {
-                            let start = offset as usize;
-                            let Some(end) = start.checked_add(segment.bytes.len()) else {
+                            let Some(end) = offset.checked_add(segment.bytes.len() as u64) else {
                                 return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
                             };
-                            if end > mem.len() {
+                            if end > mem.len() as u64 {
                                 return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
                             }
+                            let (start, end) = (offset as usize, end as usize);
                             mem[start..end].copy_from_slice(&segment.bytes);
                             Ok(())
                         })

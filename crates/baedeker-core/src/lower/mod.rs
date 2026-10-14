@@ -1727,11 +1727,31 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
         })
         .chain(module.tables().iter().map(|table| table.elem))
         .collect();
+    let memory_addr_types: Vec<NumType> = module
+        .imports()
+        .iter()
+        .filter_map(|import| match import.desc {
+            ImportDesc::Mem(ty) => Some(addr_num_type(&ty.limits)),
+            _ => None,
+        })
+        .chain(module.memories().iter().map(|ty| addr_num_type(&ty.limits)))
+        .collect();
+    let table_addr_types: Vec<NumType> = module
+        .imports()
+        .iter()
+        .filter_map(|import| match &import.desc {
+            ImportDesc::Table(ty) => Some(addr_num_type(&ty.limits)),
+            _ => None,
+        })
+        .chain(module.tables().iter().map(|ty| addr_num_type(&ty.limits)))
+        .collect();
     let tables = ModuleTables {
         func_types: &func_types,
         global_types: &global_types,
         types: module.types(),
         table_elem_types: &table_elem_types,
+        memory_addr_types: &memory_addr_types,
+        table_addr_types: &table_addr_types,
         tag_types: &tag_type_table(module),
     };
     let mut funcs = Vec::new();
@@ -2287,9 +2307,32 @@ struct ModuleTables<'a> {
     global_types: &'a [ValType],
     types: &'a [FuncType],
     table_elem_types: &'a [crate::types::RefType],
+    /// Address index type (i64 vs i32) of every memory, imported first.
+    memory_addr_types: &'a [NumType],
+    /// Address index type (i64 vs i32) of every table, imported first.
+    table_addr_types: &'a [NumType],
     /// Type index of every tag in the index space (imported first), so
     /// `throw`/`try_table` lowering can type tag payloads.
     tag_types: &'a [TypeIdx],
+}
+
+/// The numeric type used to address a memory/table from its declared limits.
+fn addr_num_type(limits: &crate::types::Limits) -> NumType {
+    if limits.is64 {
+        NumType::I64
+    } else {
+        NumType::I32
+    }
+}
+
+/// The narrower of two address types (`min at1 at2` in the reference): i32
+/// unless both operands are i64.
+fn min_num_type(lhs: NumType, rhs: NumType) -> NumType {
+    if matches!(lhs, NumType::I64) && matches!(rhs, NumType::I64) {
+        NumType::I64
+    } else {
+        NumType::I32
+    }
 }
 
 /// The kind of control structure a label frame describes.
@@ -3245,8 +3288,11 @@ impl<'b> FuncBuilder<'b> {
                         },
                     });
                 };
-                let index =
-                    self.pop_expect(offset, "return_call_indirect", ValType::Num(NumType::I32))?;
+                let index = self.pop_expect(
+                    offset,
+                    "return_call_indirect",
+                    ValType::Num(self.table_num_type(table_idx)),
+                )?;
                 let mut args = Vec::with_capacity(ty.params.len());
                 for &expected in ty.params.iter().rev() {
                     let found = self.pop_expect(offset, "return_call_indirect", expected)?;
@@ -3367,14 +3413,15 @@ impl<'b> FuncBuilder<'b> {
                 );
             }
             Instr::MemorySize(memory) => {
-                let ty = ValType::Num(NumType::I32);
+                let ty = ValType::Num(self.memory_num_type(memory));
                 let dst = self.alloc_reg(ty);
                 self.stack.push(RegValue { reg: dst, ty });
                 self.emit(offset, RegOp::MemorySize { dst, memory });
             }
             Instr::MemoryGrow(memory) => {
-                let delta = self.pop_expect(offset, "memory.grow", ValType::Num(NumType::I32))?;
-                let ty = ValType::Num(NumType::I32);
+                let addr_ty = ValType::Num(self.memory_num_type(memory));
+                let delta = self.pop_expect(offset, "memory.grow", addr_ty)?;
+                let ty = addr_ty;
                 let dst = self.alloc_reg(ty);
                 self.stack.push(RegValue { reg: dst, ty });
                 self.emit(
@@ -3387,9 +3434,10 @@ impl<'b> FuncBuilder<'b> {
                 );
             }
             Instr::MemoryInit(data_idx, mem_idx) => {
+                let addr_ty = ValType::Num(self.memory_num_type(mem_idx));
                 let count = self.pop_expect(offset, "memory.init", ValType::Num(NumType::I32))?;
                 let src = self.pop_expect(offset, "memory.init", ValType::Num(NumType::I32))?;
-                let dst = self.pop_expect(offset, "memory.init", ValType::Num(NumType::I32))?;
+                let dst = self.pop_expect(offset, "memory.init", addr_ty)?;
                 self.emit(
                     offset,
                     RegOp::MemoryInit {
@@ -3405,9 +3453,12 @@ impl<'b> FuncBuilder<'b> {
                 self.emit(offset, RegOp::DataDrop { data: data_idx });
             }
             Instr::MemoryCopy { dst, src } => {
-                let count = self.pop_expect(offset, "memory.copy", ValType::Num(NumType::I32))?;
-                let src_idx = self.pop_expect(offset, "memory.copy", ValType::Num(NumType::I32))?;
-                let dst_idx = self.pop_expect(offset, "memory.copy", ValType::Num(NumType::I32))?;
+                let dst_ty = self.memory_num_type(dst);
+                let src_ty = self.memory_num_type(src);
+                let count_ty = min_num_type(dst_ty, src_ty);
+                let count = self.pop_expect(offset, "memory.copy", ValType::Num(count_ty))?;
+                let src_idx = self.pop_expect(offset, "memory.copy", ValType::Num(src_ty))?;
+                let dst_idx = self.pop_expect(offset, "memory.copy", ValType::Num(dst_ty))?;
                 self.emit(
                     offset,
                     RegOp::MemoryCopy {
@@ -3420,9 +3471,10 @@ impl<'b> FuncBuilder<'b> {
                 );
             }
             Instr::MemoryFill(memory) => {
-                let count = self.pop_expect(offset, "memory.fill", ValType::Num(NumType::I32))?;
+                let addr_ty = ValType::Num(self.memory_num_type(memory));
+                let count = self.pop_expect(offset, "memory.fill", addr_ty)?;
                 let value = self.pop_expect(offset, "memory.fill", ValType::Num(NumType::I32))?;
-                let dst = self.pop_expect(offset, "memory.fill", ValType::Num(NumType::I32))?;
+                let dst = self.pop_expect(offset, "memory.fill", addr_ty)?;
                 self.emit(
                     offset,
                     RegOp::MemoryFill {
@@ -3446,7 +3498,11 @@ impl<'b> FuncBuilder<'b> {
                         },
                     });
                 };
-                let index = self.pop_expect(offset, "call_indirect", ValType::Num(NumType::I32))?;
+                let index = self.pop_expect(
+                    offset,
+                    "call_indirect",
+                    ValType::Num(self.table_num_type(table_idx)),
+                )?;
                 let mut args = Vec::with_capacity(ty.params.len());
                 for &expected in ty.params.iter().rev() {
                     let found = self.pop_expect(offset, "call_indirect", expected)?;
@@ -3474,7 +3530,11 @@ impl<'b> FuncBuilder<'b> {
                 );
             }
             Instr::TableGet(table) => {
-                let index = self.pop_expect(offset, "table.get", ValType::Num(NumType::I32))?;
+                let index = self.pop_expect(
+                    offset,
+                    "table.get",
+                    ValType::Num(self.table_num_type(table)),
+                )?;
                 let ty = ValType::Ref(self.table_elem_type(offset, table)?);
                 let dst = self.alloc_reg(ty);
                 self.stack.push(RegValue { reg: dst, ty });
@@ -3490,7 +3550,11 @@ impl<'b> FuncBuilder<'b> {
             Instr::TableSet(table) => {
                 let ty = ValType::Ref(self.table_elem_type(offset, table)?);
                 let value = self.pop_expect(offset, "table.set", ty)?;
-                let index = self.pop_expect(offset, "table.set", ValType::Num(NumType::I32))?;
+                let index = self.pop_expect(
+                    offset,
+                    "table.set",
+                    ValType::Num(self.table_num_type(table)),
+                )?;
                 self.emit(
                     offset,
                     RegOp::TableSet {
@@ -3501,16 +3565,17 @@ impl<'b> FuncBuilder<'b> {
                 );
             }
             Instr::TableSize(table) => {
-                let ty = ValType::Num(NumType::I32);
+                let ty = ValType::Num(self.table_num_type(table));
                 let dst = self.alloc_reg(ty);
                 self.stack.push(RegValue { reg: dst, ty });
                 self.emit(offset, RegOp::TableSize { dst, table });
             }
             Instr::TableGrow(table) => {
-                let delta = self.pop_expect(offset, "table.grow", ValType::Num(NumType::I32))?;
+                let addr_ty = ValType::Num(self.table_num_type(table));
+                let delta = self.pop_expect(offset, "table.grow", addr_ty)?;
                 let elem_ty = ValType::Ref(self.table_elem_type(offset, table)?);
                 let value = self.pop_expect(offset, "table.grow", elem_ty)?;
-                let ty = ValType::Num(NumType::I32);
+                let ty = addr_ty;
                 let dst = self.alloc_reg(ty);
                 self.stack.push(RegValue { reg: dst, ty });
                 self.emit(
@@ -3524,10 +3589,11 @@ impl<'b> FuncBuilder<'b> {
                 );
             }
             Instr::TableFill(table) => {
-                let count = self.pop_expect(offset, "table.fill", ValType::Num(NumType::I32))?;
+                let addr_ty = ValType::Num(self.table_num_type(table));
+                let count = self.pop_expect(offset, "table.fill", addr_ty)?;
                 let elem_ty = ValType::Ref(self.table_elem_type(offset, table)?);
                 let value = self.pop_expect(offset, "table.fill", elem_ty)?;
-                let dst_idx = self.pop_expect(offset, "table.fill", ValType::Num(NumType::I32))?;
+                let dst_idx = self.pop_expect(offset, "table.fill", addr_ty)?;
                 self.emit(
                     offset,
                     RegOp::TableFill {
@@ -3539,9 +3605,12 @@ impl<'b> FuncBuilder<'b> {
                 );
             }
             Instr::TableCopy { dst, src } => {
-                let count = self.pop_expect(offset, "table.copy", ValType::Num(NumType::I32))?;
-                let src_idx = self.pop_expect(offset, "table.copy", ValType::Num(NumType::I32))?;
-                let dst_idx = self.pop_expect(offset, "table.copy", ValType::Num(NumType::I32))?;
+                let dst_ty = self.table_num_type(dst);
+                let src_ty = self.table_num_type(src);
+                let count_ty = min_num_type(dst_ty, src_ty);
+                let count = self.pop_expect(offset, "table.copy", ValType::Num(count_ty))?;
+                let src_idx = self.pop_expect(offset, "table.copy", ValType::Num(src_ty))?;
+                let dst_idx = self.pop_expect(offset, "table.copy", ValType::Num(dst_ty))?;
                 self.emit(
                     offset,
                     RegOp::TableCopy {
@@ -3557,9 +3626,10 @@ impl<'b> FuncBuilder<'b> {
                 elem_idx,
                 table_idx,
             } => {
+                let addr_ty = ValType::Num(self.table_num_type(table_idx));
                 let count = self.pop_expect(offset, "table.init", ValType::Num(NumType::I32))?;
                 let src = self.pop_expect(offset, "table.init", ValType::Num(NumType::I32))?;
-                let dst = self.pop_expect(offset, "table.init", ValType::Num(NumType::I32))?;
+                let dst = self.pop_expect(offset, "table.init", addr_ty)?;
                 self.emit(
                     offset,
                     RegOp::TableInit {
@@ -4961,13 +5031,37 @@ impl<'b> FuncBuilder<'b> {
             })
     }
 
+    /// The declared address index type of a memory (validation has already
+    /// proven the index exists).
+    fn memory_num_type(&self, memory: MemIdx) -> NumType {
+        self.tables
+            .memory_addr_types
+            .get(memory.0 as usize)
+            .copied()
+            .expect("validated memory index")
+    }
+
+    /// The declared address index type of a table (validation has already
+    /// proven the index exists).
+    fn table_num_type(&self, table: TableIdx) -> NumType {
+        self.tables
+            .table_addr_types
+            .get(table.0 as usize)
+            .copied()
+            .expect("validated table index")
+    }
+
     fn lower_load(
         &mut self,
         offset: ByteOffset,
         op: LoadOp,
         memarg: MemArg,
     ) -> Result<(), LowerError> {
-        let addr = self.pop_expect(offset, "load", ValType::Num(NumType::I32))?;
+        let addr = self.pop_expect(
+            offset,
+            "load",
+            ValType::Num(self.memory_num_type(memarg.memory)),
+        )?;
         let ty = op.result_type();
         let dst = self.alloc_reg(ty);
         self.stack.push(RegValue { reg: dst, ty });
@@ -4990,7 +5084,11 @@ impl<'b> FuncBuilder<'b> {
         memarg: MemArg,
     ) -> Result<(), LowerError> {
         let value = self.pop_expect(offset, "store", op.value_type())?;
-        let addr = self.pop_expect(offset, "store", ValType::Num(NumType::I32))?;
+        let addr = self.pop_expect(
+            offset,
+            "store",
+            ValType::Num(self.memory_num_type(memarg.memory)),
+        )?;
         self.emit(
             offset,
             RegOp::Store {
@@ -5016,7 +5114,11 @@ impl<'b> FuncBuilder<'b> {
             "v128.load_lane",
             ValType::Vec(crate::types::VecType::V128),
         )?;
-        let addr = self.pop_expect(offset, "v128.load_lane", ValType::Num(NumType::I32))?;
+        let addr = self.pop_expect(
+            offset,
+            "v128.load_lane",
+            ValType::Num(self.memory_num_type(memarg.memory)),
+        )?;
         let ty = ValType::Vec(crate::types::VecType::V128);
         let dst = self.alloc_reg(ty);
         self.stack.push(RegValue { reg: dst, ty });
@@ -5047,7 +5149,11 @@ impl<'b> FuncBuilder<'b> {
             "v128.store_lane",
             ValType::Vec(crate::types::VecType::V128),
         )?;
-        let addr = self.pop_expect(offset, "v128.store_lane", ValType::Num(NumType::I32))?;
+        let addr = self.pop_expect(
+            offset,
+            "v128.store_lane",
+            ValType::Num(self.memory_num_type(memarg.memory)),
+        )?;
         self.emit(
             offset,
             RegOp::V128StoreLane {
