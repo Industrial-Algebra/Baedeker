@@ -568,7 +568,11 @@ impl Table {
                     return false;
                 }
                 let (start, end) = (start as u32, end as u32);
-                elems.retain(|&(idx, _)| idx < start || idx >= end);
+                // Complete every fallible step BEFORE removing explicit
+                // entries: a refused reservation must leave the table
+                // untouched (review r6 P1 — this is the copy run-loop
+                // helper, so refusal mid-copy previously clobbered the
+                // destination's explicit entries).
                 if value == self.default {
                     let mut rewritten = Vec::new();
                     // A straddling range splits into up to two remainders,
@@ -588,11 +592,13 @@ impl Table {
                             }
                         }
                     }
+                    elems.retain(|&(idx, _)| idx < start || idx >= end);
                     *fills = rewritten;
                 } else {
                     if overwrite_fills(fills, start, end, value).is_none() {
                         return false;
                     }
+                    elems.retain(|&(idx, _)| idx < start || idx >= end);
                 }
             }
         }
@@ -675,6 +681,55 @@ impl Table {
 
 #[cfg(test)]
 mod tests {
+    /// Review r6 P2: the adjacency ordering regression must run against
+    /// SPARSE storage (fills/ranges) and assert the exact emitted range
+    /// order — a dense table never exercises the splice path.
+    #[test]
+    fn overwrite_fills_adjacency_orders_ranges_in_sparse_storage() {
+        use crate::types::{Limits, RefType, TableType};
+        let ty = TableType {
+            elem: RefType::ExternRef,
+            limits: Limits {
+                min: 0,
+                max: None,
+                is64: true,
+            },
+            init: None,
+        };
+        // Sparse from birth: min above the dense limit.
+        let ty_big = TableType {
+            limits: Limits {
+                min: DENSE_LIMIT as u64 + 16,
+                max: None,
+                is64: true,
+            },
+            ..ty
+        };
+        let mut table = Table::new(ty_big, Value::ExternRef(None)).unwrap();
+        assert!(matches!(table.storage, TableStorage::Sparse { .. }));
+        let v1 = Value::ExternRef(Some(1));
+        let v2 = Value::ExternRef(Some(2));
+        let base = DENSE_LIMIT as u64;
+        assert!(table.fill(base, v1, 10));
+        assert!(table.fill(base, v2, 5));
+        match &table.storage {
+            TableStorage::Sparse { fills, .. } => {
+                assert_eq!(
+                    fills,
+                    &vec![
+                        (base as u32, base as u32 + 5, v2),
+                        (base as u32 + 5, base as u32 + 10, v1),
+                    ],
+                    "adjacent unequal right remainder must follow pending"
+                );
+            }
+            _ => panic!("table must stay sparse"),
+        }
+        // Public values agree on both sides.
+        assert_eq!(table.get(base + 4), Some(v2));
+        assert_eq!(table.get(base + 5), Some(v1));
+    }
+
     use alloc::vec;
 
     use super::*;
