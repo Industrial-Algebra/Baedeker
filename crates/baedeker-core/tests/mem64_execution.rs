@@ -278,3 +278,120 @@ fn huge_table64_instantiation_fails_cleanly() {
         "expected clean allocation failure, got {error:?}"
     );
 }
+
+/// memory64 U4: index type is part of the entity type — an i64 memory
+/// import never links against an i32 provider, in either direction;
+/// matching index types link and share the backing storage.
+#[test]
+fn memory64_index_type_mismatch_is_unlinkable() {
+    use baedeker_core::runtime::{Imports, LinkGroup, Store};
+    use std::cell::RefCell;
+    use std::collections::BTreeMap;
+    use std::rc::Rc;
+
+    fn wat_module(source: &str) -> Rc<baedeker_core::lower::RegModule> {
+        Rc::new(crate::wat_module(source))
+    }
+
+    let provider32 = wat_module(r#"(module (memory (export "m") 1))"#);
+    let provider64 = wat_module(r#"(module (memory (export "m") i64 1))"#);
+    let importer32 = wat_module(
+        r#"(module (import "a" "m" (memory 1)) (func (export "f") (result i32) (memory.size)))"#,
+    );
+    let importer64 = wat_module(
+        r#"(module (import "a" "m" (memory i64 1)) (func (export "f") (result i64) (memory.size)))"#,
+    );
+
+    let group: Rc<RefCell<LinkGroup>> = Rc::new(RefCell::new(BTreeMap::new()));
+    let arena = Rc::new(RefCell::new(Vec::new()));
+
+    // 64-bit provider, 32-bit importer: unlinkable.
+    let p64 = Store::instantiate_linked(&provider64, &Imports::new(), &group, 1, &arena).unwrap();
+    let (ty64, shared64) = {
+        let guard = p64.borrow();
+        guard.export_memory("m").expect("memory export")
+    };
+    assert!(ty64.limits.is64);
+    let imports = Imports::new().shared_memory("a", "m", ty64, shared64.clone());
+    let err = Store::instantiate_linked(&importer32, &imports, &group, 2, &arena)
+        .expect_err("i64 memory must not link against i32 import");
+    assert!(format!("{err:?}").contains("ImportTypeMismatch"), "{err:?}");
+
+    // 32-bit provider, 64-bit importer: unlinkable.
+    let p32 = Store::instantiate_linked(&provider32, &Imports::new(), &group, 3, &arena).unwrap();
+    let (ty32, shared32) = {
+        let guard = p32.borrow();
+        guard.export_memory("m").expect("memory export")
+    };
+    assert!(!ty32.limits.is64);
+    let imports = Imports::new().shared_memory("a", "m", ty32, shared32.clone());
+    let err = Store::instantiate_linked(&importer64, &imports, &group, 4, &arena)
+        .expect_err("i32 memory must not link against i64 import");
+    assert!(format!("{err:?}").contains("ImportTypeMismatch"), "{err:?}");
+
+    // Matching index types link and share storage.
+    let imports = Imports::new().shared_memory("a", "m", ty64, shared64.clone());
+    let linked = Store::instantiate_linked(&importer64, &imports, &group, 5, &arena)
+        .expect("matching i64 memories must link");
+    let result = execute_export(&importer64, &linked.borrow(), "f", &[]).unwrap();
+    assert_eq!(result, vec![baedeker_core::runtime::Value::I64(1)]);
+    drop(linked);
+}
+
+/// table64: index-type mismatch is unlinkable; matching i64 tables link.
+#[test]
+fn table64_index_type_mismatch_is_unlinkable() {
+    use baedeker_core::runtime::{Imports, LinkGroup, Store};
+    use std::cell::RefCell;
+    use std::collections::BTreeMap;
+    use std::rc::Rc;
+
+    fn wat_module(source: &str) -> Rc<baedeker_core::lower::RegModule> {
+        Rc::new(crate::wat_module(source))
+    }
+
+    let provider32 = wat_module(
+        r#"(module (table (export "t") 1 funcref) (func $f (export "f")) (elem (i32.const 0) $f))"#,
+    );
+    let provider64 = wat_module(
+        r#"(module (table (export "t") i64 1 funcref) (func $f (export "f")) (elem (i64.const 0) $f))"#,
+    );
+    let importer32 = wat_module(
+        r#"(module (import "a" "t" (table 1 funcref)) (func (export "f") (result i32) (table.size)))"#,
+    );
+    let importer64 = wat_module(
+        r#"(module (import "a" "t" (table i64 1 funcref)) (func (export "f") (result i64) (table.size)))"#,
+    );
+
+    let group: Rc<RefCell<LinkGroup>> = Rc::new(RefCell::new(BTreeMap::new()));
+    let arena = Rc::new(RefCell::new(Vec::new()));
+
+    let p64 = Store::instantiate_linked(&provider64, &Imports::new(), &group, 1, &arena).unwrap();
+    let (ty64, shared64) = {
+        let guard = p64.borrow();
+        guard.export_table("t").expect("table export")
+    };
+    assert!(ty64.limits.is64);
+    let imports = Imports::new().shared_table("a", "t", ty64.clone(), shared64.clone());
+    let err = Store::instantiate_linked(&importer32, &imports, &group, 2, &arena)
+        .expect_err("i64 table must not link against i32 import");
+    assert!(format!("{err:?}").contains("ImportTypeMismatch"), "{err:?}");
+
+    let p32 = Store::instantiate_linked(&provider32, &Imports::new(), &group, 3, &arena).unwrap();
+    let (ty32, shared32) = {
+        let guard = p32.borrow();
+        guard.export_table("t").expect("table export")
+    };
+    assert!(!ty32.limits.is64);
+    let imports = Imports::new().shared_table("a", "t", ty32, shared32.clone());
+    let err = Store::instantiate_linked(&importer64, &imports, &group, 4, &arena)
+        .expect_err("i32 table must not link against i64 import");
+    assert!(format!("{err:?}").contains("ImportTypeMismatch"), "{err:?}");
+
+    let imports = Imports::new().shared_table("a", "t", ty64.clone(), shared64.clone());
+    let linked = Store::instantiate_linked(&importer64, &imports, &group, 5, &arena)
+        .expect("matching i64 tables must link");
+    let result = execute_export(&importer64, &linked.borrow(), "f", &[]).unwrap();
+    assert_eq!(result, vec![baedeker_core::runtime::Value::I64(1)]);
+    drop(linked);
+}

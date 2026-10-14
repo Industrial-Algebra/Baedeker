@@ -224,6 +224,11 @@ fn try_alloc_n<T: Clone>(n: usize, value: T) -> Option<Vec<T>> {
 /// Spec limits matching: provided limits must be at least as permissive as
 /// declared import limits.
 fn limits_match(provided: &Limits, declared: &Limits) -> bool {
+    // Index type is part of the entity type: an i32 and an i64 memory
+    // (or table) are different types and never link.
+    if provided.is64 != declared.is64 {
+        return false;
+    }
     if provided.min < declared.min {
         return false;
     }
