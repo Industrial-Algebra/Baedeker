@@ -19,12 +19,15 @@ pub mod state;
 
 use alloc::{collections::BTreeSet, vec, vec::Vec};
 
-use crate::binary::instr::{DecodedInstr, Instr, decode_instr_sequence_with_offsets};
+use crate::binary::instr::{
+    DecodedInstr, Instr, TryTableCatch, TryTableCatchKind, decode_instr_sequence_with_offsets,
+};
 use crate::binary::module::Module;
 use crate::error::ByteOffset;
 use crate::types::{
     BlockType, DataIdx, DataMode, ElemIdx, ElementInit, ElementMode, ExportDesc, FuncIdx, FuncType,
-    GlobalIdx, ImportDesc, LocalDecl, MemIdx, Mutability, RefType, TableIdx, TypeIdx, ValType,
+    GlobalIdx, HeapType, ImportDesc, LocalDecl, MemIdx, Mutability, RefType, TableIdx, TagIdx,
+    TypeIdx, ValType,
 };
 use crate::validate::error::{ValidationError, ValidationErrorKind};
 use crate::validate::state::{ControlKind::*, OperandType, Reachability, ValidationState};
@@ -56,6 +59,7 @@ pub fn validate_module(module: &Module<'_>) -> Result<(), ValidationError> {
 
     validate_type_definitions(module)?;
     validate_imports(module)?;
+    validate_tags(module)?;
     validate_tables(module)?;
     validate_memories(module)?;
     validate_globals(module)?;
@@ -116,15 +120,43 @@ fn validate_imports(module: &Module<'_>) -> Result<(), ValidationError> {
                 validate_valtype_type_indices(module, global.val_type, None, offset)?;
             }
             ImportDesc::Mem(_) => {}
-            ImportDesc::Tag(_) => {
-                return Err(ValidationError {
-                    offset: ByteOffset(offset),
-                    function: None,
-                    kind: ValidationErrorKind::Unsupported {
-                        feature: "exception handling",
-                    },
-                });
+            ImportDesc::Tag(type_idx) => {
+                let ty = resolve_type(module, *type_idx, None, offset)?;
+                if !ty.results.is_empty() {
+                    return Err(ValidationError {
+                        offset: ByteOffset(offset),
+                        function: None,
+                        kind: ValidationErrorKind::NonEmptyTagResult {
+                            type_idx: type_idx.0,
+                        },
+                    });
+                }
             }
+        }
+    }
+
+    Ok(())
+}
+
+/// Validate module-defined exception tags.
+///
+/// A tag's type must be a function type with empty results.
+fn validate_tags(module: &Module<'_>) -> Result<(), ValidationError> {
+    let offset = module
+        .section(crate::binary::section::SectionId::Tag)
+        .map(|section| section.offset)
+        .unwrap_or(0);
+
+    for type_idx in &module.tags {
+        let ty = resolve_type(module, *type_idx, None, offset)?;
+        if !ty.results.is_empty() {
+            return Err(ValidationError {
+                offset: ByteOffset(offset),
+                function: None,
+                kind: ValidationErrorKind::NonEmptyTagResult {
+                    type_idx: type_idx.0,
+                },
+            });
         }
     }
 
@@ -657,14 +689,8 @@ fn validate_exports(module: &Module<'_>) -> Result<(), ValidationError> {
             ExportDesc::Global(idx) => {
                 let _ = resolve_global_type_for_module(module, idx, offset)?;
             }
-            ExportDesc::Tag(_) => {
-                return Err(ValidationError {
-                    offset: ByteOffset(offset),
-                    function: None,
-                    kind: ValidationErrorKind::Unsupported {
-                        feature: "exception handling",
-                    },
-                });
+            ExportDesc::Tag(idx) => {
+                let _ = resolve_tag_type_for_module(module, idx, offset)?;
             }
         }
     }
@@ -2921,14 +2947,28 @@ fn validate_instr(
             ValType::Num(crate::types::NumType::F64),
             ValType::Num(crate::types::NumType::I64),
         )?,
-        Instr::TryTable(_) | Instr::Throw(_) | Instr::ThrowRef => {
-            return Err(ValidationError {
-                offset: ByteOffset(offset),
-                function: Some(function),
-                kind: ValidationErrorKind::Unsupported {
-                    feature: "exception handling",
-                },
-            });
+        Instr::TryTable(try_table) => {
+            let sig = resolve_block_type(module, function, try_table.block_type, offset)?;
+            pop_exact(function, state, &sig.params, offset)?;
+            for catch in &try_table.catches {
+                validate_catch(module, function, state, catch, offset)?;
+            }
+            state.push_frame(TryTable, try_table.block_type, sig.params, sig.results);
+        }
+        Instr::Throw(tag) => {
+            let (params, _results) = resolve_tag_type(module, function, *tag, offset)?;
+            pop_exact(function, state, &params, offset)?;
+            state.enter_unreachable();
+        }
+        Instr::ThrowRef => {
+            pop_expect(
+                function,
+                state,
+                ValType::Ref(RefType::from_parts(true, HeapType::Exn)),
+                offset,
+                "throw_ref",
+            )?;
+            state.enter_unreachable();
         }
     }
 
@@ -3392,6 +3432,67 @@ fn resolve_global_type_with_context(
         })
 }
 
+/// Resolve a tag index to its `(params, results)` func type.
+///
+/// Index space: imported tags first, then module-defined tags.
+fn resolve_tag_type(
+    module: &Module<'_>,
+    function: FuncIdx,
+    idx: TagIdx,
+    offset: usize,
+) -> Result<(Vec<ValType>, Vec<ValType>), ValidationError> {
+    resolve_tag_type_with_context(module, idx, Some(function), offset)
+}
+
+/// Resolve a tag index with no enclosing function context (module level).
+fn resolve_tag_type_for_module(
+    module: &Module<'_>,
+    idx: TagIdx,
+    offset: usize,
+) -> Result<(Vec<ValType>, Vec<ValType>), ValidationError> {
+    resolve_tag_type_with_context(module, idx, None, offset)
+}
+
+fn resolve_tag_type_with_context(
+    module: &Module<'_>,
+    idx: TagIdx,
+    function: Option<FuncIdx>,
+    offset: usize,
+) -> Result<(Vec<ValType>, Vec<ValType>), ValidationError> {
+    let idx_usize = idx.0 as usize;
+    let imported = module
+        .imports
+        .iter()
+        .filter(|import| matches!(import.desc, ImportDesc::Tag(_)))
+        .count();
+    let type_idx = if idx_usize < imported {
+        module
+            .imports
+            .iter()
+            .filter_map(|import| match import.desc {
+                ImportDesc::Tag(type_idx) => Some(type_idx),
+                _ => None,
+            })
+            .nth(idx_usize)
+            .expect("tag import count checked above")
+    } else {
+        let defined = idx_usize - imported;
+        match module.tags.get(defined) {
+            Some(type_idx) => *type_idx,
+            None => {
+                return Err(ValidationError {
+                    offset: ByteOffset(offset),
+                    function,
+                    kind: ValidationErrorKind::UnknownTag { idx: idx.0 },
+                });
+            }
+        }
+    };
+
+    let func_type = resolve_type(module, type_idx, function, offset)?;
+    Ok((func_type.params, func_type.results))
+}
+
 fn resolve_table_type_for_module(
     module: &Module<'_>,
     idx: TableIdx,
@@ -3526,6 +3627,57 @@ fn validate_label(
         function: Some(function),
         kind: ValidationErrorKind::UnknownLabelIdx { idx: label },
     })
+}
+
+/// Validate one catch clause of a `try_table`.
+///
+/// Labels resolve in the CURRENT frame stack — before the `try_table`'s own
+/// frame is pushed (the reference checks clauses in the outer context `c`).
+fn validate_catch(
+    module: &Module<'_>,
+    function: FuncIdx,
+    state: &ValidationState,
+    catch: &TryTableCatch,
+    offset: usize,
+) -> Result<(), ValidationError> {
+    let label = crate::types::LabelIdx(catch.label);
+    let label_types = validate_label(function, state, label, offset)?.to_vec();
+    let expected: Vec<ValType> = match catch.kind {
+        TryTableCatchKind::Catch | TryTableCatchKind::CatchRef => {
+            let tag = catch
+                .tag
+                .expect("decoder guarantees a tag for catch/catch_ref");
+            let (params, _results) = resolve_tag_type(module, function, tag, offset)?;
+            let mut expected = params;
+            if matches!(catch.kind, TryTableCatchKind::CatchRef) {
+                expected.push(ValType::Ref(RefType::from_parts(false, HeapType::Exn)));
+            }
+            expected
+        }
+        TryTableCatchKind::CatchAll => Vec::new(),
+        TryTableCatchKind::CatchAllRef => {
+            vec![ValType::Ref(RefType::from_parts(false, HeapType::Exn))]
+        }
+    };
+
+    if label_types.len() != expected.len()
+        || !label_types
+            .iter()
+            .zip(expected.iter())
+            .all(|(found, want)| operand_matches(OperandType::Typed(*found), *want))
+    {
+        return Err(ValidationError {
+            offset: ByteOffset(offset),
+            function: Some(function),
+            kind: ValidationErrorKind::BranchTypeMismatch {
+                label,
+                expected,
+                found: label_types,
+            },
+        });
+    }
+
+    Ok(())
 }
 
 fn finish_frame(

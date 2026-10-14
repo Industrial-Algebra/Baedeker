@@ -31,6 +31,8 @@ pub enum ControlKind {
     Block,
     Loop,
     If,
+    /// A `try_table` block; labels resolve like `Block` (end types).
+    TryTable,
 }
 
 /// A structured control frame in the validator.

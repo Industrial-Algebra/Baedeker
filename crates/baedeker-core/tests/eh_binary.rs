@@ -16,7 +16,6 @@ use baedeker_core::error::{DecodeContext, DecodeError, DecodeErrorKind};
 use baedeker_core::types::{
     BlockType, ExportDesc, HeapType, ImportDesc, RefType, TagIdx, TypeIdx, ValType,
 };
-use baedeker_core::validate::error::ValidationErrorKind;
 
 /// Decode a WASM binary into a module — the same entry the other integration
 /// tests use.
@@ -157,7 +156,7 @@ fn legacy_eh_opcodes_stay_unknown() {
 }
 
 #[test]
-fn validation_rejects_eh_for_now() {
+fn validation_accepts_eh() {
     let bytes = [
         0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, // header
         0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type: () -> ()
@@ -166,11 +165,7 @@ fn validation_rejects_eh_for_now() {
         0x0A, 0x06, 0x01, 0x04, 0x00, 0x08, 0x00, 0x0B, // code: throw 0; end
     ];
     let module = decode(&bytes).unwrap();
-    let err = module.validate().unwrap_err();
-    assert_eq!(
-        err.kind,
-        ValidationErrorKind::Unsupported {
-            feature: "exception handling",
-        }
-    );
+    module
+        .validate()
+        .expect("throw against a nullary tag validates under unit 2");
 }

@@ -108,6 +108,8 @@ fn validation_kind_name(kind: &ValidationErrorKind) -> &'static str {
         ValidationErrorKind::MissingDataCountSection { .. } => "MissingDataCountSection",
         ValidationErrorKind::DuplicateExportName { .. } => "DuplicateExportName",
         ValidationErrorKind::Unsupported { .. } => "Unsupported",
+        ValidationErrorKind::NonEmptyTagResult { .. } => "NonEmptyTagResult",
+        ValidationErrorKind::UnknownTag { .. } => "UnknownTag",
         ValidationErrorKind::MemorySizeOutOfRange => "MemorySizeOutOfRange",
         ValidationErrorKind::MemoryMinExceedsMax => "MemoryMinExceedsMax",
         ValidationErrorKind::TableTypeMismatch => "TableTypeMismatch",
