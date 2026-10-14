@@ -33,6 +33,7 @@ pub struct Imports {
     memories: Vec<MemoryProvider>,
     globals: Vec<GlobalProvider>,
     tables: Vec<TableProvider>,
+    tags: Vec<TagProvider>,
 }
 
 impl Imports {
@@ -129,6 +130,18 @@ impl Imports {
         });
         self
     }
+
+    /// Provide an imported tag `(module, name)` bound to the defining
+    /// instance's tag identity (from that instance's `tag_binding`).
+    pub fn tag(mut self, module: &str, name: &str, identity: (u32, u32), ty: FuncType) -> Self {
+        self.tags.push(TagProvider {
+            module: module.into(),
+            name: name.into(),
+            identity,
+            ty,
+        });
+        self
+    }
 }
 
 /// A host-provided memory for import resolution.
@@ -160,6 +173,15 @@ struct TableProvider {
     ty: TableType,
     /// Shared handle when the table is linked from another module.
     shared: Option<alloc::rc::Rc<core::cell::RefCell<crate::runtime::Table>>>,
+}
+
+/// A host-provided tag for import resolution.
+#[derive(Debug)]
+struct TagProvider {
+    module: String,
+    name: String,
+    identity: (u32, u32),
+    ty: FuncType,
 }
 
 /// The null value for a table's element type.
@@ -279,6 +301,14 @@ pub struct ExceptionRecord {
     pub payload: Vec<Value>,
 }
 
+/// A resolved tag binding: the global identity of the tag plus its type.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TagBinding {
+    /// `(instance_id, module_local_tag_idx)` of the DEFINING instance.
+    pub identity: (u32, u32),
+    pub ty: FuncType,
+}
+
 /// Mutable state of an instantiated module.
 ///
 /// Defined memories and globals only; the imported index-space prefix is
@@ -329,14 +359,17 @@ pub struct Store {
     imported_memory_count: u32,
     imported_global_count: u32,
     imported_table_count: u32,
-    /// Exception arena: indexed by `Value::ExnRef(Some(idx))` and by the
-    /// `Throw { exn }` error. Grows monotonically; reclamation is the GC
-    /// slice's concern.
-    exceptions: core::cell::RefCell<Vec<ExceptionRecord>>,
+    /// Shared exception arena: one `Rc` per link group (cloned into every
+    /// member store at instantiation) or per standalone store. Indices in
+    /// `Value::ExnRef` / `Throw { exn }` are arena-global within the group.
+    exceptions: alloc::rc::Rc<core::cell::RefCell<Vec<ExceptionRecord>>>,
     /// Function types of registered tags, indexed by a module-agnostic
     /// tag id. Populated at instantiation (U4); used for host-side
     /// inspection and cross-instance matching.
     tag_types: Vec<FuncType>,
+    /// Module-local tag index → resolved global identity and type.
+    /// Imported tags first, then defined (mirroring the validator/lowerer).
+    tag_map: Vec<TagBinding>,
 }
 
 impl Store {
@@ -355,8 +388,10 @@ impl Store {
         imports: &Imports,
         group: &alloc::rc::Rc<core::cell::RefCell<LinkGroup>>,
         instance_id: u32,
+        shared_exceptions: &Rc<core::cell::RefCell<Vec<ExceptionRecord>>>,
     ) -> Result<alloc::rc::Rc<core::cell::RefCell<Store>>, RuntimeError> {
-        let (mut store, error) = Self::instantiate_internal(module, imports, instance_id)?;
+        let (mut store, error) =
+            Self::instantiate_internal(module, imports, instance_id, shared_exceptions.clone())?;
         store.link_group = Some(group.clone());
         let store = alloc::rc::Rc::new(core::cell::RefCell::new(store));
         // Register the instance even when instantiation failed partway:
@@ -379,7 +414,8 @@ impl Store {
         module: &RegModule,
         imports: &Imports,
     ) -> Result<Self, RuntimeError> {
-        let (store, error) = Self::instantiate_internal(module, imports, 0)?;
+        let exceptions = Rc::new(core::cell::RefCell::new(Vec::new()));
+        let (store, error) = Self::instantiate_internal(module, imports, 0, exceptions)?;
         match error {
             Some(error) => Err(error),
             None => Ok(store),
@@ -394,6 +430,7 @@ impl Store {
         module: &RegModule,
         imports: &Imports,
         instance_id: u32,
+        exceptions: Rc<core::cell::RefCell<Vec<ExceptionRecord>>>,
     ) -> Result<(Self, Option<RuntimeError>), RuntimeError> {
         // Resolve imported memories eagerly (spec limits matching).
         let mut imported_memories = Vec::with_capacity(module.imported_memories.len());
@@ -556,6 +593,33 @@ impl Store {
         }
         let table_types = module.tables.clone();
 
+        // Resolve tag imports eagerly (params exact; results are empty by
+        // validation), then bind defined tags to this instance.
+        let mut tag_map = Vec::with_capacity(module.imported_tags.len() + module.tags.len());
+        for declared in &module.imported_tags {
+            let provider = imports
+                .tags
+                .iter()
+                .find(|provider| {
+                    provider.module == declared.module && provider.name == declared.name
+                })
+                .ok_or_else(|| unknown_import(&declared.module, &declared.name))?;
+            if provider.ty.params != declared.ty.params {
+                return Err(import_type_mismatch(&declared.module, &declared.name));
+            }
+            tag_map.push(TagBinding {
+                identity: provider.identity,
+                ty: provider.ty.clone(),
+            });
+        }
+        let imported_tag_count = module.imported_tags.len() as u32;
+        for (i, type_idx) in module.tags.iter().enumerate() {
+            tag_map.push(TagBinding {
+                identity: (instance_id, imported_tag_count + i as u32),
+                ty: module.types[type_idx.0 as usize].clone(),
+            });
+        }
+
         let mut store = Self {
             memories,
             memory_types,
@@ -584,9 +648,15 @@ impl Store {
             imported_memory_count: module.imported_memory_count,
             imported_global_count: module.imported_global_count,
             imported_table_count: module.imported_table_count,
-            exceptions: core::cell::RefCell::new(Vec::new()),
+            exceptions,
             tag_types: Vec::new(),
+            tag_map,
         };
+
+        // Register defined-tag types (module-agnostic tag ids).
+        for type_idx in &module.tags {
+            store.register_tag_type(module.types[type_idx.0 as usize].clone());
+        }
 
         let mut instantiation_error: Option<RuntimeError> = None;
 
@@ -1077,6 +1147,11 @@ impl Store {
         let id = self.tag_types.len() as u32;
         self.tag_types.push(ty);
         id
+    }
+
+    /// The resolved binding for a module-local tag index, if any.
+    pub fn tag_binding(&self, module_local_idx: u32) -> Option<&TagBinding> {
+        self.tag_map.get(module_local_idx as usize)
     }
 
     /// The link group this instance belongs to, if any.

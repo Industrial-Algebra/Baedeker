@@ -76,6 +76,8 @@ struct Registry {
     last: Option<Instance>,
     /// The link group all instances in this file share.
     group: Rc<RefCell<baedeker_core::runtime::LinkGroup>>,
+    /// The exception arena all instances in this file share.
+    arena: Rc<RefCell<Vec<baedeker_core::runtime::ExceptionRecord>>>,
     next_instance_id: u32,
 }
 
@@ -85,6 +87,7 @@ impl Registry {
             named: BTreeMap::new(),
             last: None,
             group: Rc::new(RefCell::new(BTreeMap::new())),
+            arena: Rc::new(RefCell::new(Vec::new())),
             next_instance_id: 1,
         }
     }
@@ -179,8 +182,14 @@ fn instantiate(
     }
 
     let instance_id = registry.fresh_instance_id();
-    let store_rc = Store::instantiate_linked(&module, &imports, &registry.group, instance_id)
-        .map_err(|error| format_runtime_error(&error))?;
+    let store_rc = Store::instantiate_linked(
+        &module,
+        &imports,
+        &registry.group,
+        instance_id,
+        &registry.arena,
+    )
+    .map_err(|error| format_runtime_error(&error))?;
     let mut store_guard = store_rc.borrow_mut();
     let store = &mut *store_guard;
 

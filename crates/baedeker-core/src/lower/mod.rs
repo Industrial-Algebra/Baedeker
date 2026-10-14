@@ -78,6 +78,8 @@ pub struct RegModule {
     /// The module's defined-tag type indices, mirroring `Module.tags`.
     /// Imported tag types are resolved at instantiation (U4).
     pub tags: Vec<TypeIdx>,
+    /// Tag import declarations in index order.
+    pub imported_tags: Vec<ImportedTag>,
 }
 
 /// An element segment in lowered register IR.
@@ -202,6 +204,16 @@ pub struct RegTableImport {
     pub module: String,
     pub name: String,
     pub ty: TableType,
+}
+
+/// A tag import declared by the lowered module (state-import style).
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ImportedTag {
+    pub module: String,
+    pub name: String,
+    /// The tag's function type (params; results are empty by validation).
+    pub ty: FuncType,
 }
 
 /// A function export in lowered register IR.
@@ -1814,6 +1826,19 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
         })
         .collect();
 
+    let imported_tags = module
+        .imports()
+        .iter()
+        .filter_map(|import| match import.desc {
+            ImportDesc::Tag(type_idx) => Some(ImportedTag {
+                module: import.module.clone(),
+                name: import.name.clone(),
+                ty: module.types()[type_idx.0 as usize].clone(),
+            }),
+            _ => None,
+        })
+        .collect();
+
     let start = module.start();
 
     let tables = module.tables().to_vec();
@@ -1881,6 +1906,7 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
         imported_global_count,
         imported_table_count,
         tags: module.tags.clone(),
+        imported_tags,
     })
 }
 

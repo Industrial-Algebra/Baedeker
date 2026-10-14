@@ -19,7 +19,7 @@ pub mod verify;
 pub use table::Table;
 
 pub use host::{HostFunction, link_func};
-pub use store::{Imports, LinkGroup, PAGE_SIZE, Store};
+pub use store::{ExceptionRecord, Imports, LinkGroup, PAGE_SIZE, Store, TagBinding};
 
 use crate::lower::{
     BinaryOp, LaneShape, Reg, RegFunc, RegInstr, RegModule, RegOp, RegTerm, UnaryOp,
@@ -689,7 +689,10 @@ fn consult_catch<'a>(
                     }
                 }
                 Some(tag) => {
-                    if record.tag != (store.instance_id(), tag.0) {
+                    let Some(binding) = store.tag_binding(tag.0) else {
+                        continue;
+                    };
+                    if record.tag != binding.identity {
                         continue;
                     }
                     if catch.dst_regs.len() == record.payload.len() + 1 {
@@ -998,7 +1001,11 @@ pub(crate) fn execute_func_in(
                             kind: RuntimeErrorKind::UncaughtException { exn: None },
                         });
                     };
-                    let exn = store.allocate_exception((store.instance_id(), tag.0), payload);
+                    let identity = store
+                        .tag_binding(tag.0)
+                        .map(|binding| binding.identity)
+                        .unwrap_or_else(|| (store.instance_id(), tag.0));
+                    let exn = store.allocate_exception(identity, payload);
                     match consult_catch(func, block_idx, exn, store) {
                         Some((target, dst_regs, delivery)) => {
                             land_catch(

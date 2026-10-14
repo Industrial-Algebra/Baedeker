@@ -198,6 +198,7 @@ mod tests {
             imported_global_count: 0,
             imported_table_count: 0,
             tags: Vec::new(),
+            imported_tags: Vec::new(),
         }
     }
 
