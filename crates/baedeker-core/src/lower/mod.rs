@@ -10,13 +10,15 @@
 
 use alloc::{string::String, vec::Vec};
 
-use crate::binary::instr::{DecodedInstr, Instr, decode_instr_sequence_with_offsets};
+use crate::binary::instr::{
+    DecodedInstr, Instr, TryTableCatch, TryTableCatchKind, decode_instr_sequence_with_offsets,
+};
 use crate::binary::module::Module;
 use crate::error::{ByteOffset, DecodeContext, DecodeErrorKind};
 use crate::types::{
     BlockType, CodeBody, DataMode, ElemIdx, ElementInit, ElementMode, ExportDesc, FuncIdx,
-    FuncType, GlobalIdx, ImportDesc, LabelIdx, LocalDecl, LocalIdx, MemArg, MemIdx, MemType,
-    Mutability, NumType, RefType, TableIdx, TableType, TypeIdx, ValType,
+    FuncType, GlobalIdx, HeapType, ImportDesc, LabelIdx, LocalDecl, LocalIdx, MemArg, MemIdx,
+    MemType, Mutability, NumType, RefType, TableIdx, TableType, TagIdx, TypeIdx, ValType,
 };
 use crate::validate;
 use crate::validate::error::{ValidationError, ValidationErrorKind};
@@ -73,6 +75,15 @@ pub struct RegModule {
     pub imported_global_count: u32,
     /// Number of imported tables (runtime access is not yet supported).
     pub imported_table_count: u32,
+    /// The module's defined-tag type indices, mirroring `Module.tags`.
+    /// Imported tag types are resolved at instantiation (U4).
+    pub tags: Vec<TypeIdx>,
+    /// Tag import declarations in index order.
+    pub imported_tags: Vec<ImportedTag>,
+    /// Extents of `rec` type-group entries (start, len) mirroring the
+    /// decoded module's type section — the provenance source for
+    /// defined-tag link compatibility.
+    pub rec_groups: Vec<(u32, u32)>,
 }
 
 /// An element segment in lowered register IR.
@@ -153,6 +164,8 @@ pub enum RegConstInstr {
     F64Const(u64),
     V128Const([u8; 16]),
     GlobalGet(GlobalIdx),
+    /// `ref.null` with the funcref shorthand — evaluates to a null
+    /// funcref.
     RefNull,
     RefFunc(FuncIdx),
     I32Add,
@@ -161,6 +174,10 @@ pub enum RegConstInstr {
     I64Add,
     I64Sub,
     I64Mul,
+    /// `ref.null rt` for non-funcref reference types — carries the type
+    /// so the evaluator constructs the correctly-typed null (externref,
+    /// exnref, typed refs).
+    RefNullOf(RefType),
 }
 
 /// A function import declaration in lowered register IR.
@@ -199,6 +216,22 @@ pub struct RegTableImport {
     pub ty: TableType,
 }
 
+/// A tag import declared by the lowered module (state-import style).
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ImportedTag {
+    pub module: String,
+    pub name: String,
+    /// The tag's function type (params; results are empty by validation).
+    pub ty: FuncType,
+    /// Rec-group provenance of the tag's type: the group's member types
+    /// (structural signature) and the tag type's position in the group.
+    /// `None` for bare (non-rec) types. Two tag types are link-compatible
+    /// only when both are bare, or both come from structurally identical
+    /// groups at the same position (iso-recursive equality, flattened).
+    pub rec: Option<(Vec<FuncType>, u32)>,
+}
+
 /// A function export in lowered register IR.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -215,6 +248,8 @@ pub enum RegExportDesc {
     Table(TableIdx),
     Mem(MemIdx),
     Global(GlobalIdx),
+    /// Exported exception tag (placeholder; lowering lands with U4).
+    Tag(TagIdx),
 }
 
 /// A defined function lowered into register IR.
@@ -231,6 +266,8 @@ pub struct RegFunc {
     pub reg_types: Vec<ValType>,
     /// Basic blocks in execution order.
     pub blocks: Vec<RegBlock>,
+    /// Static protected regions produced by lowering `try_table` bodies.
+    pub regions: Vec<ProtectedRegion>,
 }
 
 /// A basic block in the lowered register IR.
@@ -303,6 +340,37 @@ pub enum RegTerm {
     },
     /// Unconditional trap (`unreachable`).
     Trap,
+    /// `throw` — raise the module-local tag with the payload registers.
+    Throw { tag: TagIdx, values: Vec<Reg> },
+    /// `throw_ref` — re-raise the exception held in the exnref register.
+    ThrowRef { exn: Reg },
+}
+
+/// A static protected region produced by lowering one `try_table`.
+/// `first_block..end_block` (exclusive) is the contiguous block range of
+/// the try body; control outside that range is not protected by this
+/// region even if it dynamically executed inside the try earlier.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ProtectedRegion {
+    pub first_block: u32,
+    pub end_block: u32,
+    pub catches: Vec<RegCatch>,
+}
+
+/// One catch clause, lowered. On a match the runtime writes the payload
+/// values (plus the exnref, for `_ref` clauses, as the LAST value) into
+/// `dst_regs` and enters `target_block`.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct RegCatch {
+    /// `None` = catch_all. A module-local tag index (same module as the
+    /// region's function).
+    pub tag: Option<TagIdx>,
+    pub target_block: u32,
+    /// Registers the landing writes: tag params in order, then the
+    /// exnref register for `catch_ref`/`catch_all_ref`.
+    pub dst_regs: Vec<Reg>,
 }
 
 impl RegBlock {
@@ -1664,6 +1732,7 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
         global_types: &global_types,
         types: module.types(),
         table_elem_types: &table_elem_types,
+        tag_types: &tag_type_table(module),
     };
     let mut funcs = Vec::new();
 
@@ -1773,6 +1842,20 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
         })
         .collect();
 
+    let imported_tags = module
+        .imports()
+        .iter()
+        .filter_map(|import| match import.desc {
+            ImportDesc::Tag(type_idx) => Some(ImportedTag {
+                module: import.module.clone(),
+                name: import.name.clone(),
+                ty: module.types()[type_idx.0 as usize].clone(),
+                rec: rec_provenance(module, type_idx),
+            }),
+            _ => None,
+        })
+        .collect();
+
     let start = module.start();
 
     let tables = module.tables().to_vec();
@@ -1816,6 +1899,7 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
                 ExportDesc::Table(idx) => RegExportDesc::Table(idx),
                 ExportDesc::Mem(idx) => RegExportDesc::Mem(idx),
                 ExportDesc::Global(idx) => RegExportDesc::Global(idx),
+                ExportDesc::Tag(idx) => RegExportDesc::Tag(idx),
             },
         })
         .collect();
@@ -1838,6 +1922,9 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
         imported_memory_count,
         imported_global_count,
         imported_table_count,
+        tags: module.tags.clone(),
+        imported_tags,
+        rec_groups: module.rec_groups.clone(),
     })
 }
 
@@ -1902,7 +1989,13 @@ pub(crate) fn lower_const_expr(
             Instr::F64Const(value) => RegConstInstr::F64Const(value.to_bits()),
             Instr::V128Const(bytes) => RegConstInstr::V128Const(bytes),
             Instr::GlobalGet(global) => RegConstInstr::GlobalGet(global),
-            Instr::RefNull(_) => RegConstInstr::RefNull,
+            Instr::RefNull(ref_type) => {
+                if matches!(ref_type, RefType::FuncRef) {
+                    RegConstInstr::RefNull
+                } else {
+                    RegConstInstr::RefNullOf(ref_type)
+                }
+            }
             Instr::RefFunc(func) => RegConstInstr::RefFunc(func),
             Instr::I32Add => RegConstInstr::I32Add,
             Instr::I32Sub => RegConstInstr::I32Sub,
@@ -1958,6 +2051,35 @@ fn global_type_table(module: &Module<'_>) -> Vec<ValType> {
                 .iter()
                 .map(|global| global.global_type.val_type),
         )
+        .collect()
+}
+
+/// Resolve the type index of every tag in the index space (imported first,
+/// then defined). The index-space table lets lowering type `throw` payloads
+/// Rec-group provenance of a type index, for tag link compatibility:
+/// `Some((member types, position))` when the index falls inside a `rec`
+/// group entry, `None` for bare types.
+fn rec_provenance(module: &Module<'_>, type_idx: TypeIdx) -> Option<(Vec<FuncType>, u32)> {
+    let idx = type_idx.0;
+    let &(start, len) = module
+        .rec_groups
+        .iter()
+        .find(|&&(start, len)| idx >= start && idx < start + len)?;
+    let types = module.types();
+    let members = types[start as usize..(start + len) as usize].to_vec();
+    Some((members, idx - start))
+}
+
+/// and `try_table` catch landings without re-deriving import order per call.
+fn tag_type_table(module: &Module<'_>) -> Vec<TypeIdx> {
+    module
+        .imports()
+        .iter()
+        .filter_map(|import| match import.desc {
+            ImportDesc::Tag(type_idx) => Some(type_idx),
+            _ => None,
+        })
+        .chain(module.tags.iter().copied())
         .collect()
 }
 
@@ -2030,6 +2152,11 @@ struct FuncBuilder<'b> {
     /// Back-edge trampolines for conditional branches to loops with
     /// parameters, created at `finish`.
     pending_trampolines: Vec<TrampolineReq>,
+    /// Static protected regions produced by `try_table` lowering.
+    regions: Vec<ProtectedRegion>,
+    /// Catch landings whose target block index (and dst_regs) need
+    /// back-patching once the targeted frame's end is reached.
+    pending_catches: Vec<PendingCatch>,
 }
 
 /// A branch whose target block index needs back-patching once the target
@@ -2050,6 +2177,18 @@ struct PendingBranch {
 struct LoopTarget {
     header: u32,
     param_regs: Vec<Reg>,
+}
+
+/// A catch landing whose target block index and `dst_regs` are only known
+/// once the targeted (non-loop) frame's `end` is lowered.
+struct PendingCatch {
+    region_idx: usize,
+    clause_idx: usize,
+    /// Position in `label_stack` of the targeted frame at try_table
+    /// time (the clause labels resolve in the OUTER context).
+    frame_pos: usize,
+    /// The value types the landing writes (tag params [+ exnref]).
+    value_types: Vec<ValType>,
 }
 
 /// Which conditional reference branch is being lowered.
@@ -2128,6 +2267,7 @@ fn ref_compatible(found: ValType, expected: ValType) -> bool {
             crate::types::RefType::Typed { heap, .. } => match heap {
                 crate::types::HeapType::Func | crate::types::HeapType::Type(_) => 0,
                 crate::types::HeapType::Extern => 1,
+                crate::types::HeapType::Exn => 2,
             },
         }
     }
@@ -2147,12 +2287,18 @@ struct ModuleTables<'a> {
     global_types: &'a [ValType],
     types: &'a [FuncType],
     table_elem_types: &'a [crate::types::RefType],
+    /// Type index of every tag in the index space (imported first), so
+    /// `throw`/`try_table` lowering can type tag payloads.
+    tag_types: &'a [TypeIdx],
 }
 
 /// The kind of control structure a label frame describes.
 enum FrameKind {
     /// `block` (or the implicit function body frame).
     Block,
+    /// `try_table` — the body is an ordinary block region; the region
+    /// index records which `ProtectedRegion` its `end` bounds.
+    TryTable { region_idx: usize },
     /// `loop` — branches target the loop header block directly.
     Loop { header_block: u32 },
     /// `if` — `cond_block` is the IfFork block whose `else_block` field needs
@@ -2191,6 +2337,8 @@ impl<'b> FuncBuilder<'b> {
             }],
             pending_branches: Vec::new(),
             pending_trampolines: Vec::new(),
+            regions: Vec::new(),
+            pending_catches: Vec::new(),
             tables,
         }
     }
@@ -2309,6 +2457,26 @@ impl<'b> FuncBuilder<'b> {
                 }
             }
         }
+        #[cfg(debug_assertions)]
+        {
+            for region in &self.regions {
+                debug_assert!(
+                    region.first_block < region.end_block,
+                    "try_table region has empty/invalid block range: {region:?}"
+                );
+            }
+            for (i, a) in self.regions.iter().enumerate() {
+                for b in self.regions.iter().skip(i + 1) {
+                    let disjoint = a.end_block <= b.first_block || b.end_block <= a.first_block;
+                    let a_contains_b = a.first_block <= b.first_block && b.end_block <= a.end_block;
+                    let b_contains_a = b.first_block <= a.first_block && a.end_block <= b.end_block;
+                    debug_assert!(
+                        disjoint || a_contains_b || b_contains_a,
+                        "try_table regions must be properly nested: {a:?} vs {b:?}"
+                    );
+                }
+            }
+        }
         RegFunc {
             idx: self.func_idx,
             type_idx: self.type_idx,
@@ -2317,6 +2485,7 @@ impl<'b> FuncBuilder<'b> {
             locals: self.locals,
             reg_types: self.reg_types,
             blocks: self.blocks,
+            regions: self.regions,
         }
     }
     /// Lower one decoded instruction. Returns `true` when the function body is complete.
@@ -2441,6 +2610,26 @@ impl<'b> FuncBuilder<'b> {
                 self.set_unreachable();
             }
             Instr::Nop => {}
+            Instr::Throw(tag) => {
+                let params = self.tag_params(offset, tag)?;
+                let mut values = Vec::with_capacity(params.len());
+                for &expected in params.iter().rev() {
+                    let found = self.pop_expect(offset, "throw", expected)?;
+                    values.push(found.reg);
+                }
+                values.reverse();
+                self.finish_block(RegTerm::Throw { tag, values });
+                self.set_unreachable();
+            }
+            Instr::ThrowRef => {
+                let found = self.pop_expect(
+                    offset,
+                    "throw_ref",
+                    ValType::Ref(RefType::from_parts(true, HeapType::Exn)),
+                )?;
+                self.finish_block(RegTerm::ThrowRef { exn: found.reg });
+                self.set_unreachable();
+            }
             Instr::Block(block_type) => {
                 self.finish_block(RegTerm::Fallthrough);
                 self.enter_frame(offset, "block", FrameKind::Block, block_type)?;
@@ -2471,6 +2660,54 @@ impl<'b> FuncBuilder<'b> {
                         else_seen: false,
                     },
                     block_type,
+                )?;
+            }
+            Instr::TryTable(try_table) => {
+                // The body is a fresh block region: its first block is the
+                // next one to be created (after the tip block is finished).
+                self.finish_block(RegTerm::Fallthrough);
+                let first_block = self.blocks.len() as u32;
+                let region_idx = self.regions.len();
+                self.regions.push(ProtectedRegion {
+                    first_block,
+                    end_block: 0,
+                    catches: Vec::with_capacity(try_table.catches.len()),
+                });
+                // Catch labels resolve in the OUTER context (the try_table's
+                // own frame is not yet pushed).
+                for (clause_idx, catch) in try_table.catches.iter().enumerate() {
+                    let frame_pos = self.label_position(offset, LabelIdx(catch.label))?;
+                    let value_types = self.catch_value_types(offset, catch)?;
+                    // A loop label's branch convention delivers into the
+                    // loop's parameter registers and targets its header,
+                    // both known now (the loop frame is already on the stack).
+                    let clause = match self.branch_types_at(frame_pos).1 {
+                        Some(loop_target) => RegCatch {
+                            tag: catch.tag,
+                            target_block: loop_target.header,
+                            dst_regs: loop_target.param_regs,
+                        },
+                        None => {
+                            self.pending_catches.push(PendingCatch {
+                                region_idx,
+                                clause_idx,
+                                frame_pos,
+                                value_types,
+                            });
+                            RegCatch {
+                                tag: catch.tag,
+                                target_block: 0,
+                                dst_regs: Vec::new(),
+                            }
+                        }
+                    };
+                    self.regions[region_idx].catches.push(clause);
+                }
+                self.enter_frame(
+                    offset,
+                    "try_table",
+                    FrameKind::TryTable { region_idx },
+                    try_table.block_type,
                 )?;
             }
             Instr::Else => {
@@ -2583,6 +2820,25 @@ impl<'b> FuncBuilder<'b> {
                             }
                         }
                     }
+                    // Catch clauses targeting the function frame land on the
+                    // return continuation with the function's result regs.
+                    let mut remaining_catches = Vec::with_capacity(self.pending_catches.len());
+                    for pending in core::mem::take(&mut self.pending_catches) {
+                        if pending.frame_pos != 0 {
+                            remaining_catches.push(pending);
+                            continue;
+                        }
+                        debug_assert_eq!(
+                            pending.value_types.len(),
+                            values.len(),
+                            "catch landing arity must match the function result registers"
+                        );
+                        let clause =
+                            &mut self.regions[pending.region_idx].catches[pending.clause_idx];
+                        clause.target_block = continuation_idx;
+                        clause.dst_regs = values.clone();
+                    }
+                    self.pending_catches = remaining_catches;
                     self.finish_block(RegTerm::Return { values });
                     return Ok(true);
                 }
@@ -2711,6 +2967,31 @@ impl<'b> FuncBuilder<'b> {
                     }
                 }
                 self.pending_branches = remaining;
+                // A `try_table` frame's region ends at the continuation
+                // (exclusive): its body's blocks are exactly those from
+                // `first_block` up to the continuation.
+                if let FrameKind::TryTable { region_idx } = frame.kind {
+                    self.regions[region_idx].end_block = continuation_idx;
+                }
+                // Back-patch catch clauses targeting this frame: the landing
+                // writes directly into the continuation's result registers
+                // (there is no branching block, so no copies are emitted).
+                let mut remaining_catches = Vec::with_capacity(self.pending_catches.len());
+                for pending in core::mem::take(&mut self.pending_catches) {
+                    if pending.frame_pos != frame_pos {
+                        remaining_catches.push(pending);
+                        continue;
+                    }
+                    debug_assert_eq!(
+                        pending.value_types.len(),
+                        values.len(),
+                        "catch landing arity must match the target frame's registers"
+                    );
+                    let clause = &mut self.regions[pending.region_idx].catches[pending.clause_idx];
+                    clause.target_block = continuation_idx;
+                    clause.dst_regs = values.clone();
+                }
+                self.pending_catches = remaining_catches;
                 // For an `if` without `else`, patch the IfFork's else edge to
                 // the identity trampoline (when params exist) and retarget
                 // the then-body's end to branch over it to the continuation.
@@ -4108,6 +4389,57 @@ impl<'b> FuncBuilder<'b> {
                 })?;
                 Ok((ty.params.clone(), ty.results.clone()))
             }
+        }
+    }
+
+    /// Resolve a tag's parameter types via the index-space tag table.
+    fn tag_params(&self, offset: ByteOffset, tag: TagIdx) -> Result<Vec<ValType>, LowerError> {
+        let type_idx = self
+            .tables
+            .tag_types
+            .get(tag.0 as usize)
+            .ok_or(LowerError {
+                offset,
+                function: Some(self.func_idx),
+                kind: LowerErrorKind::InvalidType { type_idx: tag.0 },
+            })?;
+        let ty = self
+            .tables
+            .types
+            .get(type_idx.0 as usize)
+            .ok_or(LowerError {
+                offset,
+                function: Some(self.func_idx),
+                kind: LowerErrorKind::InvalidType {
+                    type_idx: type_idx.0,
+                },
+            })?;
+        Ok(ty.params.clone())
+    }
+
+    /// The value types a catch clause's landing writes into its target
+    /// label: tag params, plus a non-null exnref last for `_ref` clauses.
+    fn catch_value_types(
+        &self,
+        offset: ByteOffset,
+        catch: &TryTableCatch,
+    ) -> Result<Vec<ValType>, LowerError> {
+        match catch.kind {
+            TryTableCatchKind::Catch | TryTableCatchKind::CatchRef => {
+                let tag = catch
+                    .tag
+                    .expect("decoder guarantees a tag for catch/catch_ref");
+                let mut types = self.tag_params(offset, tag)?;
+                if matches!(catch.kind, TryTableCatchKind::CatchRef) {
+                    types.push(ValType::Ref(RefType::from_parts(false, HeapType::Exn)));
+                }
+                Ok(types)
+            }
+            TryTableCatchKind::CatchAll => Ok(Vec::new()),
+            TryTableCatchKind::CatchAllRef => Ok(alloc::vec![ValType::Ref(RefType::from_parts(
+                false,
+                HeapType::Exn,
+            ))]),
         }
     }
 
@@ -5523,6 +5855,44 @@ mod tests {
             func.blocks[then_block as usize].term,
             RegTerm::Br { .. }
         ));
+    }
+
+    #[test]
+    fn lower_try_table_region_shape() {
+        let reg_module = lower_wat(
+            "(module
+               (tag (param i32))
+               (func (export \"f\") (result i32)
+                 (block $h (result i32)
+                   (try_table (catch 0 $h)
+                     (block $h2 (result i32 (ref exn))
+                       (try_table (result i32 (ref exn)) (catch_ref 0 $h2)
+                         i32.const 1
+                         throw 0))
+                     drop
+                     drop)
+                   i32.const 7)))",
+        );
+        let func = &reg_module.funcs[0];
+        assert_eq!(func.regions.len(), 2, "outer + inner try_table regions");
+        let outer = &func.regions[0];
+        let inner = &func.regions[1];
+        assert!(
+            inner.first_block > outer.first_block,
+            "inner region must start after the outer's first block"
+        );
+        assert!(outer.end_block > outer.first_block);
+        assert!(inner.end_block > inner.first_block);
+        assert!(
+            inner.end_block <= outer.end_block,
+            "inner region must be nested inside the outer"
+        );
+        // Outer `catch 0` targets a label carrying the tag's i32 param.
+        assert_eq!(outer.catches.len(), 1);
+        assert_eq!(outer.catches[0].dst_regs.len(), 1);
+        // Inner `catch_ref 0` lands the i32 param plus the exnref.
+        assert_eq!(inner.catches.len(), 1);
+        assert_eq!(inner.catches[0].dst_regs.len(), 2);
     }
 
     #[test]

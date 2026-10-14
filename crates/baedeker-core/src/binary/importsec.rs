@@ -67,6 +67,24 @@ fn parse_import_desc(
             limits: parse_limits(cursor, base_offset)?,
         })),
         0x03 => Ok(ImportDesc::Global(parse_global_type(cursor, base_offset)?)),
+        0x04 => {
+            let pos = cursor.position();
+            let attribute = cursor.read_byte().map_err(|_| DecodeError {
+                offset: ByteOffset(base_offset + pos),
+                context: DecodeContext::ImportSection,
+                kind: DecodeErrorKind::UnexpectedEof,
+            })?;
+            if attribute != 0x00 {
+                return Err(DecodeError {
+                    offset: ByteOffset(base_offset + pos),
+                    context: DecodeContext::ImportSection,
+                    kind: DecodeErrorKind::InvalidTagAttribute { byte: attribute },
+                });
+            }
+            let type_idx =
+                decode_u32_in_section(cursor, base_offset, DecodeContext::ImportSection)?;
+            Ok(ImportDesc::Tag(TypeIdx(type_idx)))
+        }
         _ => Err(DecodeError {
             offset: ByteOffset(base_offset + offset),
             context: DecodeContext::ImportSection,

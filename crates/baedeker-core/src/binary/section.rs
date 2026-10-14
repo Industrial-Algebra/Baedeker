@@ -29,6 +29,8 @@ pub enum SectionId {
     Code = 10,
     Data = 11,
     DataCount = 12,
+    /// The tag section (exception handling, wasm 3.0).
+    Tag = 13,
 }
 
 impl SectionId {
@@ -48,6 +50,7 @@ impl SectionId {
             10 => Some(SectionId::Code),
             11 => Some(SectionId::Data),
             12 => Some(SectionId::DataCount),
+            13 => Some(SectionId::Tag),
             _ => None,
         }
     }
@@ -68,6 +71,7 @@ impl SectionId {
             SectionId::Code => "code",
             SectionId::Data => "data",
             SectionId::DataCount => "datacount",
+            SectionId::Tag => "tag",
         }
     }
 }
@@ -136,13 +140,14 @@ fn section_order(id: SectionId) -> u8 {
         SectionId::Function => 3,
         SectionId::Table => 4,
         SectionId::Memory => 5,
-        SectionId::Global => 6,
-        SectionId::Export => 7,
-        SectionId::Start => 8,
-        SectionId::Element => 9,
-        SectionId::Code => 10,
-        SectionId::Data => 11,
-        SectionId::DataCount => 12,
+        SectionId::Tag => 6,
+        SectionId::Global => 7,
+        SectionId::Export => 8,
+        SectionId::Start => 9,
+        SectionId::Element => 10,
+        SectionId::DataCount => 11,
+        SectionId::Code => 12,
+        SectionId::Data => 13,
     }
 }
 

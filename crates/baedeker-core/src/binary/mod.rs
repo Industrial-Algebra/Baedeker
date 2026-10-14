@@ -19,5 +19,6 @@ pub mod module;
 pub mod section;
 pub mod startsec;
 pub mod tablesec;
+pub mod tagsec;
 pub mod typeparser;
 pub mod typesec;

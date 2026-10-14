@@ -165,12 +165,14 @@ fn cross_instance_tail_call_type_check_uses_callers_declared_type() {
     let shared = Rc::new(RefCell::new(
         Table::new(table_ty.clone(), Value::FuncRef(None)).expect("table allocates"),
     ));
+    let arena = Rc::new(RefCell::new(Vec::new()));
 
     let _callee_store = Store::instantiate_linked(
         &callee,
         &Imports::new().shared_table("shared", "t", table_ty.clone(), shared.clone()),
         &group,
         1,
+        &arena,
     )
     .expect("callee instantiates");
     let caller_store = Store::instantiate_linked(
@@ -178,6 +180,7 @@ fn cross_instance_tail_call_type_check_uses_callers_declared_type() {
         &Imports::new().shared_table("shared", "t", table_ty, shared.clone()),
         &group,
         0,
+        &arena,
     )
     .expect("caller instantiates");
 

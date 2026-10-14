@@ -19,14 +19,14 @@ pub mod verify;
 pub use table::Table;
 
 pub use host::{HostFunction, link_func};
-pub use store::{Imports, LinkGroup, PAGE_SIZE, Store};
+pub use store::{ExceptionRecord, Imports, LinkGroup, PAGE_SIZE, RecProvenance, Store, TagBinding};
 
 use crate::lower::{
     BinaryOp, LaneShape, Reg, RegFunc, RegInstr, RegModule, RegOp, RegTerm, UnaryOp,
     V128BinaryKind, V128CompareKind, V128ConvertKind, V128FloatUnaryKind, V128ShiftKind,
     V128UnaryKind,
 };
-use crate::types::{FuncIdx, MemArg, NumType, RefType, TableIdx, ValType};
+use crate::types::{FuncIdx, HeapType, MemArg, NumType, RefType, TableIdx, ValType};
 
 /// A runtime WebAssembly value.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -46,6 +46,9 @@ pub enum Value {
     /// A 128-bit vector, stored as raw little-endian bytes; lane
     /// interpretation happens per operation.
     V128([u8; 16]),
+    /// An exception reference: `None` is null; `Some(idx)` indexes the
+    /// store's exception arena. Arena records live as long as the store.
+    ExnRef(Option<u32>),
 }
 
 impl Value {
@@ -58,6 +61,7 @@ impl Value {
             Value::FuncRef(_) => ValType::Ref(RefType::FuncRef),
             Value::ExternRef(_) => ValType::Ref(RefType::ExternRef),
             Value::V128(_) => ValType::Vec(crate::types::VecType::V128),
+            Value::ExnRef(_) => ValType::Ref(RefType::from_parts(true, HeapType::Exn)),
         }
     }
 }
@@ -156,6 +160,27 @@ pub enum RuntimeErrorKind {
     Gpu(crate::runtime::gpu::GpuError),
     MissingStore,
     MissingReturn,
+    /// A wasm exception is in flight (arena index into the store).
+    /// Never crosses the host boundary: `execute_export` converts an
+    /// escaping `Throw` into `UncaughtException`.
+    Throw {
+        exn: u32,
+    },
+    /// An exception escaped to the host. `exn` is the arena index when a
+    /// store backs execution; `None` when a storeless execution threw.
+    UncaughtException {
+        exn: Option<u32>,
+    },
+}
+
+impl core::fmt::Display for RuntimeErrorKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Throw { .. } => write!(f, "exception in flight"),
+            Self::UncaughtException { .. } => write!(f, "uncaught exception"),
+            other => write!(f, "{other:?}"),
+        }
+    }
 }
 
 /// WebAssembly runtime traps surfaced by the interpreter.
@@ -231,7 +256,12 @@ pub fn execute_export(
             kind: RuntimeErrorKind::ExportedFunctionNotLowered { func: func_idx.0 },
         })?;
 
-    execute_func_in(Some(module), Some(store), func, args, 0)
+    execute_func_in(Some(module), Some(store), func, args, 0).map_err(|error| match error.kind {
+        RuntimeErrorKind::Throw { exn } => RuntimeError {
+            kind: RuntimeErrorKind::UncaughtException { exn: Some(exn) },
+        },
+        _ => error,
+    })
 }
 
 /// Resolve and invoke a direct call target.
@@ -613,6 +643,112 @@ fn table_lookup_target(
     Ok((instance_id, func_idx))
 }
 
+/// What a matched catch clause delivers into its destination registers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CatchDelivery {
+    /// `catch_all`: the payload and exnref are discarded.
+    None,
+    /// `catch`: the tag payload only.
+    Payload,
+    /// `catch_ref`: the tag payload followed by the exnref.
+    PayloadAndExn,
+    /// `catch_all_ref`: the exnref only.
+    ExnOnly,
+}
+
+/// Find the innermost protected region containing `block_idx` whose catch
+/// clauses match the in-flight exception, and describe the landing.
+/// `None` = not caught in this frame.
+///
+/// Regions are consulted innermost-first: a clause of a nested `try_table`
+/// takes precedence over an enclosing one's, but an enclosing region is
+/// still consulted when the nested region has no matching clause.
+fn consult_catch<'a>(
+    func: &'a RegFunc,
+    block_idx: u32,
+    exn_idx: u32,
+    store: &Store,
+) -> Option<(u32, &'a [Reg], CatchDelivery)> {
+    let record = store.exception(exn_idx)?;
+    let mut regions: Vec<&crate::lower::ProtectedRegion> = func
+        .regions
+        .iter()
+        .filter(|r| r.first_block <= block_idx && block_idx < r.end_block)
+        .collect();
+    regions.sort_by_key(|r| core::cmp::Reverse(r.first_block));
+    for region in regions {
+        for catch in &region.catches {
+            let delivery = match catch.tag {
+                // catch_all discards the payload; catch_all_ref keeps only
+                // the exnref (its destination is a single register).
+                None => {
+                    if catch.dst_regs.is_empty() {
+                        CatchDelivery::None
+                    } else {
+                        CatchDelivery::ExnOnly
+                    }
+                }
+                Some(tag) => {
+                    let Some(binding) = store.tag_binding(tag.0) else {
+                        continue;
+                    };
+                    if record.tag != binding.identity {
+                        continue;
+                    }
+                    if catch.dst_regs.len() == record.payload.len() + 1 {
+                        CatchDelivery::PayloadAndExn
+                    } else {
+                        CatchDelivery::Payload
+                    }
+                }
+            };
+            return Some((catch.target_block, &catch.dst_regs[..], delivery));
+        }
+    }
+    None
+}
+
+/// Write the landing: payload and/or exnref into dst_regs, set block_idx.
+fn land_catch(
+    registers: &mut [Option<Value>],
+    target: u32,
+    dst_regs: &[Reg],
+    exn_idx: u32,
+    delivery: CatchDelivery,
+    store: &Store,
+    block_idx: &mut u32,
+) -> Result<(), RuntimeError> {
+    let record = store.exception(exn_idx).ok_or(RuntimeError {
+        kind: RuntimeErrorKind::MissingReturn,
+    })?; // arena invariant
+    match delivery {
+        CatchDelivery::None => {}
+        CatchDelivery::ExnOnly => {
+            debug_assert_eq!(dst_regs.len(), 1, "catch_all_ref writes one exnref");
+            set_reg(registers, dst_regs[0], Value::ExnRef(Some(exn_idx)))?;
+        }
+        CatchDelivery::Payload => {
+            debug_assert_eq!(dst_regs.len(), record.payload.len());
+            for (&reg, &value) in dst_regs.iter().zip(record.payload.iter()) {
+                set_reg(registers, reg, value)?;
+            }
+        }
+        CatchDelivery::PayloadAndExn => {
+            debug_assert_eq!(dst_regs.len(), record.payload.len() + 1);
+            for (&reg, &value) in dst_regs.iter().zip(record.payload.iter()) {
+                set_reg(registers, reg, value)?;
+            }
+            set_reg(
+                registers,
+                dst_regs[record.payload.len()],
+                Value::ExnRef(Some(exn_idx)),
+            )?;
+        }
+    }
+    *block_idx = target;
+    Ok(())
+}
+
 /// Execute a function with optional module context for resolving `call`
 /// targets and optional store context for memory/global access, tracking
 /// recursion depth for stack exhaustion.
@@ -696,7 +832,7 @@ pub(crate) fn execute_func_in(
         }
 
         let mut block_idx: u32 = 0;
-        loop {
+        'blocks: loop {
             iteration += 1;
             // The coarse backstop applies only when no fuel budget is set;
             // with a budget, fuel exhaustion is the honest bound — a large
@@ -736,7 +872,31 @@ pub(crate) fn execute_func_in(
                         .iter()
                         .map(|&reg| get_reg(&registers, reg))
                         .collect::<Result<Vec<_>, _>>()?;
-                    let returned = execute_call(module, store, callee_idx, &call_args, depth)?;
+                    let returned = execute_call(module, store, callee_idx, &call_args, depth);
+                    let returned = match returned {
+                        Err(error) => {
+                            if let RuntimeErrorKind::Throw { exn } = &error.kind {
+                                let exn = *exn;
+                                match store.and_then(|s| consult_catch(func, block_idx, exn, s)) {
+                                    Some((target, dst_regs, delivery)) => {
+                                        land_catch(
+                                            &mut registers,
+                                            target,
+                                            dst_regs,
+                                            exn,
+                                            delivery,
+                                            store.expect("consult_catch requires a store"),
+                                            &mut block_idx,
+                                        )?;
+                                        continue 'blocks;
+                                    }
+                                    None => return Err(error),
+                                }
+                            }
+                            return Err(error);
+                        }
+                        Ok(returned) => returned,
+                    };
                     for (&dst, value) in results.iter().zip(returned) {
                         set_reg(&mut registers, dst, value)?;
                     }
@@ -755,24 +915,72 @@ pub(crate) fn execute_func_in(
                         .collect::<Result<Vec<_>, _>>()?;
                     let returned = execute_call_indirect(
                         module, store, type_idx, table, idx, &call_args, depth,
-                    )?;
+                    );
+                    let returned = match returned {
+                        Err(error) => {
+                            if let RuntimeErrorKind::Throw { exn } = &error.kind {
+                                let exn = *exn;
+                                match store.and_then(|s| consult_catch(func, block_idx, exn, s)) {
+                                    Some((target, dst_regs, delivery)) => {
+                                        land_catch(
+                                            &mut registers,
+                                            target,
+                                            dst_regs,
+                                            exn,
+                                            delivery,
+                                            store.expect("consult_catch requires a store"),
+                                            &mut block_idx,
+                                        )?;
+                                        continue 'blocks;
+                                    }
+                                    None => return Err(error),
+                                }
+                            }
+                            return Err(error);
+                        }
+                        Ok(returned) => returned,
+                    };
                     for (&dst, value) in results.iter().zip(returned) {
                         set_reg(&mut registers, dst, value)?;
                     }
                 } else if let RegOp::CallRef {
                     type_idx,
-                    func,
+                    func: func_ref,
                     args: arg_regs,
                     results,
                 } = &instr.op
                 {
-                    let target = get_reg(&registers, *func)?;
+                    let target = get_reg(&registers, *func_ref)?;
                     let call_args = arg_regs
                         .iter()
                         .map(|&reg| get_reg(&registers, reg))
                         .collect::<Result<Vec<_>, _>>()?;
                     let returned =
-                        execute_call_ref(module, store, type_idx, target, &call_args, depth)?;
+                        execute_call_ref(module, store, type_idx, target, &call_args, depth);
+                    let returned = match returned {
+                        Err(error) => {
+                            if let RuntimeErrorKind::Throw { exn } = &error.kind {
+                                let exn = *exn;
+                                match store.and_then(|s| consult_catch(func, block_idx, exn, s)) {
+                                    Some((target, dst_regs, delivery)) => {
+                                        land_catch(
+                                            &mut registers,
+                                            target,
+                                            dst_regs,
+                                            exn,
+                                            delivery,
+                                            store.expect("consult_catch requires a store"),
+                                            &mut block_idx,
+                                        )?;
+                                        continue 'blocks;
+                                    }
+                                    None => return Err(error),
+                                }
+                            }
+                            return Err(error);
+                        }
+                        Ok(returned) => returned,
+                    };
                     for (&dst, value) in results.iter().zip(returned) {
                         set_reg(&mut registers, dst, value)?;
                     }
@@ -783,6 +991,76 @@ pub(crate) fn execute_func_in(
 
             // Follow the terminator
             match &block.term {
+                RegTerm::Throw { tag, values } => {
+                    let mut payload = Vec::with_capacity(values.len());
+                    for &reg in values {
+                        payload.push(get_reg(&registers, reg)?);
+                    }
+                    let Some(store) = store else {
+                        return Err(RuntimeError {
+                            kind: RuntimeErrorKind::UncaughtException { exn: None },
+                        });
+                    };
+                    let identity = store
+                        .tag_binding(tag.0)
+                        .map(|binding| binding.identity)
+                        .unwrap_or_else(|| (store.instance_id(), tag.0));
+                    let exn = store.allocate_exception(identity, payload);
+                    match consult_catch(func, block_idx, exn, store) {
+                        Some((target, dst_regs, delivery)) => {
+                            land_catch(
+                                &mut registers,
+                                target,
+                                dst_regs,
+                                exn,
+                                delivery,
+                                store,
+                                &mut block_idx,
+                            )?;
+                            continue 'blocks;
+                        }
+                        None => {
+                            return Err(RuntimeError {
+                                kind: RuntimeErrorKind::Throw { exn },
+                            });
+                        }
+                    }
+                }
+                RegTerm::ThrowRef { exn } => {
+                    let value = get_reg(&registers, *exn)?;
+                    let idx = match value {
+                        Value::ExnRef(Some(idx)) => idx,
+                        // A null exnref rethrow traps; any other value is
+                        // unreachable given validation.
+                        _ => {
+                            return Err(trap(RuntimeTrap::NullReference));
+                        }
+                    };
+                    let Some(store) = store else {
+                        return Err(RuntimeError {
+                            kind: RuntimeErrorKind::UncaughtException { exn: None },
+                        });
+                    };
+                    match consult_catch(func, block_idx, idx, store) {
+                        Some((target, dst_regs, delivery)) => {
+                            land_catch(
+                                &mut registers,
+                                target,
+                                dst_regs,
+                                idx,
+                                delivery,
+                                store,
+                                &mut block_idx,
+                            )?;
+                            continue 'blocks;
+                        }
+                        None => {
+                            return Err(RuntimeError {
+                                kind: RuntimeErrorKind::Throw { exn: idx },
+                            });
+                        }
+                    }
+                }
                 RegTerm::Return { values } => {
                     let mut results = Vec::with_capacity(values.len());
                     for &reg in values {
@@ -1949,6 +2227,7 @@ fn value_satisfies(expected: ValType, value: Value) -> bool {
                 let non_null = match value {
                     Value::FuncRef(inner) => inner.is_some(),
                     Value::ExternRef(inner) => inner.is_some(),
+                    Value::ExnRef(inner) => inner.is_some(),
                     _ => return false,
                 };
                 if !nullable && !non_null {
@@ -1958,6 +2237,7 @@ fn value_satisfies(expected: ValType, value: Value) -> bool {
                     (heap, value),
                     (HeapType::Func | HeapType::Type(_), Value::FuncRef(_))
                         | (HeapType::Extern, Value::ExternRef(_))
+                        | (HeapType::Exn, Value::ExnRef(_))
                 )
             }
             _ => false,
@@ -2055,7 +2335,10 @@ fn memory_bounds(
 
 /// Whether a reference value is null (`ref.null`).
 fn is_null_ref(value: &Value) -> bool {
-    matches!(value, Value::FuncRef(None) | Value::ExternRef(None))
+    matches!(
+        value,
+        Value::FuncRef(None) | Value::ExternRef(None) | Value::ExnRef(None)
+    )
 }
 
 /// Extract an i32 memory address operand as u32.
@@ -2080,13 +2363,17 @@ fn ref_nullable(ref_type: &RefType) -> bool {
 }
 
 /// The null value for a reference type (funcref null vs externref null).
-fn ref_null_value(ref_type: &RefType) -> Value {
+pub(crate) fn ref_null_value(ref_type: &RefType) -> Value {
     match ref_type {
         RefType::ExternRef
         | RefType::Typed {
             heap: crate::types::HeapType::Extern,
             ..
         } => Value::ExternRef(None),
+        RefType::Typed {
+            heap: crate::types::HeapType::Exn,
+            ..
+        } => Value::ExnRef(None),
         _ => Value::FuncRef(None),
     }
 }

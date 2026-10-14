@@ -38,7 +38,7 @@ pub fn parse_val_type_with_first_byte(
         0x7D => Ok(ValType::Num(NumType::F32)),
         0x7C => Ok(ValType::Num(NumType::F64)),
         0x7B => Ok(ValType::Vec(VecType::V128)),
-        0x70 | 0x6F | 0x63 | 0x64 => Ok(ValType::Ref(parse_ref_type_with_first_byte(
+        0x70 | 0x6F | 0x63 | 0x64 | 0x69 => Ok(ValType::Ref(parse_ref_type_with_first_byte(
             cursor,
             first,
             absolute_offset,
@@ -76,6 +76,7 @@ pub fn parse_ref_type_with_first_byte(
     match first {
         0x70 => Ok(RefType::FuncRef),
         0x6F => Ok(RefType::ExternRef),
+        0x69 => Ok(RefType::from_parts(true, HeapType::Exn)),
         0x63 => Ok(RefType::from_parts(
             true,
             parse_heap_type_at(cursor, context, absolute_offset + 1)?,
@@ -122,6 +123,14 @@ fn parse_heap_type_at(
             })?;
             Ok(HeapType::Func)
         }
+        0x69 => {
+            cursor.read_byte().map_err(|_| DecodeError {
+                offset: ByteOffset(absolute_offset),
+                context,
+                kind: DecodeErrorKind::UnexpectedEof,
+            })?;
+            Ok(HeapType::Exn)
+        }
         0x6F => {
             cursor.read_byte().map_err(|_| DecodeError {
                 offset: ByteOffset(absolute_offset),
@@ -130,7 +139,7 @@ fn parse_heap_type_at(
             })?;
             Ok(HeapType::Extern)
         }
-        0x6E | 0x71 | 0x72 | 0x73 | 0x6D | 0x6B | 0x6A | 0x6C | 0x69 | 0x74 | 0x68 | 0x75 => {
+        0x6E | 0x71 | 0x72 | 0x73 | 0x6D | 0x6B | 0x6A | 0x6C | 0x74 | 0x68 | 0x75 => {
             Err(DecodeError {
                 offset: ByteOffset(absolute_offset),
                 context,

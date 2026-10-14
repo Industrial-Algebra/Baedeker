@@ -18,7 +18,7 @@ use crate::binary::typeparser::{
 use crate::error::{ByteOffset, DecodeContext, DecodeError, DecodeErrorKind};
 use crate::types::{
     BlockType, CodeBody, ElemIdx, FuncIdx, GlobalIdx, LabelIdx, LocalIdx, MemArg, MemIdx, RefType,
-    TableIdx, TypeIdx, ValType,
+    TableIdx, TagIdx, TypeIdx, ValType,
 };
 
 /// A decoded instruction paired with its absolute byte offset in the module.
@@ -26,6 +26,37 @@ use crate::types::{
 pub struct DecodedInstr {
     pub offset: ByteOffset,
     pub instr: Instr,
+}
+
+/// A catch clause of a `try_table` instruction.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TryTableCatch {
+    /// Which form of catch this clause is.
+    pub kind: TryTableCatchKind,
+    /// Tag index; `None` for `catch_all` / `catch_all_ref`.
+    pub tag: Option<TagIdx>,
+    /// Branch target label, relative like a `br` label.
+    pub label: u32,
+}
+
+/// The four catch-clause forms of `try_table`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TryTableCatchKind {
+    /// `catch $tag $label` — match tag, branch with payload.
+    Catch,
+    /// `catch_ref $tag $label` — match tag, branch with payload + exnref.
+    CatchRef,
+    /// `catch_all $label` — match anything, branch empty.
+    CatchAll,
+    /// `catch_all_ref $label` — match anything, branch with exnref.
+    CatchAllRef,
+}
+
+/// The `try_table` instruction payload.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TryTable {
+    pub block_type: BlockType,
+    pub catches: Vec<TryTableCatch>,
 }
 
 /// A decoded WebAssembly instruction.
@@ -517,6 +548,12 @@ pub enum Instr {
     I64TruncSatF32U,
     I64TruncSatF64S,
     I64TruncSatF64U,
+    /// `try_table` — protected block with catch clauses (wasm 3.0 EH).
+    TryTable(TryTable),
+    /// `throw $tag` — raise an exception with the tag's parameters.
+    Throw(TagIdx),
+    /// `throw_ref` — re-raise the exception referenced by an exnref.
+    ThrowRef,
 }
 
 impl<'a> CodeBody<'a> {
@@ -550,7 +587,9 @@ pub fn decode_instr_sequence_with_offsets(
     loop {
         let decoded = decode_instr_with_offset(&mut cursor, base_offset)?;
         match decoded.instr {
-            Instr::Block(_) | Instr::Loop(_) | Instr::If(_) => block_depth += 1,
+            Instr::Block(_) | Instr::Loop(_) | Instr::If(_) | Instr::TryTable(_) => {
+                block_depth += 1
+            }
             Instr::End => {
                 if block_depth == 0 {
                     instrs.push(decoded);
@@ -597,6 +636,9 @@ pub fn decode_instr_with_offset(
         0x03 => Instr::Loop(parse_block_type(cursor, base_offset)?),
         0x04 => Instr::If(parse_block_type(cursor, base_offset)?),
         0x05 => Instr::Else,
+        0x1F => Instr::TryTable(parse_try_table(cursor, base_offset)?),
+        0x08 => Instr::Throw(parse_tag_idx(cursor, base_offset)?),
+        0x0A => Instr::ThrowRef,
         0x0B => Instr::End,
         0x0C => Instr::Br(LabelIdx(decode_u32(cursor, base_offset)?)),
         0x0D => Instr::BrIf(LabelIdx(decode_u32(cursor, base_offset)?)),
@@ -1268,7 +1310,7 @@ fn parse_block_type(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Block
         return Ok(BlockType::Empty);
     }
 
-    if matches!(first, 0x7B..=0x7F | 0x70 | 0x6F | 0x63 | 0x64) {
+    if matches!(first, 0x7B..=0x7F | 0x70 | 0x6F | 0x63 | 0x64 | 0x69) {
         return Ok(BlockType::Val(parse_val_type_with_first_byte(
             cursor,
             first,
@@ -1279,6 +1321,61 @@ fn parse_block_type(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Block
 
     let type_idx = decode_block_type_idx(cursor, first, base_offset + start)?;
     Ok(BlockType::TypeIdx(type_idx))
+}
+
+fn parse_tag_idx(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<TagIdx, DecodeError> {
+    let pos = cursor.position();
+    let idx = leb128::decode_u32(cursor).map_err(|mut e| {
+        e.offset = ByteOffset(base_offset + pos);
+        e
+    })?;
+    Ok(TagIdx(idx))
+}
+
+fn parse_try_table(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<TryTable, DecodeError> {
+    let block_type = parse_block_type(cursor, base_offset)?;
+    let pos = cursor.position();
+    let count = leb128::decode_u32(cursor).map_err(|mut e| {
+        e.offset = ByteOffset(base_offset + pos);
+        e
+    })?;
+    let mut catches = Vec::new();
+    for _ in 0..count {
+        let clause_pos = cursor.position();
+        let kind_byte = cursor.read_byte().map_err(|_| DecodeError {
+            offset: ByteOffset(base_offset + clause_pos),
+            context: DecodeContext::CodeSection,
+            kind: DecodeErrorKind::UnexpectedEof,
+        })?;
+        let (kind, has_tag) = match kind_byte {
+            0x00 => (TryTableCatchKind::Catch, true),
+            0x01 => (TryTableCatchKind::CatchRef, true),
+            0x02 => (TryTableCatchKind::CatchAll, false),
+            0x03 => (TryTableCatchKind::CatchAllRef, false),
+            byte => {
+                return Err(DecodeError {
+                    offset: ByteOffset(base_offset + clause_pos),
+                    context: DecodeContext::CodeSection,
+                    kind: DecodeErrorKind::UnknownOpcode { byte },
+                });
+            }
+        };
+        let tag = if has_tag {
+            Some(parse_tag_idx(cursor, base_offset)?)
+        } else {
+            None
+        };
+        let label_pos = cursor.position();
+        let label = leb128::decode_u32(cursor).map_err(|mut e| {
+            e.offset = ByteOffset(base_offset + label_pos);
+            e
+        })?;
+        catches.push(TryTableCatch { kind, tag, label });
+    }
+    Ok(TryTable {
+        block_type,
+        catches,
+    })
 }
 
 fn decode_block_type_idx(

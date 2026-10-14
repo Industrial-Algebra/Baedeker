@@ -26,6 +26,7 @@ define_idx!(ElemIdx);
 define_idx!(DataIdx);
 define_idx!(LocalIdx);
 define_idx!(LabelIdx);
+define_idx!(TagIdx);
 
 /// Number types.
 /// See [Spec §2.3.1](https://webassembly.github.io/spec/core/syntax/types.html#number-types).
@@ -53,6 +54,9 @@ pub enum VecType {
 pub enum HeapType {
     Func,
     Extern,
+    /// The `exn` abstract heap type (exception references).
+    /// Part of the exception-handling proposal (wasm 3.0).
+    Exn,
     Type(TypeIdx),
 }
 
@@ -60,6 +64,7 @@ impl HeapType {
     pub fn is_subtype_of(self, expected: Self) -> bool {
         match (self, expected) {
             (found, expected) if found == expected => true,
+            (HeapType::Exn, HeapType::Exn) => true,
             (HeapType::Type(_), HeapType::Func) => true,
             _ => false,
         }
@@ -110,6 +115,10 @@ impl RefType {
         match heap {
             HeapType::Func => Self::func(nullable),
             HeapType::Extern => Self::extern_(nullable),
+            HeapType::Exn => Self::Typed {
+                nullable,
+                heap: HeapType::Exn,
+            },
             HeapType::Type(type_idx) => Self::concrete(nullable, type_idx),
         }
     }
@@ -326,6 +335,8 @@ pub enum ImportDesc {
     Table(TableType),
     Mem(MemType),
     Global(GlobalType),
+    /// Imported exception tag; the index is the tag's function type.
+    Tag(TypeIdx),
 }
 
 /// An exported item declaration.
@@ -343,6 +354,8 @@ pub enum ExportDesc {
     Table(TableIdx),
     Mem(MemIdx),
     Global(GlobalIdx),
+    /// Exported exception tag.
+    Tag(TagIdx),
 }
 
 /// Table types.

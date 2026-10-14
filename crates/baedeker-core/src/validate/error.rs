@@ -169,6 +169,18 @@ pub enum ValidationErrorKind {
     DuplicateExportName {
         name: alloc::string::String,
     },
+    /// A feature that is decoded but not yet implemented/validated.
+    Unsupported {
+        feature: &'static str,
+    },
+    /// Tag declaration references a func type with results.
+    NonEmptyTagResult {
+        type_idx: u32,
+    },
+    /// Instruction referenced a tag index outside the tag index space.
+    UnknownTag {
+        idx: u32,
+    },
 }
 
 impl fmt::Display for ValidationError {
@@ -426,6 +438,15 @@ impl fmt::Display for ValidationErrorKind {
             ValidationErrorKind::TableTypeMismatch => write!(f, "type mismatch"),
             ValidationErrorKind::DuplicateExportName { name } => {
                 write!(f, "duplicate export name {:?}", name)
+            }
+            ValidationErrorKind::Unsupported { feature } => {
+                write!(f, "unsupported feature: {feature}")
+            }
+            ValidationErrorKind::NonEmptyTagResult { .. } => {
+                write!(f, "non-empty tag result type")
+            }
+            ValidationErrorKind::UnknownTag { idx } => {
+                write!(f, "unknown tag {idx}")
             }
         }
     }

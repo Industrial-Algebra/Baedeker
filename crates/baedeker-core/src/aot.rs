@@ -24,7 +24,7 @@ pub const AOT_MAGIC: [u8; 7] = *b"BDKAOT1";
 const ENVELOPE_LEN: usize = AOT_MAGIC.len() + 4;
 
 /// Current artifact format version. Bump on any IR layout change.
-pub const AOT_FORMAT_VERSION: u32 = 2;
+pub const AOT_FORMAT_VERSION: u32 = 5;
 
 /// Errors deserializing an AOT artifact.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,15 +138,20 @@ mod tests {
             })
         );
 
-        // v1 artifacts predate the v128 const-expr support whose enum
-        // insertion renumbered RegConstInstr serde tags; they must be
-        // rejected, never reinterpreted.
-        let mut v1_artifact = artifact.clone();
-        v1_artifact[AOT_MAGIC.len()..AOT_MAGIC.len() + 4].copy_from_slice(&1u32.to_le_bytes());
-        assert!(matches!(
-            deserialize(&v1_artifact),
-            Err(AotError::UnsupportedVersion { found: 1, .. })
-        ));
+        // Stale-format artifacts must be rejected, never reinterpreted:
+        // v1 predates the v128 const-expr RegConstInstr renumbering; v2
+        // the EH regions/tag fields; v3 imported_tags; v4 rec-group
+        // provenance. The ladder covers every predecessor of the current
+        // version.
+        for stale in 1..AOT_FORMAT_VERSION {
+            let mut old_artifact = artifact.clone();
+            old_artifact[AOT_MAGIC.len()..AOT_MAGIC.len() + 4]
+                .copy_from_slice(&stale.to_le_bytes());
+            assert!(matches!(
+                deserialize(&old_artifact),
+                Err(AotError::UnsupportedVersion { found, .. }) if found == stale
+            ));
+        }
 
         let truncated = &artifact[..artifact.len() - 3];
         assert_eq!(deserialize(truncated), Err(AotError::MalformedPayload));
