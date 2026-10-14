@@ -395,3 +395,91 @@ fn table64_index_type_mismatch_is_unlinkable() {
     assert_eq!(result, vec![baedeker_core::runtime::Value::I64(1)]);
     drop(linked);
 }
+
+/// Review r1 P1-1: growing a table by millions of NON-default entries
+/// must not allocate per-entry — uniform fills are ranges, and growth
+/// beyond the dense limit succeeds without materializing entries.
+#[test]
+fn table64_huge_nondefault_grow_is_range_based() {
+    let module = wat_module(
+        r#"
+(module
+  (table i64 0 funcref)
+  (func $f (result i32) (i32.const 7))
+  (elem declare func $f)
+  (func (export "grow") (result i64)
+    (table.grow 0 (ref.func $f) (i64.const 4000000)))
+  (func (export "size") (result i64) (table.size 0))
+  (func (export "peek") (param i64) (result i32)
+    (call_indirect 0 (type 0) (local.get 0))))"#,
+    );
+    let store = instantiate(&module);
+    let old = invoke(&module, &store, "grow", &[]).unwrap();
+    assert_eq!(old, vec![Value::I64(0)]);
+    assert_eq!(
+        invoke(&module, &store, "size", &[]).unwrap(),
+        vec![Value::I64(4_000_000)]
+    );
+    // The grown entries hold the fill value.
+    assert_eq!(
+        invoke(&module, &store, "peek", &[Value::I64(3_999_999)]).unwrap(),
+        vec![Value::I32(7)]
+    );
+    // And an explicit set punches a hole through the fill range.
+    assert!(invoke(&module, &store, "peek", &[Value::I64(0)]).is_ok());
+}
+
+/// Review r1 P1-2: table.copy with a huge count against a short
+/// destination traps BEFORE any allocation.
+#[test]
+fn table64_copy_huge_count_onto_empty_dst_traps() {
+    let module = wat_module(
+        r#"
+(module
+  (table $src i64 4294967295 funcref)
+  (table $dst i64 0 funcref)
+  (func (export "copy")
+    (table.copy $dst $src (i64.const 0) (i64.const 0) (i64.const 16000000))))"#,
+    );
+    let store = instantiate(&module);
+    let error =
+        invoke(&module, &store, "copy", &[]).expect_err("copy onto empty destination must trap");
+    assert!(
+        matches!(error.kind, RuntimeErrorKind::Trap { .. })
+            || format!("{error:?}").contains("OutOfBoundsTableAccess"),
+        "expected OOB trap, got {error:?}"
+    );
+}
+
+/// Same-table overlapping copy preserves source data (direction), and
+/// uniform runs stay range-based after the copy.
+#[test]
+fn table64_overlapping_copy_preserves_source() {
+    let module = wat_module(
+        r#"
+(module
+  (type $t (func (result i32)))
+  (table i64 8 funcref)
+  (func $a (result i32) (i32.const 1))
+  (func $b (result i32) (i32.const 2))
+  (elem (i64.const 0) $a $a $a $b)
+  (func (export "shift")
+    (table.copy (i64.const 1) (i64.const 0) (i64.const 4)))
+  (func (export "at") (param i64) (result i32)
+    (call_indirect (type $t) (local.get 0))))"#,
+    );
+    let store = instantiate(&module);
+    invoke(&module, &store, "shift", &[]).unwrap();
+    // [a a a b _ _ _ _] -> copy to offset 1 -> [a a a a b _ _ _]
+    for i in 0..4 {
+        assert_eq!(
+            invoke(&module, &store, "at", &[Value::I64(i)]).unwrap(),
+            vec![Value::I32(1)],
+            "index {i}"
+        );
+    }
+    assert_eq!(
+        invoke(&module, &store, "at", &[Value::I64(4)]).unwrap(),
+        vec![Value::I32(2)]
+    );
+}

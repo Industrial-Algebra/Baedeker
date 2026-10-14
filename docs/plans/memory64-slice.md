@@ -24,7 +24,7 @@ Expected post-slice: 178 files, ~53.4k assertions, 0 failures, deferred still 7.
 
 - `check_limits`: `min ≤ max ≤ range`, both unsigned.
 - Memory range: i32 → `0x1_0000` (2^16 pages); i64 → `0x1_0000_0000_0000`
-  (2^48 pages, 256 TiB).
+  (2^48 pages, a 16 EiB address space).
 - Table range: i32 → `0xffff_ffff` (2^32-1); i64 → unbounded (2^64-1).
 - **memarg offset (new rule)**: for i32 memories `offset < 2^32`
   ("offset out of range"); i64 memories unrestricted.

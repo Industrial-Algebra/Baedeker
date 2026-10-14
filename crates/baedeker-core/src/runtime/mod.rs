@@ -1890,21 +1890,46 @@ fn execute_reg_op(
             let dst = read_addr(get_reg(registers, *dst)?, dst_is64)?;
             let src = read_addr(get_reg(registers, *src)?, src_is64)?;
             let count = read_addr(get_reg(registers, *count)?, dst_is64 && src_is64)?;
-            // Bounds-check both ranges before copying (via a temporary, so
-            // overlapping copies within one table behave per spec).
-            let temp: Vec<Value> = store
-                .with_table(src_table.0, |table| table.read_slice(src, count))
-                .ok_or(RuntimeError {
-                    kind: RuntimeErrorKind::UnknownTable { table: src_table.0 },
-                })?
-                .ok_or(trap(RuntimeTrap::OutOfBoundsTableAccess))?;
-            store
-                .with_table_mut(dst_table.0, |table| table.write_slice(dst, &temp))
-                .ok_or(RuntimeError {
+            // Bounds-check BOTH ranges before any copying or allocation:
+            // a huge count against a short table must trap, never abort
+            // on an oversized temporary (review r1 P1).
+            let dst_len =
+                store
+                    .with_table(dst_table.0, |table| table.len())
+                    .ok_or(RuntimeError {
+                        kind: RuntimeErrorKind::UnknownTable { table: dst_table.0 },
+                    })?;
+            let src_len =
+                store
+                    .with_table(src_table.0, |table| table.len())
+                    .ok_or(RuntimeError {
+                        kind: RuntimeErrorKind::UnknownTable { table: src_table.0 },
+                    })?;
+            let dst_ok = dst.checked_add(count).is_some_and(|end| end <= dst_len);
+            let src_ok = src.checked_add(count).is_some_and(|end| end <= src_len);
+            if !dst_ok || !src_ok {
+                return Err(trap(RuntimeTrap::OutOfBoundsTableAccess));
+            }
+            if dst_table.0 == src_table.0 {
+                // One table: overlap-preserving copy, no temporary.
+                store
+                    .with_table_mut(dst_table.0, |table| table.copy_within(dst, src, count))
+                    .ok_or(RuntimeError {
+                        kind: RuntimeErrorKind::UnknownTable { table: dst_table.0 },
+                    })?;
+            } else {
+                // Two tables: distinct handles, still no temporary — copy
+                // in runs straight across.
+                let dst_handle = store.shared_table(dst_table.0).ok_or(RuntimeError {
                     kind: RuntimeErrorKind::UnknownTable { table: dst_table.0 },
-                })?
-                .then_some(())
-                .ok_or(trap(RuntimeTrap::OutOfBoundsTableAccess))?;
+                })?;
+                let src_handle = store.shared_table(src_table.0).ok_or(RuntimeError {
+                    kind: RuntimeErrorKind::UnknownTable { table: src_table.0 },
+                })?;
+                let src_ref = src_handle.borrow();
+                let mut dst_ref = dst_handle.borrow_mut();
+                dst_ref.copy_from(&src_ref, dst, src, count);
+            }
         }
         RegOp::TableInit {
             table,

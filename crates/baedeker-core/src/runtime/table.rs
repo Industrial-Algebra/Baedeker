@@ -21,6 +21,77 @@ use crate::types::TableType;
 /// storage is sparse (`BTreeMap` of non-default entries).
 const DENSE_LIMIT: u32 = 1 << 20; // 1M entries ≈ 24 MiB of Values
 
+/// The uniform-fill value covering `idx`, if any.
+fn fill_value(fills: &[(u32, u32, Value)], idx: u32) -> Option<Value> {
+    for &(start, end, value) in fills {
+        if idx >= start && idx < end {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// Record a migration run: two-and-longer runs become fill ranges,
+/// single entries materialize explicitly.
+fn push_run(
+    elems: &mut BTreeMap<u32, Value>,
+    fills: &mut Vec<(u32, u32, Value)>,
+    start: u32,
+    end: u32,
+    value: Value,
+) {
+    if end - start > 1 {
+        fills.push((start, end, value));
+    } else {
+        elems.insert(start, value);
+    }
+}
+
+/// Overwrite `[start, end)` with a uniform non-default `value`: split or
+/// drop intersecting ranges, then splice in the new range (merging with
+/// equal-valued neighbors when contiguous).
+fn overwrite_fills(fills: &mut Vec<(u32, u32, Value)>, start: u32, end: u32, value: Value) {
+    let mut rewritten: Vec<(u32, u32, Value)> = Vec::with_capacity(fills.len() + 1);
+    for &(fstart, fend, fval) in fills.iter() {
+        if fend <= start || fstart >= end {
+            rewritten.push((fstart, fend, fval));
+        } else {
+            if fstart < start {
+                rewritten.push((fstart, start, fval));
+            }
+            if fend > end {
+                rewritten.push((end, fend, fval));
+            }
+        }
+    }
+    // Splice the new range in, merging with contiguous equal neighbors.
+    let mut result: Vec<(u32, u32, Value)> = Vec::with_capacity(rewritten.len() + 1);
+    let mut pending = Some((start, end, value));
+    for &(fstart, fend, fval) in rewritten.iter() {
+        match pending {
+            Some((pstart, pend, pval)) if fstart <= pend && pstart <= fend && fval == pval => {
+                pending = Some((pstart.min(fstart), pend.max(fend), pval));
+            }
+            Some((pstart, pend, pval)) if fstart > pend => {
+                result.push((pstart, pend, pval));
+                pending = None;
+                result.push((fstart, fend, fval));
+            }
+            Some((pstart, pend, pval)) => {
+                result.push((fstart, fend, fval));
+                pending = Some((pstart, pend, pval));
+            }
+            None => result.push((fstart, fend, fval)),
+        }
+    }
+    if let Some((pstart, pend, pval)) = pending {
+        result.push((pstart, pend, pval));
+    }
+    // Re-sort: neighbors merged above keep order, but be defensive.
+    result.sort_by_key(|&(start, _, _)| start);
+    *fills = result;
+}
+
 /// A WebAssembly table instance.
 #[derive(Debug, Clone)]
 pub struct Table {
@@ -35,6 +106,12 @@ enum TableStorage {
     Sparse {
         len: u32,
         elems: BTreeMap<u32, Value>,
+        /// Disjoint, sorted uniform-fill ranges `[start, end)` carrying a
+        /// non-default value, created by grow/fill/copy bulk writes.
+        /// Explicit `elems` entries take precedence (including explicit
+        /// default entries, which act as holes punched into a range), so
+        /// bulk writes never materialize per-entry storage.
+        fills: Vec<(u32, u32, Value)>,
     },
 }
 
@@ -56,6 +133,7 @@ impl Table {
             TableStorage::Sparse {
                 len: min,
                 elems: BTreeMap::new(),
+                fills: Vec::new(),
             }
         };
         Some(Self {
@@ -87,10 +165,17 @@ impl Table {
     pub fn get(&self, idx: u64) -> Option<Value> {
         match &self.storage {
             TableStorage::Dense(vec) => vec.get(usize::try_from(idx).ok()?).copied(),
-            TableStorage::Sparse { len, elems } => {
+            TableStorage::Sparse { len, elems, fills } => {
                 if idx < u64::from(*len) {
                     // `idx < len <= u32::MAX`, so the narrowing is exact.
-                    Some(elems.get(&(idx as u32)).copied().unwrap_or(self.default))
+                    let idx = idx as u32;
+                    Some(
+                        elems
+                            .get(&idx)
+                            .copied()
+                            .or_else(|| fill_value(fills, idx))
+                            .unwrap_or(self.default),
+                    )
                 } else {
                     None
                 }
@@ -110,13 +195,19 @@ impl Table {
                 };
                 *slot = value;
             }
-            TableStorage::Sparse { len, elems } => {
+            TableStorage::Sparse { len, elems, fills } => {
                 if idx >= u64::from(*len) {
                     return false;
                 }
                 let idx = idx as u32;
                 if value == self.default {
-                    elems.remove(&idx);
+                    // Removing the explicit entry is enough — unless the
+                    // index sits inside a uniform-fill range, where the
+                    // range value would resurface; record an explicit
+                    // default entry as a hole instead.
+                    if elems.remove(&idx).is_none() && fill_value(fills, idx).is_some() {
+                        elems.insert(idx, self.default);
+                    }
                 } else {
                     elems.insert(idx, value);
                 }
@@ -148,25 +239,56 @@ impl Table {
                     }
                     vec.resize(new as usize, fill);
                 } else {
-                    // Migrate to sparse: keep only non-default entries.
+                    // Migrate to sparse: keep only non-default entries,
+                    // compressing runs of equal values into fill ranges.
                     let mut elems = BTreeMap::new();
+                    let mut fills = Vec::new();
+                    let mut run: Option<(u32, u32, Value)> = None;
                     for (idx, value) in vec.iter().enumerate() {
                         if *value != self.default {
-                            elems.insert(idx as u32, *value);
+                            let idx = idx as u32;
+                            match run {
+                                Some((_, ref mut end, ref mut v))
+                                    if *v == *value && *end == idx =>
+                                {
+                                    *end = idx + 1;
+                                }
+                                Some((start, end, v)) => {
+                                    push_run(&mut elems, &mut fills, start, end, v);
+                                    run = Some((idx, idx + 1, *value));
+                                }
+                                None => run = Some((idx, idx + 1, *value)),
+                            }
                         }
                     }
-                    if fill != self.default {
-                        for idx in old..new {
-                            elems.insert(idx, fill);
-                        }
+                    if let Some((start, end, v)) = run {
+                        push_run(&mut elems, &mut fills, start, end, v);
                     }
-                    self.storage = TableStorage::Sparse { len: new, elems };
+                    if fill != self.default && new > old {
+                        fills.push((old, new, fill));
+                    }
+                    self.storage = TableStorage::Sparse {
+                        len: new,
+                        elems,
+                        fills,
+                    };
                 }
             }
-            TableStorage::Sparse { len, elems } => {
-                if fill != self.default {
-                    for idx in old..new {
-                        elems.insert(idx, fill);
+            TableStorage::Sparse { len, fills, .. } => {
+                // Growing by a uniform value appends ONE range: O(1), no
+                // per-entry allocation (grow must fail cleanly or succeed,
+                // never abort).
+                if fill != self.default && new > old {
+                    let merged = matches!(
+                        fills.last(),
+                        Some((_, end, v)) if *end == old && *v == fill
+                    );
+                    if merged {
+                        if let Some(last) = fills.last_mut() {
+                            last.1 = new;
+                        }
+                    } else {
+                        fills.push((old, new, fill));
                     }
                 }
                 *len = new;
@@ -191,24 +313,192 @@ impl Table {
                 }
                 vec[start..end].fill(value);
             }
-            TableStorage::Sparse { len, elems } => {
+            TableStorage::Sparse { len, elems, fills } => {
                 if end > u64::from(*len) {
                     return false;
                 }
                 // `end <= len <= u32::MAX`, so both narrowings are exact.
                 let (start, end) = (start as u32, end as u32);
+                // Drop explicit entries in the span; they are overwritten.
+                elems.retain(|&idx, _| idx < start || idx >= end);
                 if value == self.default {
-                    for idx in start..end {
-                        elems.remove(&idx);
+                    // Punch the span out of any intersecting ranges.
+                    let mut rewritten = Vec::new();
+                    for &(fstart, fend, fval) in fills.iter() {
+                        if fend <= start || fstart >= end {
+                            rewritten.push((fstart, fend, fval));
+                        } else {
+                            if fstart < start {
+                                rewritten.push((fstart, start, fval));
+                            }
+                            if fend > end {
+                                rewritten.push((end, fend, fval));
+                            }
+                        }
                     }
+                    *fills = rewritten;
                 } else {
-                    for idx in start..end {
-                        elems.insert(idx, value);
+                    overwrite_fills(fills, start, end, value);
+                }
+            }
+        }
+        true
+    }
+
+    /// Same-table `table.copy`: `[dst, dst+count)` receives
+    /// `[src, src+count)`. Both ranges are bounds-checked first; when the
+    /// ranges overlap the copy direction preserves the source data, and
+    /// uniform source runs are moved as fill ranges rather than
+    /// materialized per entry.
+    pub fn copy_within(&mut self, dst: u64, src: u64, count: u64) -> bool {
+        let Some(src_end) = src.checked_add(count) else {
+            return false;
+        };
+        let Some(dst_end) = dst.checked_add(count) else {
+            return false;
+        };
+        if src_end > self.len() || dst_end > self.len() {
+            return false;
+        }
+        if count == 0 {
+            return true;
+        }
+        match &mut self.storage {
+            TableStorage::Dense(vec) => {
+                let (Ok(dst), Ok(src), Ok(count)) = (
+                    usize::try_from(dst),
+                    usize::try_from(src),
+                    usize::try_from(count),
+                ) else {
+                    return false;
+                };
+                // `copy_within(src_range, dest_start)`: the range is the
+                // SOURCE; the destination is the second argument.
+                vec.copy_within(src..src + count, dst);
+            }
+            TableStorage::Sparse { .. } => {
+                // Process runs in an order that never overwrites
+                // not-yet-read source data: forwards when the destination
+                // sits below the source (or they do not overlap), backwards
+                // otherwise.
+                let forward = dst <= src || dst_end <= src;
+                let mut idx = if forward { src } else { src_end - 1 };
+                loop {
+                    let value = match self.get(idx) {
+                        Some(value) => value,
+                        None => return false,
+                    };
+                    // Extend the run while the next index (in iteration
+                    // order) holds the same value.
+                    let step = if forward {
+                        let mut run_end = idx + 1;
+                        while run_end < src_end && self.get(run_end) == Some(value) {
+                            run_end += 1;
+                        }
+                        run_end - idx
+                    } else {
+                        let mut run_start = idx;
+                        while run_start > src && self.get(run_start - 1) == Some(value) {
+                            run_start -= 1;
+                        }
+                        idx - run_start + 1
+                    };
+                    let (run_start, run_len) = if forward {
+                        (idx, step)
+                    } else {
+                        (idx + 1 - step, step)
+                    };
+                    let dst_start = dst + (run_start - src);
+                    self.overwrite_range(dst_start, run_len, value);
+                    if forward {
+                        if run_start + step >= src_end {
+                            break;
+                        }
+                        idx = run_start + step;
+                    } else {
+                        if run_start == src {
+                            break;
+                        }
+                        idx = run_start - 1;
                     }
                 }
             }
         }
         true
+    }
+
+    /// Cross-table `table.copy` (no overlap possible): `[dst, dst+count)`
+    /// of `self` receives `[src, src+count)` of `source`. Bounds-checked
+    /// as a whole first; uniform source runs move as fill ranges.
+    pub fn copy_from(&mut self, source: &Table, dst: u64, src: u64, count: u64) -> bool {
+        let Some(src_end) = src.checked_add(count) else {
+            return false;
+        };
+        let Some(dst_end) = dst.checked_add(count) else {
+            return false;
+        };
+        if src_end > source.len() || dst_end > self.len() {
+            return false;
+        }
+        if count == 0 {
+            return true;
+        }
+        let mut idx = src;
+        while idx < src_end {
+            let value = source.get(idx).expect("bounds checked");
+            let mut run_end = idx + 1;
+            while run_end < src_end && source.get(run_end) == Some(value) {
+                run_end += 1;
+            }
+            let dst_start = dst + (idx - src);
+            self.overwrite_range(dst_start, run_end - idx, value);
+            idx = run_end;
+        }
+        true
+    }
+
+    /// Overwrite `[start, start+count)` with a uniform `value` (bounds
+    /// pre-checked by callers when they need whole-range checking; this
+    /// helper also guards per-range to keep invariants local).
+    fn overwrite_range(&mut self, start: u64, count: u64, value: Value) {
+        let Some(end) = start.checked_add(count) else {
+            return;
+        };
+        match &mut self.storage {
+            TableStorage::Dense(vec) => {
+                let (Ok(start), Ok(end)) = (usize::try_from(start), usize::try_from(end)) else {
+                    return;
+                };
+                if end <= vec.len() {
+                    vec[start..end].fill(value);
+                }
+            }
+            TableStorage::Sparse { len, elems, fills } => {
+                if end > u64::from(*len) {
+                    return;
+                }
+                let (start, end) = (start as u32, end as u32);
+                elems.retain(|&idx, _| idx < start || idx >= end);
+                if value == self.default {
+                    let mut rewritten = Vec::new();
+                    for &(fstart, fend, fval) in fills.iter() {
+                        if fend <= start || fstart >= end {
+                            rewritten.push((fstart, fend, fval));
+                        } else {
+                            if fstart < start {
+                                rewritten.push((fstart, start, fval));
+                            }
+                            if fend > end {
+                                rewritten.push((end, fend, fval));
+                            }
+                        }
+                    }
+                    *fills = rewritten;
+                } else {
+                    overwrite_fills(fills, start, end, value);
+                }
+            }
+        }
     }
 
     /// Snapshot entries in `start..start + count`; `None` on out of bounds.
@@ -224,7 +514,7 @@ impl Table {
                 }
                 Some(vec[start..end].to_vec())
             }
-            TableStorage::Sparse { len, elems } => {
+            TableStorage::Sparse { len, elems, fills } => {
                 if end > u64::from(*len) {
                     return None;
                 }
@@ -232,7 +522,13 @@ impl Table {
                 let (start, end) = (start as u32, end as u32);
                 let mut out = Vec::with_capacity(count as usize);
                 for idx in start..end {
-                    out.push(elems.get(&idx).copied().unwrap_or(self.default));
+                    out.push(
+                        elems
+                            .get(&idx)
+                            .copied()
+                            .or_else(|| fill_value(fills, idx))
+                            .unwrap_or(self.default),
+                    );
                 }
                 Some(out)
             }
@@ -254,7 +550,7 @@ impl Table {
                 }
                 vec[start..end].copy_from_slice(values);
             }
-            TableStorage::Sparse { len, elems } => {
+            TableStorage::Sparse { len, elems, fills } => {
                 if end > u64::from(*len) {
                     return false;
                 }
@@ -263,7 +559,10 @@ impl Table {
                 for (offset, value) in values.iter().enumerate() {
                     let idx = start + offset as u32;
                     if *value == self.default {
-                        elems.remove(&idx);
+                        // Same hole-punching rule as `set`.
+                        if elems.remove(&idx).is_none() && fill_value(fills, idx).is_some() {
+                            elems.insert(idx, self.default);
+                        }
                     } else {
                         elems.insert(idx, *value);
                     }
