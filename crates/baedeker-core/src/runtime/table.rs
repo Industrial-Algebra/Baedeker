@@ -42,7 +42,7 @@ fn push_run(
     if end - start > 1 {
         fills.push((start, end, value));
     } else {
-        entry_upsert(elems, start, value);
+        let _ = entry_upsert(elems, start, value);
     }
 }
 
@@ -57,6 +57,7 @@ fn overwrite_fills(
 ) -> Option<()> {
     let mut rewritten: Vec<(u32, u32, Value)> = Vec::new();
     rewritten.try_reserve(fills.len() + 1).ok()?;
+    // (Each intersecting range may split into two remainders.)
     for &(fstart, fend, fval) in fills.iter() {
         if fend <= start || fstart >= end {
             rewritten.push((fstart, fend, fval));
@@ -93,8 +94,10 @@ fn overwrite_fills(
     if let Some((pstart, pend, pval)) = pending {
         result.push((pstart, pend, pval));
     }
-    // Re-sort: neighbors merged above keep order, but be defensive.
-    result.sort_by_key(|&(start, _, _)| start);
+    // Sorted by construction: `rewritten` is sorted and disjoint from the
+    // overwritten span, and the pending range is spliced in at its
+    // position — a stable sort here would ALLOCATE scratch storage
+    // infallibly (review r4 P1).
     *fills = result;
     Some(())
 }
@@ -134,11 +137,20 @@ fn entry_get(elems: &[(u32, Value)], idx: u32) -> Option<Value> {
         .map(|pos| elems[pos].1)
 }
 
-/// Sorted-Vec upsert.
-fn entry_upsert(elems: &mut Vec<(u32, Value)>, idx: u32, value: Value) {
+/// Sorted-Vec upsert; `false` when growing capacity was refused.
+fn entry_upsert(elems: &mut Vec<(u32, Value)>, idx: u32, value: Value) -> bool {
     match elems.binary_search_by_key(&idx, |&(key, _)| key) {
-        Ok(pos) => elems[pos].1 = value,
-        Err(pos) => elems.insert(pos, (idx, value)),
+        Ok(pos) => {
+            elems[pos].1 = value;
+            true
+        }
+        Err(pos) => {
+            if elems.try_reserve(1).is_err() {
+                return false;
+            }
+            elems.insert(pos, (idx, value));
+            true
+        }
     }
 }
 
@@ -241,11 +253,11 @@ impl Table {
                     // is independent of whether an explicit entry existed
                     // before (review r2 P1: set-to-B then set-to-default
                     // must land on default, not the fill value).
-                    if fill_value(fills, idx).is_some() {
-                        entry_upsert(elems, idx, self.default);
+                    if fill_value(fills, idx).is_some() && !entry_upsert(elems, idx, self.default) {
+                        return false;
                     }
-                } else {
-                    entry_upsert(elems, idx, value);
+                } else if !entry_upsert(elems, idx, value) {
+                    return false;
                 }
             }
         }
@@ -383,7 +395,9 @@ impl Table {
                     // Punch the span out of any intersecting ranges,
                     // reserving fallibly first (Vec growth aborts).
                     let mut rewritten = Vec::new();
-                    if rewritten.try_reserve(fills.len()).is_err() {
+                    // A straddling range splits into up to two remainders,
+                    // so worst case is len+1 slots (review r4 P1).
+                    if rewritten.try_reserve(fills.len() + 1).is_err() {
                         return false;
                     }
                     for &(fstart, fend, fval) in fills.iter() {
@@ -548,7 +562,9 @@ impl Table {
                 elems.retain(|&(idx, _)| idx < start || idx >= end);
                 if value == self.default {
                     let mut rewritten = Vec::new();
-                    if rewritten.try_reserve(fills.len()).is_err() {
+                    // A straddling range splits into up to two remainders,
+                    // so worst case is len+1 slots (review r4 P1).
+                    if rewritten.try_reserve(fills.len() + 1).is_err() {
                         return false;
                     }
                     for &(fstart, fend, fval) in fills.iter() {
@@ -633,11 +649,13 @@ impl Table {
                     if *value == self.default {
                         entry_remove(elems, idx);
                         // Same unconditional hole rule as `set`.
-                        if fill_value(fills, idx).is_some() {
-                            entry_upsert(elems, idx, self.default);
+                        if fill_value(fills, idx).is_some()
+                            && !entry_upsert(elems, idx, self.default)
+                        {
+                            return false;
                         }
-                    } else {
-                        entry_upsert(elems, idx, *value);
+                    } else if !entry_upsert(elems, idx, *value) {
+                        return false;
                     }
                 }
             }
