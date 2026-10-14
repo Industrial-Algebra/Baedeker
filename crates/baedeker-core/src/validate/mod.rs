@@ -3664,7 +3664,11 @@ fn validate_catch(
         || !label_types
             .iter()
             .zip(expected.iter())
-            .all(|(found, want)| operand_matches(OperandType::Typed(*found), *want))
+            // Subtyping direction per the reference `match_result_type`:
+            // each clause-expected type must be a SUBTYPE of the label's
+            // declared type (e.g. non-null `(ref exn)` lands on a label
+            // declared with the nullable `exnref` shorthand).
+            .all(|(declared, want)| want.is_subtype_of(*declared))
     {
         return Err(ValidationError {
             offset: ByteOffset(offset),

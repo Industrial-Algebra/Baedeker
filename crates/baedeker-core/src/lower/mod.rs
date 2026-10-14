@@ -80,6 +80,10 @@ pub struct RegModule {
     pub tags: Vec<TypeIdx>,
     /// Tag import declarations in index order.
     pub imported_tags: Vec<ImportedTag>,
+    /// Extents of `rec` type-group entries (start, len) mirroring the
+    /// decoded module's type section — the provenance source for
+    /// defined-tag link compatibility.
+    pub rec_groups: Vec<(u32, u32)>,
 }
 
 /// An element segment in lowered register IR.
@@ -214,6 +218,12 @@ pub struct ImportedTag {
     pub name: String,
     /// The tag's function type (params; results are empty by validation).
     pub ty: FuncType,
+    /// Rec-group provenance of the tag's type: the group's member types
+    /// (structural signature) and the tag type's position in the group.
+    /// `None` for bare (non-rec) types. Two tag types are link-compatible
+    /// only when both are bare, or both come from structurally identical
+    /// groups at the same position (iso-recursive equality, flattened).
+    pub rec: Option<(Vec<FuncType>, u32)>,
 }
 
 /// A function export in lowered register IR.
@@ -1834,6 +1844,7 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
                 module: import.module.clone(),
                 name: import.name.clone(),
                 ty: module.types()[type_idx.0 as usize].clone(),
+                rec: rec_provenance(module, type_idx),
             }),
             _ => None,
         })
@@ -1907,6 +1918,7 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
         imported_table_count,
         tags: module.tags.clone(),
         imported_tags,
+        rec_groups: module.rec_groups.clone(),
     })
 }
 
@@ -2032,6 +2044,20 @@ fn global_type_table(module: &Module<'_>) -> Vec<ValType> {
 
 /// Resolve the type index of every tag in the index space (imported first,
 /// then defined). The index-space table lets lowering type `throw` payloads
+/// Rec-group provenance of a type index, for tag link compatibility:
+/// `Some((member types, position))` when the index falls inside a `rec`
+/// group entry, `None` for bare types.
+fn rec_provenance(module: &Module<'_>, type_idx: TypeIdx) -> Option<(Vec<FuncType>, u32)> {
+    let idx = type_idx.0;
+    let &(start, len) = module
+        .rec_groups
+        .iter()
+        .find(|&&(start, len)| idx >= start && idx < start + len)?;
+    let types = module.types();
+    let members = types[start as usize..(start + len) as usize].to_vec();
+    Some((members, idx - start))
+}
+
 /// and `try_table` catch landings without re-deriving import order per call.
 fn tag_type_table(module: &Module<'_>) -> Vec<TypeIdx> {
     module

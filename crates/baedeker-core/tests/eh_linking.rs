@@ -165,7 +165,7 @@ fn cross_instance_catch_through_import() {
     assert_eq!(binding.identity, (1, 0));
     assert_eq!(binding.ty.params, vec![ValType::Num(NumType::I32)]);
 
-    let imports = Imports::new().tag("a", "e0", binding.identity, binding.ty);
+    let imports = Imports::new().tag("a", "e0", binding.identity, binding.ty, None);
     let b_store = group.add(&b, &imports);
     link_export(&b_store, &a, &a_store, "a", "throw");
 
@@ -202,8 +202,8 @@ fn aliased_tag_imports_share_identity() {
     let a_store = group.add(&a, &Imports::new());
     let binding = tag_export_binding(&a_store.borrow(), &a, "e0").expect("tag export binding");
     let imports = Imports::new()
-        .tag("a", "e0", binding.identity, binding.ty.clone())
-        .tag("a", "e0", binding.identity, binding.ty);
+        .tag("a", "e0", binding.identity, binding.ty.clone(), None)
+        .tag("a", "e0", binding.identity, binding.ty, None);
     let b_store = group.add(&b, &imports);
 
     let b_guard = b_store.borrow();
@@ -272,7 +272,7 @@ fn importer_throw_caught_in_exporter() {
     let binding = tag_export_binding(&a_store.borrow(), &a, "e0").expect("tag export binding");
     let b_imports = Imports::new()
         .shared_table("shared", "t", table_ty, table)
-        .tag("a", "e0", binding.identity, binding.ty);
+        .tag("a", "e0", binding.identity, binding.ty, None);
     let b_store = group.add(&b, &b_imports);
     link_export(&b_store, &a, &a_store, "a", "wrap");
 
@@ -303,7 +303,7 @@ fn incompatible_tag_type_unlinkable() {
     let a_store = group.add(&a, &Imports::new());
     let binding = tag_export_binding(&a_store.borrow(), &a, "e0").expect("tag export binding");
     // The provided tag is `(param i32)`; the declaration wants `(param f64)`.
-    let imports = Imports::new().tag("a", "e0", binding.identity, binding.ty);
+    let imports = Imports::new().tag("a", "e0", binding.identity, binding.ty, None);
     let error = group
         .try_add(&b, &imports)
         .expect_err("type mismatch unlinkable");
@@ -369,7 +369,7 @@ fn exnref_across_instances() {
     let mut group = Group::new();
     let a_store = group.add(&a, &Imports::new());
     let binding = tag_export_binding(&a_store.borrow(), &a, "e0").expect("tag export binding");
-    let b_imports = Imports::new().tag("a", "e0", binding.identity, binding.ty);
+    let b_imports = Imports::new().tag("a", "e0", binding.identity, binding.ty, None);
     let b_store = group.add(&b, &b_imports);
     // A calls B's relay, which catch_ref's A's tag into an exnref, rethrows
     // it, and A's outer frame catches the rethrown (arena-global) exnref.
@@ -435,8 +435,8 @@ fn multi_instance_ids_distinct() {
     assert_ne!(a_binding.identity, b_binding.identity);
 
     let c_imports = Imports::new()
-        .tag("a", "a", a_binding.identity, a_binding.ty)
-        .tag("b", "b", b_binding.identity, b_binding.ty);
+        .tag("a", "a", a_binding.identity, a_binding.ty, None)
+        .tag("b", "b", b_binding.identity, b_binding.ty, None);
     let c_store = group.add(&c, &c_imports);
     link_export(&c_store, &a, &a_store, "a", "throw_a");
     link_export(&c_store, &b, &b_store, "b", "throw_b");

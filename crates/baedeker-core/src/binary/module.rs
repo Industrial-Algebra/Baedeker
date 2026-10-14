@@ -57,6 +57,10 @@ pub struct Module<'a> {
     pub memories: Vec<MemType>,
     /// Type indices for module-defined (non-imported) tags.
     pub tags: Vec<TypeIdx>,
+    /// Extents of `rec` type-group entries (start index, length) in
+    /// `types`. Members are flattened; the extents carry the provenance
+    /// used for iso-recursive-style tag type equality at link time.
+    pub rec_groups: Vec<(u32, u32)>,
     /// Defined data segments from the data section.
     pub data: Vec<DataSegment<'a>>,
     /// Optional declared start function.
@@ -77,10 +81,12 @@ impl<'a> Module<'a> {
 
         section::parse_preamble(&mut cursor)?;
         let sections = section::parse_sections(&mut cursor)?;
-        let types = match sections.iter().find(|s| s.id == SectionId::Type) {
+        let type_section = match sections.iter().find(|s| s.id == SectionId::Type) {
             Some(section) => typesec::parse_type_section(section)?,
-            None => Vec::new(),
+            None => typesec::TypeSection::default(),
         };
+        let types = type_section.types;
+        let rec_groups = type_section.rec_groups;
         let imports = match sections.iter().find(|s| s.id == SectionId::Import) {
             Some(section) => importsec::parse_import_section(section)?,
             None => Vec::new(),
@@ -152,6 +158,7 @@ impl<'a> Module<'a> {
             globals,
             memories,
             tags,
+            rec_groups,
             data,
             start,
             data_count,
@@ -354,16 +361,19 @@ mod tests {
 
     #[test]
     fn reject_gc_rec_type_group_boundary() {
+        // A rec group whose member is a GC sub-type (0x50), not a function
+        // type: rec groups of plain function types are accepted (flattened,
+        // for EH tag provenance); sub-typed members remain the GC boundary.
         let bytes =
             include_bytes!("../../../baedeker-testdata/spec/invalid-decode/gc-rec-type-group.wasm");
         let err = Module::decode(bytes).unwrap_err();
-        assert_eq!(err.offset, ByteOffset(11));
+        assert_eq!(err.offset, ByteOffset(13));
         assert_eq!(err.context, crate::error::DecodeContext::TypeSection);
         assert!(matches!(
             err.kind,
             DecodeErrorKind::UnexpectedByte {
                 expected: 0x60,
-                found: 0x4E,
+                found: 0x50,
             }
         ));
     }

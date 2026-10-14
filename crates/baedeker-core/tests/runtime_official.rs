@@ -42,15 +42,11 @@ const DEFERRED_FILES: &[(&str, &str)] = &[
     ),
     ("type-rec.wast", "recursive types not implemented"),
     ("type.wast", "recursive/GC types not implemented"),
-    ("exceptions", "exception handling not implemented"),
     // Guard-page semantics are host/OS-specific.
     (
         "skip-stack-guard-page.wast",
         "stack guard pages not applicable",
     ),
-    // Exception handling (tag section).
-    ("instance.wast", "tag section (exceptions) not implemented"),
-    ("imports.wast", "tag section (exceptions) not implemented"),
     // The wast parser rejects the confusable unicode names.wast needs.
     ("names.wast", "parser rejects confusable unicode in names"),
 ];
@@ -73,6 +69,10 @@ struct Instance {
 struct Registry {
     /// Instances by explicit name (`$id`) and by registered string.
     named: BTreeMap<String, Instance>,
+    /// Module definitions from `(module definition $id …)` — lowered but
+    /// NOT instantiated; `(module instance $i $id)` re-instantiates them
+    /// with fresh state.
+    definitions: BTreeMap<String, Rc<RegModule>>,
     last: Option<Instance>,
     /// The link group all instances in this file share.
     group: Rc<RefCell<baedeker_core::runtime::LinkGroup>>,
@@ -85,6 +85,7 @@ impl Registry {
     fn new() -> Self {
         Self {
             named: BTreeMap::new(),
+            definitions: BTreeMap::new(),
             last: None,
             group: Rc::new(RefCell::new(BTreeMap::new())),
             arena: Rc::new(RefCell::new(Vec::new())),
@@ -179,6 +180,48 @@ fn instantiate(
             let (ty, shared) = linked_table(registry, &declared.module, &declared.name)?;
             imports.shared_table(&declared.module, &declared.name, ty, shared)
         };
+    }
+    // Tag imports: resolve eagerly against registered instances
+    // (spectest defines no tags). Binding type mismatches and unknown
+    // names are link failures, like the state imports above.
+    for declared in &module.imported_tags {
+        if declared.module == "spectest" {
+            return Err(format!(
+                "link: spectest defines no tag export {:?}",
+                declared.name
+            ));
+        }
+        let source = registry.get(Some(&declared.module)).ok_or_else(|| {
+            format!(
+                "link: module {:?} not registered for tag import {:?}",
+                declared.module, declared.name
+            )
+        })?;
+        let binding = {
+            let store = source.store.borrow();
+            store
+                .export_tag(&declared.name)
+                .and_then(|idx| store.tag_binding(idx).cloned())
+        };
+        let binding = binding.ok_or_else(|| {
+            format!(
+                "link: no tag export {:?} on {:?}",
+                declared.name, declared.module
+            )
+        })?;
+        if binding.ty.params != declared.ty.params {
+            return Err(format!(
+                "link: tag type mismatch on {:?}.{:?}: source {:?} vs import {:?}",
+                declared.module, declared.name, binding.ty.params, declared.ty.params
+            ));
+        }
+        imports = imports.tag(
+            &declared.module,
+            &declared.name,
+            binding.identity,
+            binding.ty.clone(),
+            binding.rec.clone(),
+        );
     }
 
     let instance_id = registry.fresh_instance_id();
@@ -387,7 +430,7 @@ fn run_file(path: &Path, stats: &mut OfficialStats) {
     for directive in wast.directives {
         stats.directives += 1;
         match directive {
-            WastDirective::Module(wat) | WastDirective::ModuleDefinition(wat) => {
+            WastDirective::Module(wat) => {
                 stats.modules += 1;
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let (name, module) = lower_wat(path, wat);
@@ -406,6 +449,51 @@ fn run_file(path: &Path, stats: &mut OfficialStats) {
                             .failures
                             .push(format!("{}: panicked: {msg}", path.display()));
                     }
+                }
+            }
+            WastDirective::ModuleDefinition(wat) => {
+                stats.modules += 1;
+                // A definition is lowered and stored, never instantiated.
+                // Anonymous definitions are decode/validate exercises only.
+                let outcome =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lower_wat(path, wat)));
+                match outcome {
+                    Ok((Some(name), module)) => {
+                        registry.definitions.insert(name, Rc::new(module));
+                    }
+                    Ok((None, _)) => {}
+                    Err(payload) => {
+                        let msg = payload
+                            .downcast_ref::<String>()
+                            .cloned()
+                            .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+                            .unwrap_or_else(|| "unknown panic".to_owned());
+                        stats
+                            .failures
+                            .push(format!("{}: panicked: {msg}", path.display()));
+                    }
+                }
+            }
+            WastDirective::ModuleInstance {
+                instance, module, ..
+            } => {
+                stats.modules += 1;
+                // Instantiate a stored definition with FRESH state (new
+                // store, new instance id) under the instance name.
+                let module_name = module.map(|id| id.name());
+                let instance_name = instance.map(|id| id.name());
+                let Some(definition) =
+                    module_name.and_then(|name| registry.definitions.get(name).cloned())
+                else {
+                    stats.failures.push(format!(
+                        "{}: module instance: no definition for {module_name:?} (instance {instance_name:?})",
+                        path.display()
+                    ));
+                    continue;
+                };
+                match instantiate(path, &mut registry, (*definition).clone()) {
+                    Ok(inst) => registry.insert(instance_name, inst),
+                    Err(msg) => stats.failures.push(format!("{}: {msg}", path.display())),
                 }
             }
             WastDirective::AssertReturn { exec, results, .. } => {
@@ -437,6 +525,11 @@ fn run_file(path: &Path, stats: &mut OfficialStats) {
                     }
                     _ => assert_trap(path, &registry, exec, message, stats),
                 }
+            }
+            WastDirective::AssertException { exec, span } => {
+                stats.assertions += 1;
+                let _ = span;
+                assert_exception(path, &registry, exec, stats);
             }
             WastDirective::AssertExhaustion { call, message, .. } => {
                 stats.assertions += 1;
@@ -611,6 +704,45 @@ fn execute_invoke(
     };
     let store = instance.store.borrow();
     Some(execute_export(&instance.module, &store, name, args))
+}
+
+fn assert_exception(
+    path: &Path,
+    registry: &Registry,
+    exec: WastExecute<'_>,
+    stats: &mut OfficialStats,
+) {
+    let WastExecute::Invoke(invoke) = exec else {
+        stats.failures.push(format!(
+            "{}: non-invoke assert_exception unsupported",
+            path.display()
+        ));
+        return;
+    };
+    let args = invoke_args(&invoke.args);
+    let Some(result) = execute_invoke(
+        path,
+        registry,
+        invoke.module.map(|id| id.name()),
+        invoke.name,
+        &args,
+        stats,
+    ) else {
+        return;
+    };
+    match result {
+        Err(RuntimeError {
+            kind: RuntimeErrorKind::UncaughtException { .. },
+        }) => {}
+        Err(other) => stats.failures.push(format!(
+            "{}: assert_exception expected an escaping exception, got trap {other:?}",
+            path.display()
+        )),
+        Ok(_) => stats.failures.push(format!(
+            "{}: assert_exception expected an escaping exception, got a value",
+            path.display()
+        )),
+    }
 }
 
 fn assert_return(

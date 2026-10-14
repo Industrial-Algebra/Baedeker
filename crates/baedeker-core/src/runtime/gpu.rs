@@ -199,6 +199,7 @@ mod tests {
             imported_table_count: 0,
             tags: Vec::new(),
             imported_tags: Vec::new(),
+            rec_groups: Vec::new(),
         }
     }
 

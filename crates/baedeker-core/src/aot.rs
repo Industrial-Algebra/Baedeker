@@ -24,7 +24,7 @@ pub const AOT_MAGIC: [u8; 7] = *b"BDKAOT1";
 const ENVELOPE_LEN: usize = AOT_MAGIC.len() + 4;
 
 /// Current artifact format version. Bump on any IR layout change.
-pub const AOT_FORMAT_VERSION: u32 = 4;
+pub const AOT_FORMAT_VERSION: u32 = 5;
 
 /// Errors deserializing an AOT artifact.
 #[derive(Debug, Clone, PartialEq, Eq)]

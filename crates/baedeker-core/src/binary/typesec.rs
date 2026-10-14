@@ -15,9 +15,22 @@ use crate::error::{ByteOffset, DecodeContext, DecodeError, DecodeErrorKind};
 use crate::types::{FuncType, ValType};
 
 const FUNC_TYPE_TAG: u8 = 0x60;
+const REC_GROUP_TAG: u8 = 0x4E;
+
+/// A parsed type section: the flattened function types plus the extent of
+/// each `rec` group entry (start index, length). Rec-group members are
+/// flattened into `types` in declaration order; the extents carry the
+/// provenance needed for iso-recursive-style tag type equality at link
+/// time (two tag types are equal only when their rec-group signatures and
+/// positions match, or both are outside any rec group).
+#[derive(Debug, Default, PartialEq)]
+pub struct TypeSection {
+    pub types: Vec<FuncType>,
+    pub rec_groups: Vec<(u32, u32)>,
+}
 
 /// Parse a type section into function type entries.
-pub fn parse_type_section(section: &RawSection<'_>) -> Result<Vec<FuncType>, DecodeError> {
+pub fn parse_type_section(section: &RawSection<'_>) -> Result<TypeSection, DecodeError> {
     let mut cursor = Cursor::new(section.data);
     let count = leb128::decode_u32(&mut cursor).map_err(|mut e| {
         e.context = DecodeContext::TypeSection;
@@ -25,9 +38,48 @@ pub fn parse_type_section(section: &RawSection<'_>) -> Result<Vec<FuncType>, Dec
         e
     })?;
 
-    let mut types = Vec::with_capacity(cursor.capacity_hint(count));
+    let mut out = TypeSection {
+        types: Vec::with_capacity(cursor.capacity_hint(count)),
+        rec_groups: Vec::new(),
+    };
     for _ in 0..count {
-        types.push(parse_func_type(&mut cursor, section.offset)?);
+        // Peek the entry form: `0x60` is a bare function type; `0x4E` opens
+        // a `rec` group whose members follow under an inner count and are
+        // flattened into the type list. Other forms (GC subtypes) remain
+        // unsupported.
+        let form_offset = cursor.position();
+        let form = cursor.read_byte().map_err(|_| DecodeError {
+            offset: ByteOffset(section.offset + form_offset),
+            context: DecodeContext::TypeSection,
+            kind: DecodeErrorKind::UnexpectedEof,
+        })?;
+        if form == REC_GROUP_TAG {
+            let inner_offset = cursor.position();
+            let inner = leb128::decode_u32(&mut cursor).map_err(|mut e| {
+                e.context = DecodeContext::TypeSection;
+                e.offset = ByteOffset(section.offset + inner_offset + e.offset.0);
+                e
+            })?;
+            let start = out.types.len() as u32;
+            for _ in 0..inner {
+                out.types
+                    .push(parse_func_type(&mut cursor, section.offset)?);
+            }
+            out.rec_groups.push((start, inner));
+        } else if form == FUNC_TYPE_TAG {
+            let params = parse_valtype_vec(&mut cursor, section.offset)?;
+            let results = parse_valtype_vec(&mut cursor, section.offset)?;
+            out.types.push(FuncType { params, results });
+        } else {
+            return Err(DecodeError {
+                offset: ByteOffset(section.offset + form_offset),
+                context: DecodeContext::TypeSection,
+                kind: DecodeErrorKind::UnexpectedByte {
+                    expected: FUNC_TYPE_TAG,
+                    found: form,
+                },
+            });
+        }
     }
 
     if !cursor.is_empty() {
@@ -41,7 +93,7 @@ pub fn parse_type_section(section: &RawSection<'_>) -> Result<Vec<FuncType>, Dec
         });
     }
 
-    Ok(types)
+    Ok(out)
 }
 
 fn parse_func_type(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<FuncType, DecodeError> {
@@ -108,14 +160,14 @@ mod tests {
     #[test]
     fn parse_empty_type_section() {
         let section = raw_type_section(&[0x00]);
-        let types = parse_type_section(&section).unwrap();
+        let types = parse_type_section(&section).unwrap().types;
         assert!(types.is_empty());
     }
 
     #[test]
     fn parse_single_empty_func_type() {
         let section = raw_type_section(&[0x01, 0x60, 0x00, 0x00]);
-        let types = parse_type_section(&section).unwrap();
+        let types = parse_type_section(&section).unwrap().types;
 
         assert_eq!(types.len(), 1);
         assert!(types[0].params.is_empty());
@@ -132,7 +184,7 @@ mod tests {
             0x02, // two results
             0x7C, 0x70, // f64, funcref
         ]);
-        let types = parse_type_section(&section).unwrap();
+        let types = parse_type_section(&section).unwrap().types;
 
         assert_eq!(types[0].params.len(), 3);
         assert_eq!(types[0].params[0], ValType::Num(NumType::I32));
@@ -152,7 +204,7 @@ mod tests {
             0x01, // one result
             0x64, 0x70, // (ref func)
         ]);
-        let types = parse_type_section(&section).unwrap();
+        let types = parse_type_section(&section).unwrap().types;
 
         assert_eq!(
             types[0].params[0],

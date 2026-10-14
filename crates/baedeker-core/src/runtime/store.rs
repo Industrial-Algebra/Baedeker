@@ -133,12 +133,20 @@ impl Imports {
 
     /// Provide an imported tag `(module, name)` bound to the defining
     /// instance's tag identity (from that instance's `tag_binding`).
-    pub fn tag(mut self, module: &str, name: &str, identity: (u32, u32), ty: FuncType) -> Self {
+    pub fn tag(
+        mut self,
+        module: &str,
+        name: &str,
+        identity: (u32, u32),
+        ty: FuncType,
+        rec: Option<(Vec<FuncType>, u32)>,
+    ) -> Self {
         self.tags.push(TagProvider {
             module: module.into(),
             name: name.into(),
             identity,
             ty,
+            rec,
         });
         self
     }
@@ -182,6 +190,7 @@ struct TagProvider {
     name: String,
     identity: (u32, u32),
     ty: FuncType,
+    rec: Option<(Vec<FuncType>, u32)>,
 }
 
 /// The null value for a table's element type.
@@ -307,6 +316,10 @@ pub struct TagBinding {
     /// `(instance_id, module_local_tag_idx)` of the DEFINING instance.
     pub identity: (u32, u32),
     pub ty: FuncType,
+    /// Rec-group provenance of the tag's type (member signature +
+    /// position); `None` for bare types. Link compatibility requires
+    /// provenance equality, not just structural params.
+    pub rec: Option<(Vec<FuncType>, u32)>,
 }
 
 /// Mutable state of an instantiated module.
@@ -349,7 +362,7 @@ pub struct Store {
     /// Function import declarations (from the lowered module).
     imported_funcs: Vec<crate::lower::RegImport>,
     /// Registered host functions, one slot per function import.
-    host_funcs: Vec<Option<core::cell::RefCell<HostFunction>>>,
+    host_funcs: Vec<Option<alloc::rc::Rc<core::cell::RefCell<HostFunction>>>>,
     imported_memories: Vec<alloc::rc::Rc<core::cell::RefCell<Vec<u8>>>>,
     imported_memory_types: Vec<MemType>,
     imported_global_values: Vec<alloc::rc::Rc<core::cell::Cell<Value>>>,
@@ -604,19 +617,34 @@ impl Store {
                     provider.module == declared.module && provider.name == declared.name
                 })
                 .ok_or_else(|| unknown_import(&declared.module, &declared.name))?;
-            if provider.ty.params != declared.ty.params {
+            if provider.ty.params != declared.ty.params
+                || provider.rec.is_some() != declared.rec.is_some()
+                || (provider.rec.is_some() && provider.rec != declared.rec)
+            {
                 return Err(import_type_mismatch(&declared.module, &declared.name));
             }
             tag_map.push(TagBinding {
                 identity: provider.identity,
                 ty: provider.ty.clone(),
+                rec: provider.rec.clone(),
             });
         }
         let imported_tag_count = module.imported_tags.len() as u32;
         for (i, type_idx) in module.tags.iter().enumerate() {
+            let rec = module
+                .rec_groups
+                .iter()
+                .find(|&&(start, len)| type_idx.0 >= start && type_idx.0 < start + len)
+                .map(|&(start, len)| {
+                    (
+                        module.types[start as usize..(start + len) as usize].to_vec(),
+                        type_idx.0 - start,
+                    )
+                });
             tag_map.push(TagBinding {
                 identity: (instance_id, imported_tag_count + i as u32),
                 ty: module.types[type_idx.0 as usize].clone(),
+                rec,
             });
         }
 
@@ -941,6 +969,15 @@ impl Store {
         })
     }
 
+    /// An exported tag by name: its module-local tag index (resolvable
+    /// through [`Store::tag_binding`] for its identity and type).
+    pub fn export_tag(&self, name: &str) -> Option<u32> {
+        self.exports.iter().find_map(|export| match export.desc {
+            crate::lower::RegExportDesc::Tag(idx) if export.name == name => Some(idx.0),
+            _ => None,
+        })
+    }
+
     /// An exported memory by name: its declared type and shared handle.
     pub fn export_memory(
         &self,
@@ -1073,27 +1110,36 @@ impl Store {
         name: &str,
         func: HostFunction,
     ) -> Result<(), RuntimeError> {
-        let Some(pos) = self
-            .imported_funcs
-            .iter()
-            .position(|import| import.module == module && import.name == name)
-        else {
+        // One host slot per DECLARED import: a module may import the same
+        // (module, name) function more than once, and every declaration
+        // gets its own slot — fill them all, type-checking each.
+        let shared_ty = func.ty().clone();
+        let shared = alloc::rc::Rc::new(core::cell::RefCell::new(func));
+        let mut filled = 0;
+        for pos in 0..self.imported_funcs.len() {
+            let import = &self.imported_funcs[pos];
+            if import.module != module || import.name != name {
+                continue;
+            }
+            if shared_ty != import.ty {
+                return Err(RuntimeError {
+                    kind: RuntimeErrorKind::ImportTypeMismatch {
+                        module: module.into(),
+                        name: name.into(),
+                    },
+                });
+            }
+            self.host_funcs[pos] = Some(shared.clone());
+            filled += 1;
+        }
+        if filled == 0 {
             return Err(RuntimeError {
                 kind: RuntimeErrorKind::UnknownImport {
                     module: module.into(),
                     name: name.into(),
                 },
             });
-        };
-        if func.ty() != &self.imported_funcs[pos].ty {
-            return Err(RuntimeError {
-                kind: RuntimeErrorKind::ImportTypeMismatch {
-                    module: module.into(),
-                    name: name.into(),
-                },
-            });
         }
-        self.host_funcs[pos] = Some(core::cell::RefCell::new(func));
         Ok(())
     }
 
