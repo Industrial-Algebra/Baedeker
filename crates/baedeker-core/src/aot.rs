@@ -138,33 +138,20 @@ mod tests {
             })
         );
 
-        // v1 artifacts predate the v128 const-expr support whose enum
-        // insertion renumbered RegConstInstr serde tags; they must be
-        // rejected, never reinterpreted.
-        let mut v1_artifact = artifact.clone();
-        v1_artifact[AOT_MAGIC.len()..AOT_MAGIC.len() + 4].copy_from_slice(&1u32.to_le_bytes());
-        assert!(matches!(
-            deserialize(&v1_artifact),
-            Err(AotError::UnsupportedVersion { found: 1, .. })
-        ));
-
-        // v2 artifacts predate the EH protected regions / tag fields on the
-        // serialized IR; they must be rejected, never reinterpreted.
-        let mut v2_artifact = artifact.clone();
-        v2_artifact[AOT_MAGIC.len()..AOT_MAGIC.len() + 4].copy_from_slice(&2u32.to_le_bytes());
-        assert!(matches!(
-            deserialize(&v2_artifact),
-            Err(AotError::UnsupportedVersion { found: 2, .. })
-        ));
-
-        // v3 artifacts predate `RegModule.imported_tags`; they must be
-        // rejected, never reinterpreted.
-        let mut v3_artifact = artifact.clone();
-        v3_artifact[AOT_MAGIC.len()..AOT_MAGIC.len() + 4].copy_from_slice(&3u32.to_le_bytes());
-        assert!(matches!(
-            deserialize(&v3_artifact),
-            Err(AotError::UnsupportedVersion { found: 3, .. })
-        ));
+        // Stale-format artifacts must be rejected, never reinterpreted:
+        // v1 predates the v128 const-expr RegConstInstr renumbering; v2
+        // the EH regions/tag fields; v3 imported_tags; v4 rec-group
+        // provenance. The ladder covers every predecessor of the current
+        // version.
+        for stale in 1..AOT_FORMAT_VERSION {
+            let mut old_artifact = artifact.clone();
+            old_artifact[AOT_MAGIC.len()..AOT_MAGIC.len() + 4]
+                .copy_from_slice(&stale.to_le_bytes());
+            assert!(matches!(
+                deserialize(&old_artifact),
+                Err(AotError::UnsupportedVersion { found, .. }) if found == stale
+            ));
+        }
 
         let truncated = &artifact[..artifact.len() - 3];
         assert_eq!(deserialize(truncated), Err(AotError::MalformedPayload));

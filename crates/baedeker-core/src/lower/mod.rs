@@ -164,6 +164,8 @@ pub enum RegConstInstr {
     F64Const(u64),
     V128Const([u8; 16]),
     GlobalGet(GlobalIdx),
+    /// `ref.null` with the funcref shorthand — evaluates to a null
+    /// funcref.
     RefNull,
     RefFunc(FuncIdx),
     I32Add,
@@ -172,6 +174,10 @@ pub enum RegConstInstr {
     I64Add,
     I64Sub,
     I64Mul,
+    /// `ref.null rt` for non-funcref reference types — carries the type
+    /// so the evaluator constructs the correctly-typed null (externref,
+    /// exnref, typed refs).
+    RefNullOf(RefType),
 }
 
 /// A function import declaration in lowered register IR.
@@ -1983,7 +1989,13 @@ pub(crate) fn lower_const_expr(
             Instr::F64Const(value) => RegConstInstr::F64Const(value.to_bits()),
             Instr::V128Const(bytes) => RegConstInstr::V128Const(bytes),
             Instr::GlobalGet(global) => RegConstInstr::GlobalGet(global),
-            Instr::RefNull(_) => RegConstInstr::RefNull,
+            Instr::RefNull(ref_type) => {
+                if matches!(ref_type, RefType::FuncRef) {
+                    RegConstInstr::RefNull
+                } else {
+                    RegConstInstr::RefNullOf(ref_type)
+                }
+            }
             Instr::RefFunc(func) => RegConstInstr::RefFunc(func),
             Instr::I32Add => RegConstInstr::I32Add,
             Instr::I32Sub => RegConstInstr::I32Sub,

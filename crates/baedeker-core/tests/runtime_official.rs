@@ -220,6 +220,7 @@ fn instantiate(
             &declared.name,
             binding.identity,
             binding.ty.clone(),
+            binding.expanded_params.clone(),
             binding.rec.clone(),
         );
     }

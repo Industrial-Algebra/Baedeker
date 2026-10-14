@@ -139,13 +139,15 @@ impl Imports {
         name: &str,
         identity: (u32, u32),
         ty: FuncType,
-        rec: Option<(Vec<FuncType>, u32)>,
+        expanded_params: Option<Vec<ExpandedVal>>,
+        rec: Option<(Vec<ExpandedFunc>, u32)>,
     ) -> Self {
         self.tags.push(TagProvider {
             module: module.into(),
             name: name.into(),
             identity,
             ty,
+            expanded_params,
             rec,
         });
         self
@@ -190,13 +192,22 @@ struct TagProvider {
     name: String,
     identity: (u32, u32),
     ty: FuncType,
-    rec: Option<(Vec<FuncType>, u32)>,
+    expanded_params: Option<Vec<ExpandedVal>>,
+    rec: Option<(Vec<ExpandedFunc>, u32)>,
 }
 
 /// The null value for a table's element type.
 fn table_null(ty: TableType) -> Value {
     match ty.elem {
-        crate::types::RefType::ExternRef => Value::ExternRef(None),
+        crate::types::RefType::ExternRef
+        | crate::types::RefType::Typed {
+            heap: crate::types::HeapType::Extern,
+            ..
+        } => Value::ExternRef(None),
+        crate::types::RefType::Typed {
+            heap: crate::types::HeapType::Exn,
+            ..
+        } => Value::ExnRef(None),
         _ => Value::FuncRef(None),
     }
 }
@@ -310,16 +321,118 @@ pub struct ExceptionRecord {
     pub payload: Vec<Value>,
 }
 
+/// A reference type with concrete (indexed) references recursively
+/// expanded against the defining module's type list — the structural form
+/// in which tag types are compared at link time. Abstract heap types stay
+/// nominal; `(ref $t)` expands to the referred function signature.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExpandedVal {
+    Num(crate::types::NumType),
+    Vec(crate::types::VecType),
+    /// `funcref` / `(ref null func)` — the abstract function type.
+    FuncRef {
+        nullable: bool,
+    },
+    /// `externref` / `(ref null extern)`.
+    ExternRef {
+        nullable: bool,
+    },
+    /// `exnref` / `(ref null exn)`.
+    ExnRef {
+        nullable: bool,
+    },
+    /// `(ref $t)` where `$t` is a concrete function type, expanded.
+    ConcreteFunc {
+        nullable: bool,
+        params: Vec<ExpandedVal>,
+        results: Vec<ExpandedVal>,
+    },
+}
+
+/// A function type with concrete references expanded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpandedFunc {
+    pub params: Vec<ExpandedVal>,
+    pub results: Vec<ExpandedVal>,
+}
+
+/// Expand one function type; `None` when a concrete-reference cycle is
+/// reachable (iso-recursive canonicalization is GC-era: cyclic tag types
+/// link-reject conservatively).
+fn expand_func(
+    types: &[crate::types::FuncType],
+    ty: &crate::types::FuncType,
+    path: &mut Vec<u32>,
+) -> Option<ExpandedFunc> {
+    Some(ExpandedFunc {
+        params: ty
+            .params
+            .iter()
+            .map(|v| expand_val(types, v, path))
+            .collect::<Option<_>>()?,
+        results: ty
+            .results
+            .iter()
+            .map(|v| expand_val(types, v, path))
+            .collect::<Option<_>>()?,
+    })
+}
+
+fn expand_val(
+    types: &[crate::types::FuncType],
+    v: &crate::types::ValType,
+    path: &mut Vec<u32>,
+) -> Option<ExpandedVal> {
+    use crate::types::{HeapType, RefType, ValType};
+    match v {
+        ValType::Num(n) => Some(ExpandedVal::Num(*n)),
+        ValType::Vec(x) => Some(ExpandedVal::Vec(*x)),
+        ValType::Ref(RefType::FuncRef) => Some(ExpandedVal::FuncRef { nullable: true }),
+        ValType::Ref(RefType::ExternRef) => Some(ExpandedVal::ExternRef { nullable: true }),
+        ValType::Ref(RefType::Typed { nullable, heap }) => match heap {
+            HeapType::Func => Some(ExpandedVal::FuncRef {
+                nullable: *nullable,
+            }),
+            HeapType::Extern => Some(ExpandedVal::ExternRef {
+                nullable: *nullable,
+            }),
+            HeapType::Exn => Some(ExpandedVal::ExnRef {
+                nullable: *nullable,
+            }),
+            HeapType::Type(idx) => {
+                if path.contains(&idx.0) {
+                    return None; // cyclic: reject conservatively
+                }
+                path.push(idx.0);
+                let func = expand_func(types, types.get(idx.0 as usize)?, path);
+                path.pop();
+                let func = func?;
+                Some(ExpandedVal::ConcreteFunc {
+                    nullable: *nullable,
+                    params: func.params,
+                    results: func.results,
+                })
+            }
+        },
+    }
+}
+
 /// A resolved tag binding: the global identity of the tag plus its type.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TagBinding {
     /// `(instance_id, module_local_tag_idx)` of the DEFINING instance.
     pub identity: (u32, u32),
     pub ty: FuncType,
-    /// Rec-group provenance of the tag's type (member signature +
-    /// position); `None` for bare types. Link compatibility requires
-    /// provenance equality, not just structural params.
-    pub rec: Option<(Vec<FuncType>, u32)>,
+    /// Recursively expanded parameter types (concrete references
+    /// resolved against the defining module's types); `None` when a
+    /// reference cycle makes the type non-comparable — such tags
+    /// link-reject conservatively.
+    pub expanded_params: Option<Vec<ExpandedVal>>,
+    /// Rec-group provenance (expanded member signatures + position);
+    /// `None` for bare types. Link compatibility requires provenance
+    /// equality: bare-to-bare, or identical group signatures at the
+    /// same position (iso-recursive equality, flattened).
+    pub rec: Option<(Vec<ExpandedFunc>, u32)>,
 }
 
 /// Mutable state of an instantiated module.
@@ -606,8 +719,16 @@ impl Store {
         }
         let table_types = module.tables.clone();
 
-        // Resolve tag imports eagerly (params exact; results are empty by
-        // validation), then bind defined tags to this instance.
+        // Resolve tag imports eagerly, then bind defined tags to this
+        // instance. Type compatibility compares RECURSIVELY EXPANDED
+        // forms: concrete (indexed) references resolve against each
+        // module's own type list, so identical structures at different
+        // indices compare equal while actually-different signatures do
+        // not — raw index comparison would be unsound. Rec-group
+        // provenance participates with expanded member signatures.
+        // Reference cycles expand to None and link-reject conservatively
+        // (iso-recursive canonicalization is GC-era).
+        let module_types = &module.types[..];
         let mut tag_map = Vec::with_capacity(module.imported_tags.len() + module.tags.len());
         for declared in &module.imported_tags {
             let provider = imports
@@ -617,33 +738,65 @@ impl Store {
                     provider.module == declared.module && provider.name == declared.name
                 })
                 .ok_or_else(|| unknown_import(&declared.module, &declared.name))?;
-            if provider.ty.params != declared.ty.params
-                || provider.rec.is_some() != declared.rec.is_some()
-                || (provider.rec.is_some() && provider.rec != declared.rec)
-            {
+            let declared_params: Option<Vec<ExpandedVal>> = declared
+                .ty
+                .params
+                .iter()
+                .map(|v| expand_val(module_types, v, &mut Vec::new()))
+                .collect();
+            // Both sides' provenance flatten: bare stays bare; a rec
+            // group whose members expand cyclically is non-comparable.
+            let declared_rec: Option<Option<(Vec<ExpandedFunc>, u32)>> =
+                declared.rec.as_ref().map(|(sig, pos)| {
+                    let expanded: Option<Vec<ExpandedFunc>> = sig
+                        .iter()
+                        .map(|ty| expand_func(module_types, ty, &mut Vec::new()))
+                        .collect();
+                    expanded.map(|sig| (sig, *pos))
+                });
+            let compatible = match (&provider.expanded_params, declared_params) {
+                (Some(a), Some(b)) => a == &b,
+                _ => false,
+            } && match (&provider.rec, &declared_rec) {
+                (None, None) => true,
+                (Some((sig_a, pos_a)), Some(Some((sig_b, pos_b)))) => {
+                    sig_a == sig_b && pos_a == pos_b
+                }
+                _ => false,
+            };
+            if !compatible {
                 return Err(import_type_mismatch(&declared.module, &declared.name));
             }
             tag_map.push(TagBinding {
                 identity: provider.identity,
                 ty: provider.ty.clone(),
+                expanded_params: provider.expanded_params.clone(),
                 rec: provider.rec.clone(),
             });
         }
         let imported_tag_count = module.imported_tags.len() as u32;
         for (i, type_idx) in module.tags.iter().enumerate() {
+            let expanded_params: Option<Vec<ExpandedVal>> = module_types[type_idx.0 as usize]
+                .params
+                .iter()
+                .map(|v| expand_val(module_types, v, &mut Vec::new()))
+                .collect();
             let rec = module
                 .rec_groups
                 .iter()
                 .find(|&&(start, len)| type_idx.0 >= start && type_idx.0 < start + len)
-                .map(|&(start, len)| {
-                    (
-                        module.types[start as usize..(start + len) as usize].to_vec(),
-                        type_idx.0 - start,
-                    )
+                .and_then(|&(start, len)| {
+                    let expanded: Option<Vec<ExpandedFunc>> = module_types
+                        [start as usize..(start + len) as usize]
+                        .iter()
+                        .map(|ty| expand_func(module_types, ty, &mut Vec::new()))
+                        .collect();
+                    expanded.map(|sig| (sig, type_idx.0 - start))
                 });
             tag_map.push(TagBinding {
                 identity: (instance_id, imported_tag_count + i as u32),
-                ty: module.types[type_idx.0 as usize].clone(),
+                ty: module_types[type_idx.0 as usize].clone(),
+                expanded_params,
                 rec,
             });
         }
@@ -1226,11 +1379,18 @@ impl Store {
                 kind: RuntimeErrorKind::UnknownImport { module, name },
             });
         }
-        self.host_funcs[func_idx as usize]
+        let host = self.host_funcs[func_idx as usize]
             .as_ref()
-            .expect("registration checked above")
-            .borrow_mut()
-            .call(args)
+            .expect("registration checked above");
+        // A host slot may be shared between duplicate imports of the same
+        // (module, name): a host closure that re-enters the module and
+        // calls through another slot bound to the same closure would
+        // re-borrow the shared cell. Surface a fallible reentrancy error
+        // instead of panicking.
+        let mut host = host.try_borrow_mut().map_err(|_| RuntimeError {
+            kind: RuntimeErrorKind::ReentrantStore,
+        })?;
+        host.call(args)
     }
 
     /// The import declaration for an imported function index.
@@ -1363,6 +1523,9 @@ fn eval_const(
             RegConstInstr::F64Const(bits) => stack.push(Value::F64(f64::from_bits(bits))),
             RegConstInstr::V128Const(bytes) => stack.push(Value::V128(bytes)),
             RegConstInstr::RefNull => stack.push(Value::FuncRef(None)),
+            RegConstInstr::RefNullOf(ref_type) => {
+                stack.push(crate::runtime::ref_null_value(&ref_type))
+            }
             RegConstInstr::RefFunc(func) => {
                 stack.push(Value::FuncRef(Some((instance_id, func.0))));
             }
@@ -1433,4 +1596,66 @@ fn pop_i64_pair(stack: &mut Vec<Value>) -> Result<(i64, i64), RuntimeError> {
         });
     };
     Ok((lhs, rhs))
+}
+
+#[cfg(test)]
+mod host_reentrancy_tests {
+    use super::*;
+    use alloc::collections::BTreeMap;
+    use core::cell::RefCell;
+
+    /// Review r1 P1-2: two imports of the same (module, name) host share
+    /// one host cell. A host closure that re-enters the module through
+    /// the other slot must surface a fallible reentrancy error, not a
+    /// `RefCell` panic.
+    #[test]
+    fn shared_host_slot_reentrancy_is_a_fallible_error() {
+        use crate::binary::module::Module;
+        let source = r#"
+(module
+  (import "h" "f" (func $a))
+  (import "h" "f" (func $b))
+  (func (export "outer") (call $a))
+  (func (export "inner") (call $b)))"#;
+        let buf = wast::parser::ParseBuffer::new(source).unwrap();
+        let mut wat = wast::parser::parse::<wast::Wat<'_>>(&buf).unwrap();
+        let bytes = wat.encode().unwrap();
+        let module = alloc::rc::Rc::new(Module::decode(&bytes).unwrap().lower().unwrap());
+
+        let group: Rc<RefCell<LinkGroup>> = Rc::new(RefCell::new(BTreeMap::new()));
+        let arena: Rc<RefCell<Vec<ExceptionRecord>>> = Rc::new(RefCell::new(Vec::new()));
+        let store = Store::instantiate_linked(&module, &Imports::new(), &group, 1, &arena).unwrap();
+
+        // One host closure, shared across both import slots: calling the
+        // slot-$b entry from inside the slot-$a invocation re-borrows the
+        // shared cell.
+        {
+            let mut guard = store.borrow_mut();
+            let ty = FuncType {
+                params: Vec::new(),
+                results: Vec::new(),
+            };
+            let store_capture = store.clone();
+            let host = HostFunction::new(ty, move |_args| {
+                // Slot 1 is the second `$b` import.
+                let borrowed = store_capture.borrow();
+                let result = borrowed.call_host(1, &[]);
+                drop(borrowed);
+                result.map(|_| Vec::new())
+            });
+            guard
+                .register_host_func("h", "f", host)
+                .expect("both slots registered");
+        }
+
+        let error = {
+            let borrowed = store.borrow();
+            let f = &module.funcs[0];
+            crate::runtime::execute_func_in(Some(&module), Some(&borrowed), f, &[], 0).unwrap_err()
+        };
+        assert!(
+            matches!(error.kind, RuntimeErrorKind::ReentrantStore),
+            "expected ReentrantStore, got {error:?}"
+        );
+    }
 }

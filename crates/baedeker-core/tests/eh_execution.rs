@@ -272,3 +272,32 @@ fn storeless_throw_is_uncaught() {
         RuntimeErrorKind::UncaughtException { exn: None }
     );
 }
+
+/// Review r1 P1-3: a null exnref global initializer must produce a
+/// correctly-typed null exnref (not a null funcref) — round-tripped
+/// through a function call so the value's runtime type is observable.
+#[test]
+fn null_exnref_global_has_exnref_runtime_type() {
+    let source = r#"
+(module
+  (global $g exnref (ref.null exn))
+  (func $id (param exnref) (result exnref) local.get 0)
+  (func (export "f") (result exnref)
+    global.get $g
+    call $id))"#;
+    assert_eq!(run(source, &[]).unwrap(), vec![Value::ExnRef(None)]);
+}
+
+/// Review r1 P1-3 companion: externref global initializers were also
+/// funcref-typed before the typed `ref.null` const instruction.
+#[test]
+fn null_externref_global_has_externref_runtime_type() {
+    let source = r#"
+(module
+  (global $g externref (ref.null extern))
+  (func $id (param externref) (result externref) local.get 0)
+  (func (export "f") (result externref)
+    global.get $g
+    call $id))"#;
+    assert_eq!(run(source, &[]).unwrap(), vec![Value::ExternRef(None)]);
+}

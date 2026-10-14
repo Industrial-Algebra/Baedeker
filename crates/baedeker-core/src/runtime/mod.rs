@@ -2363,7 +2363,7 @@ fn ref_nullable(ref_type: &RefType) -> bool {
 }
 
 /// The null value for a reference type (funcref null vs externref null).
-fn ref_null_value(ref_type: &RefType) -> Value {
+pub(crate) fn ref_null_value(ref_type: &RefType) -> Value {
     match ref_type {
         RefType::ExternRef
         | RefType::Typed {
