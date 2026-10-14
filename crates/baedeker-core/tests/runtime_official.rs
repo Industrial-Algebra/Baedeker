@@ -380,6 +380,15 @@ fn spectest_global(name: &str) -> Result<(GlobalType, Value), String> {
 
 fn spectest_table(name: &str) -> Result<TableType, String> {
     match name {
+        "table64" => Ok(TableType {
+            elem: baedeker_core::types::RefType::FuncRef,
+            limits: baedeker_core::types::Limits {
+                min: 10,
+                max: Some(20),
+                is64: true,
+            },
+            init: None,
+        }),
         "table" => Ok(TableType {
             elem: baedeker_core::types::RefType::FuncRef,
             limits: baedeker_core::types::Limits {
