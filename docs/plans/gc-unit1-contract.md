@@ -48,8 +48,13 @@ walk it — implementations must validate all members' supertype
 bounds for the group before performing any comptype matching (a
 premature match can traverse an unchecked cyclic supertype and
 terminate the process).
-Concrete heaptype indices decode as **nonnegative s33** (negative
-values are malformed, never silently widened to positive).
+Concrete heaptype indices decode per the pin's `s33`:
+`Convert.I32_.wrap_i64 (sN 33)` then nonnegative check — i.e. the
+33-bit signed value is WRAPPED to i32; a negative wrapped value is a
+malformed type index (0xffffffff encodes -1 → malformed;
+0x80000000 encodes +2³¹ → wraps to -2³¹ → malformed; an encoding
+that wraps to 0 decodes as index 0). Byte-count and per-byte
+unused-bit sign-extension checks follow `sN`'s n-decrementing widths.
 
 **Heap lattice** (`valid/match.ml:77–104`):
 eq/struct/array/i31 ≤ any; i31/struct/array ≤ eq; struct ≤ struct,
