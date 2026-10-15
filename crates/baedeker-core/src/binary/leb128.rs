@@ -232,6 +232,58 @@ pub fn decode_i32(cursor: &mut Cursor<'_>) -> Result<i32, DecodeError> {
     })
 }
 
+/// Decode a signed LEB128-encoded `s33` value (concrete heap-type indices,
+/// block types). The encoding uses at most 5 bytes; the 5th byte carries
+/// value bits 28-31 and the sign bit at value bit 32, so its bits 5-6 must
+/// sign-extend bit 4 exactly. Returns `i64` so the full `[-2^32, 2^32-1]`
+/// range is representable.
+pub fn decode_s33(cursor: &mut Cursor<'_>) -> Result<i64, DecodeError> {
+    let start = cursor.position();
+    let mut result: i64 = 0;
+    let mut shift: u32 = 0;
+
+    for i in 0..5 {
+        let byte = cursor.read_byte().map_err(|mut e| {
+            e.context = DecodeContext::Leb128;
+            e.offset = ByteOffset(start);
+            e
+        })?;
+
+        let low_bits = i64::from(byte & 0x7F);
+        result |= low_bits << shift;
+        shift += 7;
+
+        if byte & 0x80 == 0 {
+            if i == 4 {
+                // 5th byte at shift=28: bits 0-3 carry value bits 28-31,
+                // bit 4 is the sign bit (value bit 32); bits 5-6 must
+                // sign-extend it exactly.
+                let sign = byte & 0x10;
+                let extension = byte & 0x60;
+                if (sign == 0 && extension != 0) || (sign != 0 && extension != 0x60) {
+                    return Err(DecodeError {
+                        offset: ByteOffset(start),
+                        context: DecodeContext::Leb128,
+                        kind: DecodeErrorKind::Leb128Overflow,
+                    });
+                }
+                if sign != 0 {
+                    result |= !0i64 << shift;
+                }
+            } else if (byte & 0x40) != 0 {
+                result |= !0i64 << shift;
+            }
+            return Ok(result);
+        }
+    }
+
+    Err(DecodeError {
+        offset: ByteOffset(start),
+        context: DecodeContext::Leb128,
+        kind: DecodeErrorKind::Leb128TooLong,
+    })
+}
+
 /// Decode a signed LEB128-encoded i64.
 ///
 /// The encoding uses at most 10 bytes.
@@ -394,6 +446,38 @@ mod tests {
         // i32::MAX = 2147483647 = 0xFF 0xFF 0xFF 0xFF 0x07
         let mut c = Cursor::new(&[0xFF, 0xFF, 0xFF, 0xFF, 0x07]);
         assert_eq!(decode_i32(&mut c).unwrap(), i32::MAX);
+    }
+
+    // ── decode_s33 ──────────────────────────────────────
+
+    #[test]
+    fn s33_max_u32() {
+        // u32::MAX = 4294967295 = 0xFF 0xFF 0xFF 0xFF 0x0F
+        let mut c = Cursor::new(&[0xFF, 0xFF, 0xFF, 0xFF, 0x0F]);
+        assert_eq!(decode_s33(&mut c).unwrap(), 0xFFFF_FFFF);
+    }
+
+    #[test]
+    fn s33_2_pow_31() {
+        // 2147483648 = 0x80 0x80 0x80 0x80 0x08
+        let mut c = Cursor::new(&[0x80, 0x80, 0x80, 0x80, 0x08]);
+        assert_eq!(decode_s33(&mut c).unwrap(), 0x8000_0000);
+    }
+
+    #[test]
+    fn s33_over_u32_max_is_overflow() {
+        // 4294967296 = 0x80 0x80 0x80 0x80 0x10 — bit 32 set but the
+        // upper bits do not sign-extend, so the 33-bit value overflows.
+        let mut c = Cursor::new(&[0x80, 0x80, 0x80, 0x80, 0x10]);
+        let err = decode_s33(&mut c).unwrap_err();
+        assert_eq!(err.kind, DecodeErrorKind::Leb128Overflow);
+    }
+
+    #[test]
+    fn s33_negative_min() {
+        // -2^32 = 0x80 0x80 0x80 0x80 0x70
+        let mut c = Cursor::new(&[0x80, 0x80, 0x80, 0x80, 0x70]);
+        assert_eq!(decode_s33(&mut c).unwrap(), -(1i64 << 32));
     }
 
     // ── decode_u64 ──────────────────────────────────────────

@@ -4,6 +4,7 @@
 //! Mutable runtime state for an instantiated module: linear memories and
 //! globals. See [Spec §4.4](https://webassembly.github.io/spec/core/exec/runtime.html).
 
+use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -12,7 +13,10 @@ use crate::lower::{RegConstInstr, RegDataMode, RegElemValue, RegElementMode, Reg
 use crate::runtime::gpu::{GpuBackend, GpuError, GpuKernelId};
 use crate::runtime::host::HostFunction;
 use crate::runtime::{RuntimeError, RuntimeErrorKind, RuntimeTrap, Value, trap};
-use crate::types::{FuncIdx, FuncType, GlobalType, Limits, MemType, TableType};
+use crate::types::{
+    CompType, FieldType, FuncIdx, FuncType, GlobalType, HeapType, Limits, MemType, RefType,
+    StorageType, SubType, TableType, TypeIdx, ValType,
+};
 
 use crate::runtime::verify::F32_ADD_WGSL;
 
@@ -24,6 +28,15 @@ pub const DEFAULT_OFFLOAD_THRESHOLD: usize = 1024;
 /// Size of one WebAssembly memory page in bytes.
 pub const PAGE_SIZE: usize = 65536;
 
+/// A provider module's full, kind-preserving type section, registered on
+/// [`Imports`] so that concrete reference types in its exports can be
+/// compared structurally across modules instead of by raw type index.
+#[derive(Debug, Clone, Default)]
+struct TypeContext {
+    types: Vec<SubType>,
+    rec_groups: Vec<(u32, u32)>,
+}
+
 /// Entities provided by the host to satisfy a module's state imports
 /// (memories, globals, tables), resolved eagerly at instantiation.
 /// Function imports resolve separately and lazily via
@@ -34,12 +47,30 @@ pub struct Imports {
     globals: Vec<GlobalProvider>,
     tables: Vec<TableProvider>,
     tags: Vec<TagProvider>,
+    /// Per-provider-module type sections, keyed by the import module name.
+    type_contexts: alloc::collections::BTreeMap<String, TypeContext>,
 }
 
 impl Imports {
     /// An empty import set.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Register the defining module's full type section under `module`, so
+    /// that concrete reference types exported by that module are matched
+    /// structurally (rolled closed forms) at link time rather than by raw
+    /// type index. Call once per provider module before the fluent
+    /// memory/global/table/tag registration.
+    pub fn with_module_types(mut self, module: &str, provider: &RegModule) -> Self {
+        self.type_contexts.insert(
+            module.into(),
+            TypeContext {
+                types: provider.type_defs.clone(),
+                rec_groups: provider.rec_groups.clone(),
+            },
+        );
+        self
     }
 
     /// Provide an imported memory `(module, name)` (fresh allocation).
@@ -308,6 +339,169 @@ fn global_type_matches(provided: &GlobalType, declared: &GlobalType) -> bool {
     }
 }
 
+/// Kind-aware concrete-to-abstract heap match (`match.ml:77-104`): a
+/// concrete struct matches only the struct side of the lattice, an array
+/// the array side, a function `func` — never across kinds.
+fn concrete_heap_matches_kind(types: &[SubType], idx: TypeIdx, expected: HeapType) -> bool {
+    match crate::types::concrete_kind(types, idx) {
+        Some(crate::types::ConcreteKind::Struct) => {
+            matches!(expected, HeapType::Any | HeapType::Eq | HeapType::Struct)
+        }
+        Some(crate::types::ConcreteKind::Array) => {
+            matches!(expected, HeapType::Any | HeapType::Eq | HeapType::Array)
+        }
+        Some(crate::types::ConcreteKind::Func) => matches!(expected, HeapType::Func),
+        None => false,
+    }
+}
+
+/// Module-aware heap matching: concrete-vs-concrete via structural
+/// closed-form identity across the two type sections, concrete-vs-abstract
+/// via the kind-aware lattice, abstract-vs-abstract via the context-free
+/// lattice.
+fn heaptype_matches_ctx(
+    provided_types: &[SubType],
+    provided_recs: &[(u32, u32)],
+    provided: HeapType,
+    declared_types: &[SubType],
+    declared_recs: &[(u32, u32)],
+    declared: HeapType,
+) -> bool {
+    match (provided, declared) {
+        (HeapType::Type(a), HeapType::Type(b)) => crate::types::defined_types_equivalent(
+            provided_types,
+            provided_recs,
+            a,
+            declared_types,
+            declared_recs,
+            b,
+        ),
+        (HeapType::Type(a), expected) => concrete_heap_matches_kind(provided_types, a, expected),
+        (found, expected) => found.is_subtype_of(expected),
+    }
+}
+
+fn reftype_matches_ctx(
+    provided_types: &[SubType],
+    provided_recs: &[(u32, u32)],
+    provided: RefType,
+    declared_types: &[SubType],
+    declared_recs: &[(u32, u32)],
+    declared: RefType,
+) -> bool {
+    (!provided.is_nullable() || declared.is_nullable())
+        && heaptype_matches_ctx(
+            provided_types,
+            provided_recs,
+            provided.heap_type(),
+            declared_types,
+            declared_recs,
+            declared.heap_type(),
+        )
+}
+
+fn valtype_matches_ctx(
+    provided_types: &[SubType],
+    provided_recs: &[(u32, u32)],
+    provided: &ValType,
+    declared_types: &[SubType],
+    declared_recs: &[(u32, u32)],
+    declared: &ValType,
+) -> bool {
+    match (provided, declared) {
+        (ValType::Num(a), ValType::Num(b)) => a == b,
+        (ValType::Vec(a), ValType::Vec(b)) => a == b,
+        (ValType::Ref(a), ValType::Ref(b)) => reftype_matches_ctx(
+            provided_types,
+            provided_recs,
+            *a,
+            declared_types,
+            declared_recs,
+            *b,
+        ),
+        _ => false,
+    }
+}
+
+/// Exact structural identity of two reference types across modules — used
+/// for table element types, which are matched invariantly.
+fn reftype_identical_ctx(
+    provided_types: &[SubType],
+    provided_recs: &[(u32, u32)],
+    provided: RefType,
+    declared_types: &[SubType],
+    declared_recs: &[(u32, u32)],
+    declared: RefType,
+) -> bool {
+    if provided.is_nullable() != declared.is_nullable() {
+        return false;
+    }
+    match (provided.heap_type(), declared.heap_type()) {
+        (HeapType::Type(a), HeapType::Type(b)) => crate::types::defined_types_equivalent(
+            provided_types,
+            provided_recs,
+            a,
+            declared_types,
+            declared_recs,
+            b,
+        ),
+        (a, b) => a == b,
+    }
+}
+
+fn valtype_identical_ctx(
+    provided_types: &[SubType],
+    provided_recs: &[(u32, u32)],
+    provided: &ValType,
+    declared_types: &[SubType],
+    declared_recs: &[(u32, u32)],
+    declared: &ValType,
+) -> bool {
+    match (provided, declared) {
+        (ValType::Ref(a), ValType::Ref(b)) => reftype_identical_ctx(
+            provided_types,
+            provided_recs,
+            *a,
+            declared_types,
+            declared_recs,
+            *b,
+        ),
+        (a, b) => a == b,
+    }
+}
+
+/// Module-aware global type matching: immutable globals are covariant,
+/// mutable globals invariant, with concrete reference types resolved
+/// structurally against each side's defining type section.
+fn global_type_matches_ctx(
+    provided_types: &[SubType],
+    provided_recs: &[(u32, u32)],
+    provided: &GlobalType,
+    declared_types: &[SubType],
+    declared_recs: &[(u32, u32)],
+    declared: &GlobalType,
+) -> bool {
+    match (provided.mutability, declared.mutability) {
+        (crate::types::Mutability::Const, crate::types::Mutability::Const) => valtype_matches_ctx(
+            provided_types,
+            provided_recs,
+            &provided.val_type,
+            declared_types,
+            declared_recs,
+            &declared.val_type,
+        ),
+        (crate::types::Mutability::Var, crate::types::Mutability::Var) => valtype_identical_ctx(
+            provided_types,
+            provided_recs,
+            &provided.val_type,
+            declared_types,
+            declared_recs,
+            &declared.val_type,
+        ),
+        _ => false,
+    }
+}
+
 /// A link group: instances that can reach each other's funcref values by
 /// instance id. Created per link cluster (e.g. one per spec test file).
 pub type LinkGroup = alloc::collections::BTreeMap<
@@ -352,6 +546,18 @@ pub enum ExpandedVal {
         params: Vec<ExpandedVal>,
         results: Vec<ExpandedVal>,
     },
+    /// `(ref $t)` where `$t` is a concrete struct type, expanded. Keeping
+    /// the kind distinct from an empty function type is what makes a
+    /// struct-typed tag parameter fail to link against a func-typed one.
+    ConcreteStruct {
+        nullable: bool,
+        fields: Vec<ExpandedField>,
+    },
+    /// `(ref $t)` where `$t` is a concrete array type, expanded.
+    ConcreteArray {
+        nullable: bool,
+        field: Box<ExpandedField>,
+    },
 }
 
 /// A function type with concrete references expanded.
@@ -359,6 +565,29 @@ pub enum ExpandedVal {
 pub struct ExpandedFunc {
     pub params: Vec<ExpandedVal>,
     pub results: Vec<ExpandedVal>,
+}
+
+/// A struct/array field with concrete references expanded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpandedField {
+    pub mutable: bool,
+    pub storage: ExpandedStorage,
+}
+
+/// A storage type with concrete references expanded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExpandedStorage {
+    Val(ExpandedVal),
+    I8,
+    I16,
+}
+
+/// A composite type member of a rec group, expanded with its kind intact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExpandedComp {
+    Func(ExpandedFunc),
+    Struct(Vec<ExpandedField>),
+    Array(ExpandedField),
 }
 
 /// Rec-group provenance of a tag type, three-valued so that a FAILED
@@ -370,17 +599,37 @@ pub enum RecProvenance {
     Bare,
     /// The tag type sits at `position` in a group with these expanded
     /// member signatures.
-    Group(Vec<ExpandedFunc>, u32),
+    Group(Vec<ExpandedComp>, u32),
     /// The group's members did not fully expand; never link-compatible
     /// (conservative rejection pending GC-era canonicalization).
     Unresolvable,
+}
+
+/// Expand a composite type with its kind intact; `None` when a
+/// concrete-reference cycle is reachable (iso-recursive canonicalization
+/// is GC-era: cyclic tag types link-reject conservatively).
+fn expand_comp(
+    types: &[SubType],
+    rec_groups: &[(u32, u32)],
+    comp: &CompType,
+    path: &mut Vec<u32>,
+) -> Option<ExpandedComp> {
+    Some(match comp {
+        CompType::Func(func) => ExpandedComp::Func(expand_func(types, rec_groups, func, path)?),
+        CompType::Struct(fields) => {
+            ExpandedComp::Struct(expand_fields(types, rec_groups, fields, path)?)
+        }
+        CompType::Array(field) => {
+            ExpandedComp::Array(expand_field(types, rec_groups, *field, path)?)
+        }
+    })
 }
 
 /// Expand one function type; `None` when a concrete-reference cycle is
 /// reachable (iso-recursive canonicalization is GC-era: cyclic tag types
 /// link-reject conservatively).
 fn expand_func(
-    types: &[crate::types::FuncType],
+    types: &[SubType],
     rec_groups: &[(u32, u32)],
     ty: &crate::types::FuncType,
     path: &mut Vec<u32>,
@@ -399,8 +648,36 @@ fn expand_func(
     })
 }
 
+fn expand_fields(
+    types: &[SubType],
+    rec_groups: &[(u32, u32)],
+    fields: &[FieldType],
+    path: &mut Vec<u32>,
+) -> Option<Vec<ExpandedField>> {
+    fields
+        .iter()
+        .map(|field| expand_field(types, rec_groups, *field, path))
+        .collect()
+}
+
+fn expand_field(
+    types: &[SubType],
+    rec_groups: &[(u32, u32)],
+    field: FieldType,
+    path: &mut Vec<u32>,
+) -> Option<ExpandedField> {
+    Some(ExpandedField {
+        mutable: field.mutable,
+        storage: match field.storage {
+            StorageType::Val(v) => ExpandedStorage::Val(expand_val(types, rec_groups, &v, path)?),
+            StorageType::I8 => ExpandedStorage::I8,
+            StorageType::I16 => ExpandedStorage::I16,
+        },
+    })
+}
+
 fn expand_val(
-    types: &[crate::types::FuncType],
+    types: &[SubType],
     rec_groups: &[(u32, u32)],
     v: &crate::types::ValType,
     path: &mut Vec<u32>,
@@ -436,15 +713,31 @@ fn expand_val(
                     return None; // cyclic: reject conservatively
                 }
                 path.push(idx.0);
-                let func_ty = types.get(idx.0 as usize)?;
-                let func = expand_func(types, rec_groups, func_ty, path);
+                let sub = types.get(idx.0 as usize)?;
+                let expanded =
+                    match &sub.comp {
+                        CompType::Func(func) => {
+                            expand_func(types, rec_groups, func, path).map(|func| {
+                                ExpandedVal::ConcreteFunc {
+                                    nullable: *nullable,
+                                    params: func.params,
+                                    results: func.results,
+                                }
+                            })
+                        }
+                        CompType::Struct(fields) => expand_fields(types, rec_groups, fields, path)
+                            .map(|fields| ExpandedVal::ConcreteStruct {
+                                nullable: *nullable,
+                                fields,
+                            }),
+                        CompType::Array(field) => expand_field(types, rec_groups, *field, path)
+                            .map(|field| ExpandedVal::ConcreteArray {
+                                nullable: *nullable,
+                                field: Box::new(field),
+                            }),
+                    };
                 path.pop();
-                let func = func?;
-                Some(ExpandedVal::ConcreteFunc {
-                    nullable: *nullable,
-                    params: func.params,
-                    results: func.results,
-                })
+                expanded
             }
             // GC abstract heap types are not part of the EH-era link
             // expansion; they are never produced by EH tag types.
@@ -648,7 +941,18 @@ impl Store {
                     provider.module == declared.module && provider.name == declared.name
                 })
                 .ok_or_else(|| unknown_import(&declared.module, &declared.name))?;
-            if !global_type_matches(&provider.ty, &declared.ty) {
+            let type_matches = match imports.type_contexts.get(&declared.module) {
+                Some(provider_ctx) => global_type_matches_ctx(
+                    &provider_ctx.types,
+                    &provider_ctx.rec_groups,
+                    &provider.ty,
+                    &module.type_defs,
+                    &module.rec_groups,
+                    &declared.ty,
+                ),
+                None => global_type_matches(&provider.ty, &declared.ty),
+            };
+            if !type_matches {
                 return Err(import_type_mismatch(&declared.module, &declared.name));
             }
             let entity = match (&provider.shared, provider.value) {
@@ -684,9 +988,18 @@ impl Store {
                 },
                 None => provider.ty.limits,
             };
-            if provider.ty.elem != declared.ty.elem
-                || !limits_match(&provided_limits, &declared.ty.limits)
-            {
+            let elem_matches = match imports.type_contexts.get(&declared.module) {
+                Some(provider_ctx) => reftype_identical_ctx(
+                    &provider_ctx.types,
+                    &provider_ctx.rec_groups,
+                    provider.ty.elem,
+                    &module.type_defs,
+                    &module.rec_groups,
+                    declared.ty.elem,
+                ),
+                None => provider.ty.elem == declared.ty.elem,
+            };
+            if !elem_matches || !limits_match(&provided_limits, &declared.ty.limits) {
                 return Err(import_type_mismatch(&declared.module, &declared.name));
             }
             let entity = match provider.shared.clone() {
@@ -777,14 +1090,17 @@ impl Store {
         // Reference cycles expand to None and link-reject conservatively
         // (iso-recursive canonicalization is GC-era).
         let module_types = &module.types[..];
+        let module_type_defs = &module.type_defs[..];
         let module_recs = &module.rec_groups[..];
-        let rec_provenance = |raw: &Option<(Vec<FuncType>, u32)>| -> RecProvenance {
+        let rec_provenance = |raw: &Option<(Vec<SubType>, u32)>| -> RecProvenance {
             match raw {
                 None => RecProvenance::Bare,
                 Some((sig, pos)) => {
-                    let expanded: Option<Vec<ExpandedFunc>> = sig
+                    let expanded: Option<Vec<ExpandedComp>> = sig
                         .iter()
-                        .map(|ty| expand_func(module_types, module_recs, ty, &mut Vec::new()))
+                        .map(|sub| {
+                            expand_comp(module_type_defs, module_recs, &sub.comp, &mut Vec::new())
+                        })
                         .collect();
                     match expanded {
                         Some(sig) => RecProvenance::Group(sig, *pos),
@@ -806,7 +1122,7 @@ impl Store {
                 .ty
                 .params
                 .iter()
-                .map(|v| expand_val(module_types, module_recs, v, &mut Vec::new()))
+                .map(|v| expand_val(module_type_defs, module_recs, v, &mut Vec::new()))
                 .collect();
             let declared_rec = rec_provenance(&declared.rec);
             // Bare types are implicit SINGLETON rec groups in the
@@ -817,10 +1133,10 @@ impl Store {
             // signature.
             let singleton = |params: &[ExpandedVal]| {
                 RecProvenance::Group(
-                    alloc::vec![ExpandedFunc {
+                    alloc::vec![ExpandedComp::Func(ExpandedFunc {
                         params: params.to_vec(),
                         results: Vec::new(),
-                    }],
+                    })],
                     0,
                 )
             };
@@ -858,7 +1174,7 @@ impl Store {
             let expanded_params: Option<Vec<ExpandedVal>> = module_types[type_idx.0 as usize]
                 .params
                 .iter()
-                .map(|v| expand_val(module_types, module_recs, v, &mut Vec::new()))
+                .map(|v| expand_val(module_type_defs, module_recs, v, &mut Vec::new()))
                 .collect();
             let raw_rec = module
                 .rec_groups
@@ -866,7 +1182,7 @@ impl Store {
                 .find(|&&(start, len)| type_idx.0 >= start && type_idx.0 < start + len)
                 .map(|&(start, len)| {
                     (
-                        module_types[start as usize..(start + len) as usize].to_vec(),
+                        module_type_defs[start as usize..(start + len) as usize].to_vec(),
                         type_idx.0 - start,
                     )
                 });

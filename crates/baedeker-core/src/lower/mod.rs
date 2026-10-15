@@ -18,7 +18,7 @@ use crate::error::{ByteOffset, DecodeContext, DecodeErrorKind};
 use crate::types::{
     BlockType, CodeBody, DataMode, ElemIdx, ElementInit, ElementMode, ExportDesc, FuncIdx,
     FuncType, GlobalIdx, HeapType, ImportDesc, LabelIdx, LocalDecl, LocalIdx, MemArg, MemIdx,
-    MemType, Mutability, NumType, RefType, TableIdx, TableType, TagIdx, TypeIdx, ValType,
+    MemType, Mutability, NumType, RefType, SubType, TableIdx, TableType, TagIdx, TypeIdx, ValType,
 };
 use crate::validate;
 use crate::validate::error::{ValidationError, ValidationErrorKind};
@@ -67,6 +67,11 @@ pub struct RegModule {
     /// All function types in the module's type section, for structural
     /// `call_indirect` type checks.
     pub types: Vec<FuncType>,
+    /// The module's full type section: kind-preserving (struct/array/func)
+    /// definitions used for cross-module structural comparison of concrete
+    /// reference types at link time. `types` is the function-only view of
+    /// this section.
+    pub type_defs: Vec<SubType>,
     /// All data segments in index order; mode decides instantiation behavior.
     pub data: Vec<RegDataSegment>,
     /// Number of imported memories (runtime access is not yet supported).
@@ -229,7 +234,7 @@ pub struct ImportedTag {
     /// `None` for bare (non-rec) types. Two tag types are link-compatible
     /// only when both are bare, or both come from structurally identical
     /// groups at the same position (iso-recursive equality, flattened).
-    pub rec: Option<(Vec<FuncType>, u32)>,
+    pub rec: Option<(Vec<SubType>, u32)>,
 }
 
 /// A function export in lowered register IR.
@@ -1885,7 +1890,8 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
     let start = module.start();
 
     let tables = module.tables().to_vec();
-    let types = reg_type_table(module);
+    let type_defs = reg_type_table(module);
+    let types = func_type_view(&type_defs);
 
     let mut elements = Vec::with_capacity(module.elements().len());
     for segment in module.elements() {
@@ -1944,6 +1950,7 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
         tables,
         elements,
         types,
+        type_defs,
         data,
         imported_memory_count,
         imported_global_count,
@@ -2064,13 +2071,19 @@ fn func_type_table<'a, 'm>(module: &'a Module<'m>) -> Vec<&'a FuncType> {
     table
 }
 
+/// The module's full, kind-preserving type section. Used as the source of
+/// truth for cross-module structural comparison of concrete reference
+/// types; `func_type_view` derives the function-only view from it.
+fn reg_type_table(module: &Module<'_>) -> Vec<SubType> {
+    module.types().to_vec()
+}
+
 /// Function types in type-index order, for the register IR's structural
 /// `call_indirect` checks. Non-function entries are placeholders: validation
 /// ensures every `call_indirect`/`ref.func` type index points at a function
 /// type, so the placeholder is never observed for a valid module.
-fn reg_type_table(module: &Module<'_>) -> Vec<FuncType> {
-    module
-        .types()
+fn func_type_view(type_defs: &[SubType]) -> Vec<FuncType> {
+    type_defs
         .iter()
         .map(|sub| {
             sub.as_func().cloned().unwrap_or(FuncType {
@@ -2106,22 +2119,14 @@ fn global_type_table(module: &Module<'_>) -> Vec<ValType> {
 /// Rec-group provenance of a type index, for tag link compatibility:
 /// `Some((member types, position))` when the index falls inside a `rec`
 /// group entry, `None` for bare types.
-fn rec_provenance(module: &Module<'_>, type_idx: TypeIdx) -> Option<(Vec<FuncType>, u32)> {
+fn rec_provenance(module: &Module<'_>, type_idx: TypeIdx) -> Option<(Vec<SubType>, u32)> {
     let idx = type_idx.0;
     let &(start, len) = module
         .rec_groups
         .iter()
         .find(|&&(start, len)| idx >= start && idx < start + len)?;
     let types = module.types();
-    let members: Vec<FuncType> = types[start as usize..(start + len) as usize]
-        .iter()
-        .map(|sub| {
-            sub.as_func().cloned().unwrap_or(FuncType {
-                params: Vec::new(),
-                results: Vec::new(),
-            })
-        })
-        .collect();
+    let members: Vec<SubType> = types[start as usize..(start + len) as usize].to_vec();
     Some((members, idx - start))
 }
 

@@ -155,10 +155,11 @@ fn parse_heap_type_at(
         })
     } else {
         // A concrete type index is a non-negative `s33` (multi-byte signed
-        // LEB). A negative value is malformed (decode.ml: `typeuse` rejects
-        // `i < 0`), never silently widened to a positive index.
+        // LEB, range `0..=u32::MAX`). A negative value is malformed
+        // (decode.ml: `typeuse` rejects `i < 0`), never silently widened to
+        // a positive index.
         let start = cursor.position();
-        let value = leb128::decode_i32(cursor).map_err(|mut e| {
+        let value = leb128::decode_s33(cursor).map_err(|mut e| {
             e.context = context;
             e.offset = ByteOffset(absolute_offset + (e.offset.0 - start));
             e
@@ -207,5 +208,39 @@ mod tests {
             parse_ref_type(&mut cursor, 14, DecodeContext::TypeSection).unwrap(),
             RefType::func(false)
         );
+    }
+
+    /// Review r2 P1: concrete heap indices are non-negative `s33`, so the
+    /// full `u32` range decodes (0xffffffff and 0x80000000 are valid
+    /// encodings; validation rejects unknown indices later).
+    #[test]
+    fn parse_concrete_heap_type_full_u32_range() {
+        let mut cursor = Cursor::new(&[0xff, 0xff, 0xff, 0xff, 0x0f]);
+        assert_eq!(
+            parse_heap_type(&mut cursor, 0, DecodeContext::TypeSection).unwrap(),
+            HeapType::Type(TypeIdx(u32::MAX))
+        );
+        let mut cursor = Cursor::new(&[0x80, 0x80, 0x80, 0x80, 0x08]);
+        assert_eq!(
+            parse_heap_type(&mut cursor, 0, DecodeContext::TypeSection).unwrap(),
+            HeapType::Type(TypeIdx(0x8000_0000))
+        );
+    }
+
+    /// Values above `u32::MAX` (bit 32 set without sign extension) stay
+    /// malformed.
+    #[test]
+    fn parse_concrete_heap_type_over_u32_max_is_malformed() {
+        let mut cursor = Cursor::new(&[0x80, 0x80, 0x80, 0x80, 0x10]);
+        let err = parse_heap_type(&mut cursor, 0, DecodeContext::TypeSection).unwrap_err();
+        assert_eq!(err.kind, DecodeErrorKind::Leb128Overflow);
+    }
+
+    /// Negative multi-byte (non-abstract) encodings remain malformed.
+    #[test]
+    fn parse_negative_multibyte_heap_type_is_malformed() {
+        let mut cursor = Cursor::new(&[0xff, 0xff, 0xff, 0xff, 0x7f]);
+        let err = parse_heap_type(&mut cursor, 0, DecodeContext::TypeSection).unwrap_err();
+        assert_eq!(err.kind, DecodeErrorKind::UnknownRefType { byte: 0xff });
     }
 }

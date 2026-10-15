@@ -6,7 +6,7 @@
 //! These types mirror the WASM spec's abstract syntax for types.
 //! See [Spec §2.3](https://webassembly.github.io/spec/core/syntax/types.html).
 
-use alloc::{collections::BTreeMap, string::String, vec, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeMap, string::String, vec, vec::Vec};
 
 /// Newtype index wrappers to prevent mixing up different index spaces.
 macro_rules! define_idx {
@@ -604,6 +604,267 @@ impl TypeCanon {
             (Some(lhs), Some(rhs)) => lhs == rhs,
             _ => false,
         }
+    }
+}
+
+/// The kind of a concrete (defined) composite type, independent of any
+/// module's index space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConcreteKind {
+    Struct,
+    Array,
+    Func,
+}
+
+/// The kind of the defined type at `idx`, if it exists.
+pub fn concrete_kind(types: &[SubType], idx: TypeIdx) -> Option<ConcreteKind> {
+    Some(match &types.get(idx.0 as usize)?.comp {
+        CompType::Struct(_) => ConcreteKind::Struct,
+        CompType::Array(_) => ConcreteKind::Array,
+        CompType::Func(_) => ConcreteKind::Func,
+    })
+}
+
+/// A module-independent structural form of a defined type: the rolled
+/// closed form of the rec group it belongs to, plus its position in that
+/// group.
+///
+/// Per `syntax/types.ml` two defined types are canonically equal exactly
+/// when `rolled1 = rolled2 ∧ i1 = i2`, so structural equality of these
+/// values is cross-module concrete-type equivalence. In-group references
+/// stay relative (`InGroup`); external references are recursively replaced
+/// by their own closed forms, so no module-local index leaks into the
+/// comparison.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClosedDefinedType {
+    members: Vec<ClosedSubType>,
+    position: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClosedSubType {
+    is_final: bool,
+    supers: Vec<ClosedHeapRef>,
+    comp: ClosedCompType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ClosedHeapRef {
+    Abstract(HeapType),
+    InGroup(u32),
+    External(Box<ClosedDefinedType>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ClosedCompType {
+    Struct(Vec<ClosedFieldType>),
+    Array(ClosedFieldType),
+    Func(Vec<ClosedValType>, Vec<ClosedValType>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClosedFieldType {
+    mutable: bool,
+    storage: ClosedStorageType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ClosedStorageType {
+    Val(ClosedValType),
+    I8,
+    I16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ClosedValType {
+    Num(NumType),
+    Vec(VecType),
+    Ref(bool, ClosedHeapRef),
+}
+
+impl ClosedDefinedType {
+    /// Build the closed form of the defined type at `idx`. Returns `None`
+    /// for an unknown index or a reference cycle (impossible for validated
+    /// modules, which only reference earlier groups).
+    pub fn of(types: &[SubType], rec_groups: &[(u32, u32)], idx: TypeIdx) -> Option<Self> {
+        let mut path = Vec::new();
+        Self::resolve(types, rec_groups, idx, &mut path)
+    }
+
+    fn resolve(
+        types: &[SubType],
+        rec_groups: &[(u32, u32)],
+        idx: TypeIdx,
+        path: &mut Vec<u32>,
+    ) -> Option<Self> {
+        if path.contains(&idx.0) {
+            return None;
+        }
+        path.push(idx.0);
+        let (start, len) = group_span(rec_groups, idx.0);
+        let mut members = Vec::with_capacity(len as usize);
+        for k in 0..len {
+            let sub = types.get((start + k) as usize)?;
+            members.push(closed_sub(sub, types, rec_groups, start, len, path)?);
+        }
+        path.pop();
+        Some(Self {
+            members,
+            position: idx.0 - start,
+        })
+    }
+}
+
+fn group_span(rec_groups: &[(u32, u32)], idx: u32) -> (u32, u32) {
+    rec_groups
+        .iter()
+        .find(|&&(start, len)| idx >= start && idx < start + len)
+        .copied()
+        .unwrap_or((idx, 1))
+}
+
+fn closed_sub(
+    sub: &SubType,
+    types: &[SubType],
+    rec_groups: &[(u32, u32)],
+    start: u32,
+    len: u32,
+    path: &mut Vec<u32>,
+) -> Option<ClosedSubType> {
+    Some(ClosedSubType {
+        is_final: sub.is_final,
+        supers: sub
+            .supertypes
+            .iter()
+            .map(|&s| {
+                closed_heap(
+                    HeapType::Type(TypeIdx(s)),
+                    types,
+                    rec_groups,
+                    start,
+                    len,
+                    path,
+                )
+            })
+            .collect::<Option<_>>()?,
+        comp: closed_comp(&sub.comp, types, rec_groups, start, len, path)?,
+    })
+}
+
+fn closed_heap(
+    heap: HeapType,
+    types: &[SubType],
+    rec_groups: &[(u32, u32)],
+    start: u32,
+    len: u32,
+    path: &mut Vec<u32>,
+) -> Option<ClosedHeapRef> {
+    match heap {
+        HeapType::Type(idx) => {
+            if idx.0 >= start && idx.0 < start + len {
+                Some(ClosedHeapRef::InGroup(idx.0 - start))
+            } else {
+                Some(ClosedHeapRef::External(Box::new(
+                    ClosedDefinedType::resolve(types, rec_groups, idx, path)?,
+                )))
+            }
+        }
+        other => Some(ClosedHeapRef::Abstract(other)),
+    }
+}
+
+fn closed_comp(
+    comp: &CompType,
+    types: &[SubType],
+    rec_groups: &[(u32, u32)],
+    start: u32,
+    len: u32,
+    path: &mut Vec<u32>,
+) -> Option<ClosedCompType> {
+    Some(match comp {
+        CompType::Struct(fields) => ClosedCompType::Struct(
+            fields
+                .iter()
+                .map(|f| closed_field(*f, types, rec_groups, start, len, path))
+                .collect::<Option<_>>()?,
+        ),
+        CompType::Array(field) => {
+            ClosedCompType::Array(closed_field(*field, types, rec_groups, start, len, path)?)
+        }
+        CompType::Func(func) => ClosedCompType::Func(
+            func.params
+                .iter()
+                .map(|v| closed_val(*v, types, rec_groups, start, len, path))
+                .collect::<Option<_>>()?,
+            func.results
+                .iter()
+                .map(|v| closed_val(*v, types, rec_groups, start, len, path))
+                .collect::<Option<_>>()?,
+        ),
+    })
+}
+
+fn closed_field(
+    field: FieldType,
+    types: &[SubType],
+    rec_groups: &[(u32, u32)],
+    start: u32,
+    len: u32,
+    path: &mut Vec<u32>,
+) -> Option<ClosedFieldType> {
+    Some(ClosedFieldType {
+        mutable: field.mutable,
+        storage: match field.storage {
+            StorageType::Val(v) => {
+                ClosedStorageType::Val(closed_val(v, types, rec_groups, start, len, path)?)
+            }
+            StorageType::I8 => ClosedStorageType::I8,
+            StorageType::I16 => ClosedStorageType::I16,
+        },
+    })
+}
+
+fn closed_val(
+    val: ValType,
+    types: &[SubType],
+    rec_groups: &[(u32, u32)],
+    start: u32,
+    len: u32,
+    path: &mut Vec<u32>,
+) -> Option<ClosedValType> {
+    Some(match val {
+        ValType::Num(num) => ClosedValType::Num(num),
+        ValType::Vec(vec) => ClosedValType::Vec(vec),
+        ValType::Ref(RefType::FuncRef) => {
+            ClosedValType::Ref(true, ClosedHeapRef::Abstract(HeapType::Func))
+        }
+        ValType::Ref(RefType::ExternRef) => {
+            ClosedValType::Ref(true, ClosedHeapRef::Abstract(HeapType::Extern))
+        }
+        ValType::Ref(RefType::Typed { nullable, heap }) => ClosedValType::Ref(
+            nullable,
+            closed_heap(heap, types, rec_groups, start, len, path)?,
+        ),
+    })
+}
+
+/// Structural (module-agnostic) equality of the defined types at `lhs` and
+/// `rhs` — the spec's rolled-closed-form canonical equality, computed
+/// across two independent type sections.
+pub fn defined_types_equivalent(
+    lhs_types: &[SubType],
+    lhs_rec_groups: &[(u32, u32)],
+    lhs: TypeIdx,
+    rhs_types: &[SubType],
+    rhs_rec_groups: &[(u32, u32)],
+    rhs: TypeIdx,
+) -> bool {
+    match (
+        ClosedDefinedType::of(lhs_types, lhs_rec_groups, lhs),
+        ClosedDefinedType::of(rhs_types, rhs_rec_groups, rhs),
+    ) {
+        (Some(lhs), Some(rhs)) => lhs == rhs,
+        _ => false,
     }
 }
 
