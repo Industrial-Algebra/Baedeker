@@ -122,7 +122,7 @@ slice), custom page sizes, multi-memory.
 |---|---|---|---|
 | R0 | Official GC corpus (exactly 22 files) | Schedule-independent spec semantics | 5 |
 | R1 | wasm-smith GC-property modules, differential vs spec interpreter | Robustness on author-blind struct/array graphs, cast cascades | 5 |
-| R2 | Hand-built A1–A7 (below), graded by logical-stats deltas + structured refusal | Allocation accounting, refusal discipline, stats exactness | 5 |
+| R2 | Hand-built A1–A8 (below), graded by logical-stats deltas + structured refusal | Allocation accounting, refusal discipline, stats exactness | 5 |
 | R3 | Real compilers on wasm-GC: OCaml/wasm_of_ocaml, Dart/dart2wasm, Kotlin/Wasm | Collector under real allocation topology | **5b ticket** |
 | R4 | GHC wasm32-wasi substrate stress (no wasm-GC usage — RTS GC runs in linear memory) | Substrate robustness: giant modules, call_indirect storms, RTS memcpy storms, table churn | **5b ticket** |
 
@@ -177,7 +177,7 @@ Throughput/latency benchmarks deliberately deferred to 5b.
 | U2 | Heap + object model: GcHeap/ObjectId, i31 immediate, extern/any wrapper representation + identity rules, GcStats logical formula, struct/array/i31 instruction execution, AOT v7 | `gc-unit2-contract.md` |
 | U3 | Cast machinery: ref.test/cast (+null forms), br_on_cast pair, ref.eq, conversions — green on targeted tests (NOT full R0; see U4) | `gc-unit3-contract.md` |
 | U4 | Surface completion: GC types in globals/tables/elements/imports/exports, const-expr eligibility, lowerer lattice mirror, runner RefHost/assert-ref support, FFI handles, R1 smith wiring | `gc-unit4-contract.md` |
-| U5 | Vendor the 22 files, grind R0 to zero; articles A1–A7 + harness + caps in CI | `gc-unit5-contract.md` |
+| U5 | Vendor the 22 files, grind R0 to zero; articles A1–A8 + harness + caps in CI | `gc-unit5-contract.md` |
 
 R0 green end-to-end is delivered at **U5** (U4 supplies GC
 globals/tables/elements and runner support that i31.wast/extern.wast
