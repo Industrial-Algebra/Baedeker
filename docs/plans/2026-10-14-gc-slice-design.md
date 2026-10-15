@@ -83,22 +83,29 @@ slice), custom page sizes, multi-memory.
   resource contract). Index-stable so 5b swaps strategy behind the
   interface without touching AOT/FFI.
 - **Extern/any conversions** (representation decided in U2, before
-  U3): `any.convert_extern` wraps a host reference into an
-  anyref-compatible **wrapper representation**; `extern.convert_any`
-  unwraps; round trips are identity-preserving; null converts to null
-  (eval.ml:929–939). Wrapper IDs live in a namespace distinct from
-  both `ObjectId`s and host indices — no collisions. Wrapper
-  allocation counts in stats.
+  U3): conversions are **immediate value-level re-tags**, exactly as
+  the reference interpreter models them (eval.ml:929–939) —
+  `any.convert_extern` re-tags a host reference into the anyref
+  hierarchy, `extern.convert_any` re-tags back (wrapping i31/struct/
+  array references into the extern side as an immediate carrying the
+  inner value); null converts to null. **No wrapper heap entries exist**;
+  round trips are identity-preserving by construction (the inner value
+  never changes); conversion storms allocate nothing (pinned by A7).
 - **GcStats — logical accounting, exact**: `store.gc_stats() →
   { live_objects, live_bytes, allocations_since(snapshot) }`.
   `live_bytes` = Σ logical bytes with the formula frozen in the U2
-  contract: struct = 8-byte header + Σ field widths; array = 12-byte
-  header + len × elem width; widths i8=1, i16=2, i32/f32=4,
-  i64/f64=8, packed ref handle=4. This is **logical** accounting —
-  explicitly NOT reserved capacity, table slack, allocator overhead,
-  or process RSS (separate stats expose reserved slots). Graders
-  assert exact equality against the formula. Snapshots taken at
-  article boundaries; `allocations_since` counts table insertions.
+  contract — **total over every storage type** (valid.ml:131–148):
+  struct = 8-byte header + Σ field widths; array = 12-byte header +
+  len × elem width; widths **i8=1, i16=2, i32/f32=4, i64/f64=8,
+  v128=16**, packed ref handle=4. Wrappers and i31 contribute 0
+  (immediates). This is **logical** accounting — explicitly NOT
+  reserved capacity, table slack, allocator overhead, or process RSS
+  (separate stats expose reserved slots). Graders assert exact
+  equality against the formula (A2a, A8). "Untouched state" on
+  refusal = the failing allocation is atomic; prior successful
+  article allocations stand. Snapshots taken at article boundaries;
+  `allocations_since` counts object-table insertions (struct/array
+  only).
 - **AOT v7** for new instruction forms + reference operands (handle
   ABI unchanged underneath). FFI: GC references as opaque handles.
   **Lowerer mirror rule**: duplicate operand type-checker gains the
@@ -154,9 +161,10 @@ binaries) may land during 5; full R4 with 5b.
 | A4 | i31-storm: 10⁷ `ref.i31`/`i31.get_*` vs boxed | i31 never allocates | stats delta 0 across run |
 | A5 | cast-cascade: 10⁶ tests/casts, 30-deep declared subtype chain, mixed outcomes incl. **distinct-ID subtype successes** | RTT canonical-ID + ancestry path | results exact; stats delta 0 |
 | A6 | new_data/new_elem hybrid + linear-memory pressure | Heap × linear-memory interaction | results correct; GC logical bytes and memory pages accounted separately |
-| A7 | mixed-ref-matrix: funcref/externref/GcRef in tables/globals/params | Reference-kind separation | results exact under every storage kind |
+| A7 | mixed-ref-matrix: funcref/externref/GcRef in tables/globals/params + conversion round-trip storm (`any.convert_extern`/`extern.convert_any` ×10⁶ over mixed identities) | Reference-kind separation; conversions never allocate | results exact under every storage kind; stats delta 0 across the storm |
+| A8 | v128-accounting: v128-field structs (8+16) and v128 arrays (12+3×16) built/rebuilt in exact counts | Formula totality incl. v128 | `live_bytes` exactly = formula × count; `allocations_since` exact |
 
-Articles in `tests/gc_articles/` (wast-authorable where the encoder
+Articles A1–A8 in `tests/gc_articles/` (wast-authorable where the encoder
 allows) + runner harness (child process, snapshots, structured
 expectations, caps). Articles self-bound; per-article caps documented.
 Throughput/latency benchmarks deliberately deferred to 5b.
