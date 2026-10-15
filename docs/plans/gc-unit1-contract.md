@@ -34,11 +34,22 @@ to later groups are unknown-index errors. A bare subtype is a
 singleton rec group by construction (canonicalization inherits
 bare≡singleton automatically).
 
-**Supertype rules** (`valid.ml:161–177` check_subtype_sub): for each
-supertype `xi` of member `x` in a group starting at `x0`:
-(1) `xi < x0` — no self, no in-group, no forward reference;
+**Supertype rules** (`valid.ml:161–189` check_subtype_sub, called
+with `x = group_start + member_index`): for each supertype `xi` of
+member at absolute index `x`:
+(1) `xi < x` — no self, no later member, no forward reference to a
+later group; **earlier members of the same group ARE legal
+supertypes**;
 (2) supertype must NOT be final;
 (3) member comptype must MATCH the supertype comptype.
+The reference runs each member's sub-check in member order, so an
+invalid supertype index is rejected BEFORE any comptype matching can
+walk it — implementations must validate all members' supertype
+bounds for the group before performing any comptype matching (a
+premature match can traverse an unchecked cyclic supertype and
+terminate the process).
+Concrete heaptype indices decode as **nonnegative s33** (negative
+values are malformed, never silently widened to positive).
 
 **Heap lattice** (`valid/match.ml:77–104`):
 eq/struct/array/i31 ≤ any; i31/struct/array ≤ eq; struct ≤ struct,
