@@ -242,3 +242,27 @@ fn reject_sub_vec_then_bad_comptype() {
         err.kind
     );
 }
+
+#[test]
+fn reject_negative_concrete_heaptype_index() {
+    // Reviewer reproduction: `63 f0 7f` is `(ref null <s33 -16>)`. A negative
+    // concrete index is malformed; it must not be silently widened to 16368.
+    let err = decode_err(&[0x01, 0x60, 0x01, 0x63, 0xf0, 0x7f, 0x00]);
+    assert!(
+        format!("{:?}", err.kind).contains("UnknownRefType"),
+        "unexpected error: {:?}",
+        err.kind
+    );
+}
+
+#[test]
+fn decode_multi_byte_concrete_heaptype_index() {
+    // A non-negative multi-byte s33 concrete index decodes normally: `80 01`
+    // encodes 128 (0x80 low 7 bits = 0, next byte 0x01 shifted << 7 = 128).
+    let types = decode_ok(&[0x01, 0x60, 0x01, 0x63, 0x80, 0x01, 0x00]);
+    let params = &func(&types, 0).params;
+    assert_eq!(
+        params[0],
+        ValType::Ref(RefType::concrete(true, TypeIdx(128)))
+    );
+}

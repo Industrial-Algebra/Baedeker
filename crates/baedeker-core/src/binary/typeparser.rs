@@ -154,15 +154,23 @@ fn parse_heap_type_at(
             kind: DecodeErrorKind::UnknownRefType { byte: first },
         })
     } else {
+        // A concrete type index is a non-negative `s33` (multi-byte signed
+        // LEB). A negative value is malformed (decode.ml: `typeuse` rejects
+        // `i < 0`), never silently widened to a positive index.
         let start = cursor.position();
-        leb128::decode_u32(cursor)
-            .map(TypeIdx)
-            .map(HeapType::Type)
-            .map_err(|mut e| {
-                e.context = context;
-                e.offset = ByteOffset(absolute_offset + (e.offset.0 - start));
-                e
-            })
+        let value = leb128::decode_i32(cursor).map_err(|mut e| {
+            e.context = context;
+            e.offset = ByteOffset(absolute_offset + (e.offset.0 - start));
+            e
+        })?;
+        if value < 0 {
+            return Err(DecodeError {
+                offset: ByteOffset(absolute_offset),
+                context,
+                kind: DecodeErrorKind::UnknownRefType { byte: first },
+            });
+        }
+        Ok(HeapType::Type(TypeIdx(value as u32)))
     }
 }
 

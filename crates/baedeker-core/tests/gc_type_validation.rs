@@ -194,3 +194,101 @@ fn accept_valid_function_subtype() {
            (type (sub $s (func (param i32) (result i32)))))",
     );
 }
+
+#[test]
+fn reject_cyclic_in_group_supertype_without_crashing() {
+    // Reviewer reproduction: type 2 declares supertype 1 (valid), type 3
+    // declares supertype 3 (itself). The reference rejects the bad index
+    // before any comptype matching can traverse it; without the explicit
+    // bounds pass, member 2's matching walks the self-referential supertype
+    // chain and aborts with a stack overflow.
+    let type_data = [
+        0x03, // three types
+        0x50, 0x00, 0x5F, 0x00, // (sub (struct))
+        0x50, 0x00, 0x5F, 0x01, 0x63, 0x00, 0x00, // (sub (struct (ref null 0)))
+        0x4E, 0x02, // rec group of two
+        0x50, 0x01, 0x01, 0x5F, 0x01, 0x63, 0x03, 0x00, // (sub 1 (struct (ref null 3)))
+        0x50, 0x01, 0x03, 0x5F, 0x00, // (sub 3 (struct)) -- self supertype
+    ];
+    let bytes = module_with_type_section(&type_data);
+    let module = Module::decode(&bytes).expect("cyclic group must decode");
+    let error = module
+        .validate()
+        .expect_err("self-referential supertype must be rejected");
+    let rendered = format!("{:?}", error.kind);
+    assert!(
+        rendered.contains("ForwardUseOfTypeInSubType"),
+        "expected ForwardUseOfTypeInSubType, got {rendered}"
+    );
+}
+
+#[test]
+fn accept_valid_in_group_supertype_group() {
+    // Reviewer reproduction: (rec (sub (func)) (sub final 0 (func))). The
+    // second member’s supertype is the first member of the same group, which
+    // is legal because 0 < group_start + member_index.
+    let type_data = [
+        0x01, 0x4E, 0x02, 0x50, 0x00, 0x60, 0x00, 0x00, 0x4F, 0x01, 0x00, 0x60, 0x00, 0x00,
+    ];
+    let bytes = module_with_type_section(&type_data);
+    let module = Module::decode(&bytes).expect("in-group supertype group must decode");
+    module
+        .validate()
+        .expect("in-group supertype group must validate");
+}
+
+#[test]
+fn accept_in_group_returned_subtype_for_expected_supertype() {
+    // Reviewer reproduction (context-aware matching): returning `(ref null
+    // $sub)` where `(ref null $super)` is expected must validate.
+    assert_valid(
+        "(module
+           (type $super (sub (func (result i32))))
+           (type $sub (sub $super (func (result i32))))
+           (func (result (ref null $super)) (ref.null $sub)))",
+    );
+}
+
+#[test]
+fn reject_struct_ref_as_funcref() {
+    // Reviewer reproduction (context-aware matching): a struct reference is
+    // not a function reference. The old context-free rule accepted every
+    // `Type(_) <: Func` unconditionally.
+    assert_invalid(
+        "(module
+           (type $s (struct))
+           (func (result funcref) (ref.null $s)))",
+        "FunctionResultTypeMismatch",
+    );
+}
+
+#[test]
+fn reject_struct_returning_call_as_funcref() {
+    // A function that returns a struct reference is not usable where a
+    // `funcref` result is expected at a call boundary.
+    assert_invalid(
+        "(module
+           (type $s (struct))
+           (func $f (result (ref null $s)) (ref.null $s))
+           (func (result funcref) (call $f)))",
+        "FunctionResultTypeMismatch",
+    );
+}
+
+#[test]
+fn accept_call_ref_with_in_group_subtype_of_expected_supertype() {
+    // Context-aware matching at an instruction boundary: `call_ref $super`
+    // accepts a `(ref null $sub)` operand when `$sub` declares `$super` as an
+    // in-group supertype. This exercises `deftype_matches` walking a relative
+    // (in-group) declared-supertype reference.
+    assert_valid(
+        "(module
+           (rec
+             (type $super (sub (func (param i32))))
+             (type $sub (sub $super (func (param i32)))))
+           (func (param (ref null $sub))
+             i32.const 0
+             local.get 0
+             call_ref $super))",
+    );
+}

@@ -83,8 +83,18 @@ enum RefComp {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RefMember {
     is_final: bool,
-    supers: Vec<RefDeftype>,
+    supers: Vec<RefSuper>,
     comp: RefComp,
+}
+
+/// A declared supertype in a rolled group: an in-group reference is relative
+/// (`Rec`), an external reference is the closed deftype (`Def`). This mirrors
+/// the spec's rolled form, where in-group references stay relative and only
+/// external references are inlined.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RefSuper {
+    Rec(u32),
+    Def(Box<RefDeftype>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -244,7 +254,13 @@ fn closed_ref_member(
         supers: sub
             .supertypes
             .iter()
-            .map(|&s| closed_deftype(module, spans, s))
+            .map(|&s| {
+                if s >= start && s < start + len {
+                    RefSuper::Rec(s - start)
+                } else {
+                    RefSuper::Def(Box::new(closed_deftype(module, spans, s)))
+                }
+            })
             .collect(),
         comp: closed_ref_comp(module, spans, &sub.comp, start, len),
     }
@@ -379,34 +395,73 @@ fn canon_agrees_with_reference_closed_forms() {
             module
                 .validate()
                 .unwrap_or_else(|error| panic!("{}: validation failed: {error}", path.display()));
-            let spans = group_spans(&module);
-            let n = module.types().len();
-            for i in 0..n {
-                for j in 0..n {
-                    let canon = equivalent(&module, TypeIdx(i as u32), TypeIdx(j as u32));
-                    let reference = reference_equal(&module, &spans, i as u32, j as u32);
-                    assert_eq!(
-                        canon,
-                        reference,
-                        "{}: canon mismatch for types {i} and {j}",
-                        path.display()
-                    );
-                }
-            }
-            // The canonical representative is the lowest index in its class.
-            for i in 0..n {
-                let canonical = module
-                    .type_canon
-                    .canonical_id(TypeIdx(i as u32))
-                    .expect("in-range type has a canonical id");
-                assert!(canonical as usize <= i);
-                assert_eq!(
-                    module.type_canon.canonical_id(TypeIdx(canonical)),
-                    Some(canonical)
-                );
-            }
+            sweep_canon_against_reference(&module, &path.display().to_string());
         }
     }
+}
+
+/// Compare the production canonicalizer against the independent closed-form
+/// reference for every pair of type indices, and check that each canonical
+/// class representative is the lowest index in its class.
+fn sweep_canon_against_reference(module: &Module<'_>, label: &str) {
+    let spans = group_spans(module);
+    let n = module.types().len();
+    for i in 0..n {
+        for j in 0..n {
+            let canon = equivalent(module, TypeIdx(i as u32), TypeIdx(j as u32));
+            let reference = reference_equal(module, &spans, i as u32, j as u32);
+            assert_eq!(
+                canon, reference,
+                "{label}: canon mismatch for types {i} and {j}"
+            );
+        }
+    }
+    for i in 0..n {
+        let canonical = module
+            .type_canon
+            .canonical_id(TypeIdx(i as u32))
+            .expect("in-range type has a canonical id");
+        assert!(canonical as usize <= i);
+        assert_eq!(
+            module.type_canon.canonical_id(TypeIdx(canonical)),
+            Some(canonical)
+        );
+    }
+}
+
+#[test]
+fn canon_agrees_with_reference_for_in_group_supertypes() {
+    // Groups whose members declare in-group supertypes (and one external
+    // supertype). The rolled form keeps an in-group supertype as a relative
+    // reference and inlines an external one, so the group key must encode the
+    // relative position, not merely the target's comptype.
+    let module = decode(
+        "(module
+           (type $base (sub (struct)))
+           (rec
+             (type $a (sub $base (struct)))
+             (type $b (sub $a (struct)))
+             (type $c (sub $b (struct))))
+           (rec
+             (type $d (sub $base (struct)))
+             (type $e (sub $d (struct)))
+             (type $f (sub $e (struct))))
+           (rec
+             (type $g (sub $base (struct)))
+             (type $h (sub $g (struct)))
+             (type $i (sub $g (struct))))) ",
+    );
+    // Group [a,b,c] and group [d,e,f] are structurally identical; group
+    // [g,h,i] differs because its members h and i both point at relative
+    // supertype 0. `$base` stays a distinct singleton class.
+    assert!(equivalent(&module, TypeIdx(1), TypeIdx(4)));
+    assert!(equivalent(&module, TypeIdx(2), TypeIdx(5)));
+    assert!(equivalent(&module, TypeIdx(3), TypeIdx(6)));
+    assert!(!equivalent(&module, TypeIdx(0), TypeIdx(1)));
+    assert!(!equivalent(&module, TypeIdx(1), TypeIdx(7)));
+    assert!(!equivalent(&module, TypeIdx(3), TypeIdx(9)));
+    assert!(!equivalent(&module, TypeIdx(8), TypeIdx(9)));
+    sweep_canon_against_reference(&module, "in-group supertypes");
 }
 
 #[test]

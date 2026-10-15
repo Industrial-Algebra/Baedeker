@@ -10,6 +10,7 @@ use baedeker_core::aot::{deserialize, serialize};
 use baedeker_core::binary::module::Module;
 use baedeker_core::lower::lower_module;
 use baedeker_core::runtime::{Store, Value, execute_export};
+use baedeker_core::types::{HeapType, RefType, ValType};
 
 fn lower_fixture(bytes: &[u8]) -> Option<baedeker_core::lower::RegModule> {
     let module = Module::decode(bytes).ok()?;
@@ -45,6 +46,51 @@ fn roundtrip_all_lowerable_fixtures() {
     // A meaningful fraction of the corpus must actually roundtrip.
     assert!(lowered > 150, "only {lowered}/{total} fixtures lowered");
     println!("roundtripped {lowered}/{total} fixtures");
+}
+
+#[test]
+fn roundtrip_all_gc_heap_types_in_global_types() {
+    // Every new GC heap type in a serialized ref position: a global's value
+    // type is carried in the artifact. RegModule value types must roundtrip
+    // each new `HeapType` variant, not just the legacy func/extern/exn ones.
+    let wat = r#"
+(module
+  (global (ref null any) (ref.null any))
+  (global (ref null none) (ref.null none))
+  (global (ref null eq) (ref.null eq))
+  (global (ref null i31) (ref.null i31))
+  (global (ref null struct) (ref.null struct))
+  (global (ref null array) (ref.null array))
+  (global (ref null nofunc) (ref.null nofunc))
+  (global (ref null noextern) (ref.null noextern))
+  (global (ref null noexn) (ref.null noexn))
+)"#;
+    let buf = wast::parser::ParseBuffer::new(wat).unwrap();
+    let mut parsed = wast::parser::parse::<wast::Wat<'_>>(&buf).unwrap();
+    let bytes = parsed.encode().unwrap();
+    let module = lower_fixture(&bytes).expect("globals with GC heap types lower");
+
+    let expected = [
+        HeapType::Any,
+        HeapType::None,
+        HeapType::Eq,
+        HeapType::I31,
+        HeapType::Struct,
+        HeapType::Array,
+        HeapType::NoFunc,
+        HeapType::NoExtern,
+        HeapType::NoExn,
+    ];
+    assert_eq!(module.globals.len(), expected.len());
+    for (global, heap) in module.globals.iter().zip(expected) {
+        assert_eq!(global.ty, ValType::Ref(RefType::from_parts(true, heap)));
+    }
+
+    let restored = deserialize(&serialize(&module)).expect("artifact roundtrips");
+    assert_eq!(restored, module, "roundtrip changed GC heap types");
+    for (global, heap) in restored.globals.iter().zip(expected) {
+        assert_eq!(global.ty, ValType::Ref(RefType::from_parts(true, heap)));
+    }
 }
 
 #[test]
