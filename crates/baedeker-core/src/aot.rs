@@ -142,10 +142,12 @@ mod tests {
         // v1 predates the v128 const-expr RegConstInstr renumbering; v2
         // the EH regions/tag fields; v3 imported_tags; v4 rec-group
         // provenance; v5 the u64/is64 limits and memarg offsets; v6 the
-        // kind-preserving RegModule.type_defs section (GC type grammar);
-        // v7 the GC reference/aggregate instruction forms; v8 the
-        // ImportedTag.type_idx used to recompute the tag's own referenced
-        // function type's closed form at link time.
+        // kind-preserving RegModule.type_defs section + kind-aware
+        // ImportedTag.rec (GC type grammar, U1); v7 the ImportedTag
+        // own-type closed-identity recomputation groundwork (superseded
+        // same-unit); v8 the ImportedTag.type_idx field used to
+        // recompute the tag's own referenced function type's closed
+        // form at link time (GC U1).
         // The ladder covers every predecessor of the current version.
         for stale in 1..AOT_FORMAT_VERSION {
             let mut old_artifact = artifact.clone();
