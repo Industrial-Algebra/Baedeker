@@ -283,6 +283,7 @@ fn tag_struct_param_mismatches_func_param() {
         binding.ty.clone(),
         binding.expanded_params.clone(),
         RecProvenance::Bare,
+        binding.closed.clone(),
     );
     assert_import_type_mismatch(group.try_add(&b, &imports));
 }
@@ -316,6 +317,7 @@ fn identical_struct_tag_params_link_across_modules() {
         binding.ty.clone(),
         binding.expanded_params.clone(),
         RecProvenance::Bare,
+        binding.closed.clone(),
     );
     group
         .try_add(&b, &imports)
@@ -350,6 +352,7 @@ fn different_struct_tag_params_do_not_link() {
         binding.ty.clone(),
         binding.expanded_params.clone(),
         RecProvenance::Bare,
+        binding.closed.clone(),
     );
     assert_import_type_mismatch(group.try_add(&b, &imports));
 }
@@ -386,6 +389,7 @@ fn tag_non_final_param_mismatches_final() {
         binding.ty.clone(),
         binding.expanded_params.clone(),
         binding.rec.clone(),
+        binding.closed.clone(),
     );
     assert_import_type_mismatch(group.try_add(&b, &imports));
 }
@@ -422,6 +426,7 @@ fn tag_non_final_param_mismatches_final_after_consumer_aot() {
         binding.ty.clone(),
         binding.expanded_params.clone(),
         binding.rec.clone(),
+        binding.closed.clone(),
     );
     assert_import_type_mismatch(group.try_add(&b, &imports));
 }
@@ -453,6 +458,7 @@ fn identical_non_final_struct_tag_params_link() {
         binding.ty.clone(),
         binding.expanded_params.clone(),
         binding.rec.clone(),
+        binding.closed.clone(),
     );
     group
         .try_add(&b, &imports)
@@ -488,6 +494,79 @@ fn tag_param_differing_supertypes_mismatch() {
         binding.ty.clone(),
         binding.expanded_params.clone(),
         binding.rec.clone(),
+        binding.closed.clone(),
     );
     assert_import_type_mismatch(group.try_add(&b, &imports));
+}
+
+// ── Residual (r3b follow-up): tag's OWN referenced function type ─────
+
+/// Provider tag declared over an explicit NON-FINAL `(sub (func))` own type
+/// must not link against a consumer tag declared over a plain FINAL
+/// `(func)`. The pin compares complete closed forms, so the tag's OWN
+/// referenced function type participates; synthesizing `Final/[]` from the
+/// params conflates the two.
+#[test]
+fn tag_non_final_own_type_mismatches_final() {
+    let a = Rc::new(wat_module(
+        r#"
+(module
+  (type (sub (func)))
+  (tag (export "e") (type 0)))"#,
+    ));
+    let b = Rc::new(wat_module(
+        r#"
+(module
+  (type (func))
+  (import "a" "e" (tag (type 0))))"#,
+    ));
+
+    let mut group = Group::new();
+    let a_store = group.add(&a, &Imports::new());
+    let binding = tag_export_binding(&a_store.borrow(), &a, "e").expect("tag export binding");
+    let imports = Imports::new().tag(
+        "a",
+        "e",
+        binding.identity,
+        binding.ty.clone(),
+        binding.expanded_params.clone(),
+        binding.rec.clone(),
+        binding.closed.clone(),
+    );
+    assert_import_type_mismatch(group.try_add(&b, &imports));
+}
+
+/// Positive control: two identically declared non-final `(sub (func))` own
+/// types still link — only genuinely synthesized bare tag types (Final/[])
+/// may use the synthesized form.
+#[test]
+fn identical_non_final_own_type_tags_link() {
+    let a = Rc::new(wat_module(
+        r#"
+(module
+  (type (sub (func)))
+  (tag (export "e") (type 0)))"#,
+    ));
+    let b = Rc::new(wat_module(
+        r#"
+(module
+  (type (sub (func)))
+  (import "a" "e" (tag (type 0))))"#,
+    ));
+
+    let mut group = Group::new();
+    let a_store = group.add(&a, &Imports::new());
+    let binding = tag_export_binding(&a_store.borrow(), &a, "e").expect("tag export binding");
+    let imports = Imports::new().tag(
+        "a",
+        "e",
+        binding.identity,
+        binding.ty.clone(),
+        binding.expanded_params.clone(),
+        binding.rec.clone(),
+        binding.closed.clone(),
+    );
+    group
+        .try_add(&b, &imports)
+        .expect("identically declared non-final own-type tags must link");
 }

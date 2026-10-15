@@ -24,7 +24,7 @@ pub const AOT_MAGIC: [u8; 7] = *b"BDKAOT1";
 const ENVELOPE_LEN: usize = AOT_MAGIC.len() + 4;
 
 /// Current artifact format version. Bump on any IR layout change.
-pub const AOT_FORMAT_VERSION: u32 = 7;
+pub const AOT_FORMAT_VERSION: u32 = 8;
 
 /// Errors deserializing an AOT artifact.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,7 +142,10 @@ mod tests {
         // v1 predates the v128 const-expr RegConstInstr renumbering; v2
         // the EH regions/tag fields; v3 imported_tags; v4 rec-group
         // provenance; v5 the u64/is64 limits and memarg offsets; v6 the
-        // kind-preserving RegModule.type_defs section (GC type grammar).
+        // kind-preserving RegModule.type_defs section (GC type grammar);
+        // v7 the GC reference/aggregate instruction forms; v8 the
+        // ImportedTag.type_idx used to recompute the tag's own referenced
+        // function type's closed form at link time.
         // The ladder covers every predecessor of the current version.
         for stale in 1..AOT_FORMAT_VERSION {
             let mut old_artifact = artifact.clone();

@@ -222,6 +222,7 @@ fn instantiate(
             binding.ty.clone(),
             binding.expanded_params.clone(),
             binding.rec.clone(),
+            binding.closed.clone(),
         );
     }
 

@@ -229,6 +229,12 @@ pub struct ImportedTag {
     pub name: String,
     /// The tag's function type (params; results are empty by validation).
     pub ty: FuncType,
+    /// The type index the import was declared with. Retained so link-time
+    /// comparison can recompute the tag's OWN referenced function type's
+    /// complete closed form (finality + supertypes + comptype) from the
+    /// serialized type section exactly as the parameter fix does — a
+    /// property the params-only `FuncType` cannot express.
+    pub type_idx: TypeIdx,
     /// Rec-group provenance of the tag's type: the group's member types
     /// (structural signature) and the tag type's position in the group.
     /// `None` for bare (non-rec) types. Two tag types are link-compatible
@@ -1881,6 +1887,7 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
                 module: import.module.clone(),
                 name: import.name.clone(),
                 ty: ty.clone(),
+                type_idx,
                 rec: rec_provenance(module, type_idx),
             }),
             _ => None,

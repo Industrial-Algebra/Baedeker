@@ -169,6 +169,7 @@ impl Imports {
 
     /// Provide an imported tag `(module, name)` bound to the defining
     /// instance's tag identity (from that instance's `tag_binding`).
+    #[allow(clippy::too_many_arguments)]
     pub fn tag(
         mut self,
         module: &str,
@@ -177,6 +178,7 @@ impl Imports {
         ty: FuncType,
         expanded_params: Option<Vec<ExpandedVal>>,
         rec: RecProvenance,
+        closed: Option<ClosedDefinedType>,
     ) -> Self {
         self.tags.push(TagProvider {
             module: module.into(),
@@ -185,6 +187,7 @@ impl Imports {
             ty,
             expanded_params,
             rec,
+            closed,
         });
         self
     }
@@ -230,6 +233,11 @@ struct TagProvider {
     ty: FuncType,
     expanded_params: Option<Vec<ExpandedVal>>,
     rec: RecProvenance,
+    /// The tag's OWN referenced function type's complete closed form
+    /// (finality + supertypes + comptype), computed by the defining module.
+    /// Compared at link time so an explicit non-final `(sub (func))` tag
+    /// type does not conflate with a synthesized plain final `(func)`.
+    closed: Option<ClosedDefinedType>,
 }
 
 /// The null value for a table's element type.
@@ -729,6 +737,13 @@ pub struct TagBinding {
     pub expanded_params: Option<Vec<ExpandedVal>>,
     /// Rec-group provenance of the tag type itself.
     pub rec: RecProvenance,
+    /// The tag's OWN referenced function type's complete closed form
+    /// (finality + supertypes + comptype), recomputed from the defining
+    /// module's serialized type section. `None` when expansion fails (an
+    /// unknown index or an external cycle, which a validated module cannot
+    /// produce). This is what distinguishes an explicit non-final
+    /// `(sub (func))` tag type from a synthesized final `(func)`.
+    pub closed: Option<ClosedDefinedType>,
 }
 
 /// Mutable state of an instantiated module.
@@ -1084,6 +1099,11 @@ impl Store {
                 .iter()
                 .map(|v| expand_val(module_type_defs, module_recs, v))
                 .collect();
+            // The tag's OWN referenced function type: recompute its complete
+            // closed form from the consumer's type section so finality and
+            // declared supertypes participate (residual r3b follow-up).
+            let declared_closed =
+                ClosedDefinedType::of(module_type_defs, module_recs, declared.type_idx);
             let declared_rec = rec_provenance(&declared.rec);
             // Bare types are implicit SINGLETON rec groups in the
             // reference interpreter's canonicalization: a bare type and
@@ -1118,6 +1138,9 @@ impl Store {
                     sig_a == sig_b && pos_a == pos_b
                 }
                 _ => false,
+            } && match (&provider.closed, &declared_closed) {
+                (Some(a), Some(b)) => a == b,
+                _ => false,
             };
             if !compatible {
                 return Err(import_type_mismatch(&declared.module, &declared.name));
@@ -1127,6 +1150,7 @@ impl Store {
                 ty: provider.ty.clone(),
                 expanded_params: provider.expanded_params.clone(),
                 rec: provider.rec.clone(),
+                closed: provider.closed.clone(),
             });
         }
         let imported_tag_count = module.imported_tags.len() as u32;
@@ -1136,6 +1160,7 @@ impl Store {
                 .iter()
                 .map(|v| expand_val(module_type_defs, module_recs, v))
                 .collect();
+            let closed = ClosedDefinedType::of(module_type_defs, module_recs, *type_idx);
             let raw_rec = module
                 .rec_groups
                 .iter()
@@ -1152,6 +1177,7 @@ impl Store {
                 ty: module_types[type_idx.0 as usize].clone(),
                 expanded_params,
                 rec,
+                closed,
             });
         }
 
