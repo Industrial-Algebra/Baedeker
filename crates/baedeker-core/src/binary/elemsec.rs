@@ -351,11 +351,11 @@ mod tests {
 
     #[test]
     fn reject_unknown_reference_type() {
-        let section = raw_element_section(&[0x01, 0x05, 0x6E, 0x00]);
+        let section = raw_element_section(&[0x01, 0x05, 0x68, 0x00]);
         let err = parse_element_section(&section).unwrap_err();
         assert!(matches!(
             err.kind,
-            DecodeErrorKind::UnknownRefType { byte: 0x6E }
+            DecodeErrorKind::UnknownRefType { byte: 0x68 }
         ));
     }
 

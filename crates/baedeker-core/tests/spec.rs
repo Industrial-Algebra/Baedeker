@@ -116,6 +116,9 @@ fn validation_kind_name(kind: &ValidationErrorKind) -> &'static str {
         ValidationErrorKind::MemorySizeOutOfRange => "MemorySizeOutOfRange",
         ValidationErrorKind::MemoryMinExceedsMax => "MemoryMinExceedsMax",
         ValidationErrorKind::TableTypeMismatch => "TableTypeMismatch",
+        ValidationErrorKind::ForwardUseOfTypeInSubType { .. } => "ForwardUseOfTypeInSubType",
+        ValidationErrorKind::FinalSupertype { .. } => "FinalSupertype",
+        ValidationErrorKind::SubtypeComptypeMismatch { .. } => "SubtypeComptypeMismatch",
     }
 }
 

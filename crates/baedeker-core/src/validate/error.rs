@@ -185,6 +185,21 @@ pub enum ValidationErrorKind {
     UnknownTag {
         idx: u32,
     },
+    /// A subtype declared a supertype at or after its own rec group start.
+    ForwardUseOfTypeInSubType {
+        sub: u32,
+        supertype: u32,
+    },
+    /// A subtype declared a supertype that is itself final.
+    FinalSupertype {
+        sub: u32,
+        supertype: u32,
+    },
+    /// A subtype's composite type does not match its declared supertype's.
+    SubtypeComptypeMismatch {
+        sub: u32,
+        supertype: u32,
+    },
 }
 
 impl fmt::Display for ValidationError {
@@ -456,6 +471,18 @@ impl fmt::Display for ValidationErrorKind {
             }
             ValidationErrorKind::UnknownTag { idx } => {
                 write!(f, "unknown tag {idx}")
+            }
+            ValidationErrorKind::ForwardUseOfTypeInSubType { sub, supertype } => {
+                write!(
+                    f,
+                    "forward use of type {supertype} in sub type {sub} definition"
+                )
+            }
+            ValidationErrorKind::FinalSupertype { sub, supertype } => {
+                write!(f, "sub type {sub} has final super type {supertype}")
+            }
+            ValidationErrorKind::SubtypeComptypeMismatch { sub, supertype } => {
+                write!(f, "sub type {sub} does not match super type {supertype}")
             }
         }
     }

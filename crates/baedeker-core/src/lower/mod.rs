@@ -1759,7 +1759,13 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
     for (defined_idx, (type_idx, code)) in module.functions().iter().zip(module.codes()).enumerate()
     {
         let func_idx = FuncIdx(imported_func_count + defined_idx as u32);
-        let ty = &module.types()[type_idx.0 as usize];
+        let ty = module.func_type(*type_idx).ok_or(LowerError {
+            offset: ByteOffset(0),
+            function: None,
+            kind: LowerErrorKind::InvalidType {
+                type_idx: type_idx.0,
+            },
+        })?;
         funcs.push(lower_function(func_idx, *type_idx, ty, code, &tables)?);
     }
 
@@ -1814,10 +1820,10 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
         .imports()
         .iter()
         .filter_map(|import| match import.desc {
-            ImportDesc::Func(type_idx) => Some(RegImport {
+            ImportDesc::Func(type_idx) => module.func_type(type_idx).map(|ty| RegImport {
                 module: import.module.clone(),
                 name: import.name.clone(),
-                ty: module.types()[type_idx.0 as usize].clone(),
+                ty: ty.clone(),
             }),
             _ => None,
         })
@@ -1866,10 +1872,10 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
         .imports()
         .iter()
         .filter_map(|import| match import.desc {
-            ImportDesc::Tag(type_idx) => Some(ImportedTag {
+            ImportDesc::Tag(type_idx) => module.func_type(type_idx).map(|ty| ImportedTag {
                 module: import.module.clone(),
                 name: import.name.clone(),
-                ty: module.types()[type_idx.0 as usize].clone(),
+                ty: ty.clone(),
                 rec: rec_provenance(module, type_idx),
             }),
             _ => None,
@@ -1879,7 +1885,7 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
     let start = module.start();
 
     let tables = module.tables().to_vec();
-    let types = module.types().to_vec();
+    let types = reg_type_table(module);
 
     let mut elements = Vec::with_capacity(module.elements().len());
     for segment in module.elements() {
@@ -2044,14 +2050,35 @@ pub(crate) fn lower_const_expr(
 fn func_type_table<'a, 'm>(module: &'a Module<'m>) -> Vec<&'a FuncType> {
     let mut table = Vec::new();
     for import in module.imports() {
-        if let ImportDesc::Func(type_idx) = import.desc {
-            table.push(&module.types()[type_idx.0 as usize]);
+        if let ImportDesc::Func(type_idx) = import.desc
+            && let Some(func) = module.func_type(type_idx)
+        {
+            table.push(func);
         }
     }
     for type_idx in module.functions() {
-        table.push(&module.types()[type_idx.0 as usize]);
+        if let Some(func) = module.func_type(*type_idx) {
+            table.push(func);
+        }
     }
     table
+}
+
+/// Function types in type-index order, for the register IR's structural
+/// `call_indirect` checks. Non-function entries are placeholders: validation
+/// ensures every `call_indirect`/`ref.func` type index points at a function
+/// type, so the placeholder is never observed for a valid module.
+fn reg_type_table(module: &Module<'_>) -> Vec<FuncType> {
+    module
+        .types()
+        .iter()
+        .map(|sub| {
+            sub.as_func().cloned().unwrap_or(FuncType {
+                params: Vec::new(),
+                results: Vec::new(),
+            })
+        })
+        .collect()
 }
 
 /// Resolve the value type of every global in the index space (imported
@@ -2086,7 +2113,15 @@ fn rec_provenance(module: &Module<'_>, type_idx: TypeIdx) -> Option<(Vec<FuncTyp
         .iter()
         .find(|&&(start, len)| idx >= start && idx < start + len)?;
     let types = module.types();
-    let members = types[start as usize..(start + len) as usize].to_vec();
+    let members: Vec<FuncType> = types[start as usize..(start + len) as usize]
+        .iter()
+        .map(|sub| {
+            sub.as_func().cloned().unwrap_or(FuncType {
+                params: Vec::new(),
+                results: Vec::new(),
+            })
+        })
+        .collect();
     Some((members, idx - start))
 }
 
@@ -2288,6 +2323,15 @@ fn ref_compatible(found: ValType, expected: ValType) -> bool {
                 crate::types::HeapType::Func | crate::types::HeapType::Type(_) => 0,
                 crate::types::HeapType::Extern => 1,
                 crate::types::HeapType::Exn => 2,
+                crate::types::HeapType::NoFunc => 0,
+                crate::types::HeapType::NoExtern => 1,
+                crate::types::HeapType::NoExn => 2,
+                crate::types::HeapType::Any
+                | crate::types::HeapType::None
+                | crate::types::HeapType::Eq
+                | crate::types::HeapType::I31
+                | crate::types::HeapType::Struct
+                | crate::types::HeapType::Array => 3,
             },
         }
     }
@@ -2305,7 +2349,7 @@ fn ref_compatible(found: ValType, expected: ValType) -> bool {
 struct ModuleTables<'a> {
     func_types: &'a [&'a FuncType],
     global_types: &'a [ValType],
-    types: &'a [FuncType],
+    types: &'a [crate::types::SubType],
     table_elem_types: &'a [crate::types::RefType],
     /// Address index type (i64 vs i32) of every memory, imported first.
     memory_addr_types: &'a [NumType],
@@ -2314,6 +2358,13 @@ struct ModuleTables<'a> {
     /// Type index of every tag in the index space (imported first), so
     /// `throw`/`try_table` lowering can type tag payloads.
     tag_types: &'a [TypeIdx],
+}
+
+impl ModuleTables<'_> {
+    /// The function signature at `idx`, if that type index is a func type.
+    fn func_type(&self, idx: usize) -> Option<&FuncType> {
+        self.types.get(idx).and_then(crate::types::SubType::as_func)
+    }
 }
 
 /// The numeric type used to address a memory/table from its declared limits.
@@ -3279,7 +3330,7 @@ impl<'b> FuncBuilder<'b> {
                 type_idx,
                 table_idx,
             } => {
-                let Some(ty) = self.tables.types.get(type_idx.0 as usize) else {
+                let Some(ty) = self.tables.func_type(type_idx.0 as usize) else {
                     return Err(LowerError {
                         offset,
                         function: Some(self.func_idx),
@@ -3308,7 +3359,7 @@ impl<'b> FuncBuilder<'b> {
                 self.set_unreachable();
             }
             Instr::ReturnCallRef(type_idx) => {
-                let Some(ty) = self.tables.types.get(type_idx.0 as usize) else {
+                let Some(ty) = self.tables.func_type(type_idx.0 as usize) else {
                     return Err(LowerError {
                         offset,
                         function: Some(self.func_idx),
@@ -3333,7 +3384,7 @@ impl<'b> FuncBuilder<'b> {
                 self.set_unreachable();
             }
             Instr::CallRef(type_idx) => {
-                let Some(ty) = self.tables.types.get(type_idx.0 as usize) else {
+                let Some(ty) = self.tables.func_type(type_idx.0 as usize) else {
                     return Err(LowerError {
                         offset,
                         function: Some(self.func_idx),
@@ -3489,7 +3540,7 @@ impl<'b> FuncBuilder<'b> {
                 type_idx,
                 table_idx,
             } => {
-                let Some(ty) = self.tables.types.get(type_idx.0 as usize) else {
+                let Some(ty) = self.tables.func_type(type_idx.0 as usize) else {
                     return Err(LowerError {
                         offset,
                         function: Some(self.func_idx),
@@ -4452,7 +4503,7 @@ impl<'b> FuncBuilder<'b> {
             BlockType::Empty => Ok((Vec::new(), Vec::new())),
             BlockType::Val(ty) => Ok((Vec::new(), alloc::vec![ty])),
             BlockType::TypeIdx(idx) => {
-                let ty = self.tables.types.get(idx as usize).ok_or(LowerError {
+                let ty = self.tables.func_type(idx as usize).ok_or(LowerError {
                     offset,
                     function: Some(self.func_idx),
                     kind: LowerErrorKind::InvalidType { type_idx: idx },
@@ -4475,8 +4526,7 @@ impl<'b> FuncBuilder<'b> {
             })?;
         let ty = self
             .tables
-            .types
-            .get(type_idx.0 as usize)
+            .func_type(type_idx.0 as usize)
             .ok_or(LowerError {
                 offset,
                 function: Some(self.func_idx),

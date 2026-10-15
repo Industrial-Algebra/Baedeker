@@ -6,12 +6,12 @@
 //! These types mirror the WASM spec's abstract syntax for types.
 //! See [Spec §2.3](https://webassembly.github.io/spec/core/syntax/types.html).
 
-use alloc::{string::String, vec::Vec};
+use alloc::{collections::BTreeMap, string::String, vec, vec::Vec};
 
 /// Newtype index wrappers to prevent mixing up different index spaces.
 macro_rules! define_idx {
     ($name:ident) => {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
         #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
         pub struct $name(pub u32);
     };
@@ -30,7 +30,7 @@ define_idx!(TagIdx);
 
 /// Number types.
 /// See [Spec §2.3.1](https://webassembly.github.io/spec/core/syntax/types.html#number-types).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum NumType {
     I32,
@@ -41,7 +41,7 @@ pub enum NumType {
 
 /// Vector types.
 /// See [Spec §2.3.2](https://webassembly.github.io/spec/core/syntax/types.html#vector-types).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum VecType {
     V128,
@@ -49,7 +49,18 @@ pub enum VecType {
 
 /// Heap types used by reference types.
 /// See [Spec §2.3.3](https://webassembly.github.io/spec/core/syntax/types.html#reference-types).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// The abstract hierarchy is grouped by side:
+/// - any-side: `Any`, `Eq`, `I31`, `Struct`, `Array`, `None`
+/// - func-side: `Func`, `NoFunc`
+/// - extern-side: `Extern`, `NoExtern`
+/// - exn-side: `Exn`, `NoExn`
+///
+/// `Type` carries a concrete (defined) type index. NOTE: the existing
+/// variants `Func`, `Extern`, `Exn`, `Type` keep their declaration order so
+/// that serialized artifacts (AOT [`crate::lower::RegModule`]) are
+/// byte-compatible; new variants are appended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum HeapType {
     Func,
@@ -58,22 +69,105 @@ pub enum HeapType {
     /// Part of the exception-handling proposal (wasm 3.0).
     Exn,
     Type(TypeIdx),
+    /// `any`: the top of the internal (GC) hierarchy.
+    Any,
+    /// `none`: the bottom of the internal (GC) hierarchy.
+    None,
+    /// `eq`: the equality-comparable sub-hierarchy of `any`.
+    Eq,
+    /// `i31`: 31-bit immediate integers.
+    I31,
+    /// `struct`: struct references.
+    Struct,
+    /// `array`: array references.
+    Array,
+    /// `nofunc`: the bottom of the func hierarchy.
+    NoFunc,
+    /// `noextern`: the bottom of the extern hierarchy.
+    NoExtern,
+    /// `noexn`: the bottom of the exn hierarchy.
+    NoExn,
 }
 
 impl HeapType {
+    /// Context-free portion of the reference heap-type lattice
+    /// (`valid/match.ml:77-104`). Concrete-to-abstract matching that needs
+    /// the module's type table is handled by the validator's
+    /// module-aware lattice.
     pub fn is_subtype_of(self, expected: Self) -> bool {
+        use HeapType::*;
+        if self == expected {
+            return true;
+        }
         match (self, expected) {
-            (found, expected) if found == expected => true,
-            (HeapType::Exn, HeapType::Exn) => true,
-            (HeapType::Type(_), HeapType::Func) => true,
+            // Internal hierarchy: i31/struct/array <= eq <= any.
+            (Eq | Struct | Array | I31, Any) => true,
+            (I31 | Struct | Array, Eq) => true,
+            // bottoms match every non-bottom of their hierarchy top.
+            (None, Any | Eq | Struct | Array | I31) => true,
+            (NoFunc, Func) => true,
+            (NoExtern, Extern) => true,
+            (NoExn, Exn) => true,
+            // Concrete function types are function references.
+            (Type(_), Func) => true,
             _ => false,
+        }
+    }
+}
+
+/// Storage types: unpacked value types, or packed 8/16-bit integers.
+/// See [Spec §2.3.3](https://webassembly.github.io/spec/core/syntax/types.html#storage-types).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum StorageType {
+    Val(ValType),
+    I8,
+    I16,
+}
+
+/// A struct/array field: storage type plus mutability.
+/// See [Spec §2.3.3](https://webassembly.github.io/spec/core/syntax/types.html#field-types).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct FieldType {
+    pub mutable: bool,
+    pub storage: StorageType,
+}
+
+/// A composite type: struct, array, or function.
+/// See [Spec §2.3.3](https://webassembly.github.io/spec/core/syntax/types.html#composite-types).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum CompType {
+    Struct(Vec<FieldType>),
+    Array(FieldType),
+    Func(FuncType),
+}
+
+/// A single subtype definition: finality, declared supertypes, and the
+/// composite type.
+/// See [Spec §2.3.3](https://webassembly.github.io/spec/core/syntax/types.html#subtypes).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct SubType {
+    pub is_final: bool,
+    pub supertypes: Vec<u32>,
+    pub comp: CompType,
+}
+
+impl SubType {
+    /// The function signature of this type, if it is a function type.
+    pub fn as_func(&self) -> Option<&FuncType> {
+        match &self.comp {
+            CompType::Func(func) => Some(func),
+            _ => None,
         }
     }
 }
 
 /// Reference types.
 /// See [Spec §2.3.3](https://webassembly.github.io/spec/core/syntax/types.html#reference-types).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum RefType {
     FuncRef,
@@ -115,11 +209,8 @@ impl RefType {
         match heap {
             HeapType::Func => Self::func(nullable),
             HeapType::Extern => Self::extern_(nullable),
-            HeapType::Exn => Self::Typed {
-                nullable,
-                heap: HeapType::Exn,
-            },
             HeapType::Type(type_idx) => Self::concrete(nullable, type_idx),
+            heap => Self::Typed { nullable, heap },
         }
     }
 
@@ -165,7 +256,7 @@ impl RefType {
 
 /// Value types — the union of number, vector, and reference types.
 /// See [Spec §2.3.4](https://webassembly.github.io/spec/core/syntax/types.html#value-types).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ValType {
     Num(NumType),
@@ -202,7 +293,7 @@ impl ValType {
 
 /// Function types — parameter and result type vectors.
 /// See [Spec §2.3.5](https://webassembly.github.io/spec/core/syntax/types.html#function-types).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FuncType {
     pub params: Vec<ValType>,
@@ -398,6 +489,207 @@ pub enum BlockType {
     Val(ValType),
     /// Block has the function signature at the given type index (encoded as s33).
     TypeIdx(u32),
+}
+
+/// Hash-consed canonicalizer for the module's type section.
+///
+/// Two type indices are *canonically equivalent* exactly when their rolled
+/// closed forms are structurally equal (`syntax/types.ml` `roll_deftype` /
+/// OCaml structural equality). Each equivalence class is represented by the
+/// lowest type index in the class, so [`TypeCanon::canonical_id`] returns the
+/// earliest equivalent index (matching the validator's normalization).
+///
+/// A bare subtype is treated as a singleton `rec` group, which makes
+/// `bare ≡ rec (type ...)` automatic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeCanon {
+    canonical: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum CanonHeap {
+    Abstract(HeapType),
+    InGroup(u32),
+    External(u32),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum CanonVal {
+    Num(NumType),
+    Vec(VecType),
+    Ref(bool, CanonHeap),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum CanonStorage {
+    Val(CanonVal),
+    I8,
+    I16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct CanonField {
+    mutable: bool,
+    storage: CanonStorage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum CanonComp {
+    Struct(Vec<CanonField>),
+    Array(CanonField),
+    Func(Vec<CanonVal>, Vec<CanonVal>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct CanonMember {
+    is_final: bool,
+    supers: Vec<u32>,
+    comp: CanonComp,
+}
+
+impl TypeCanon {
+    /// Canonicalize a type section. `rec_groups` are the explicit `rec`
+    /// group spans (start, length); every other index is its own singleton
+    /// group.
+    pub fn new(types: &[SubType], rec_groups: &[(u32, u32)]) -> Self {
+        let mut group_len: BTreeMap<u32, u32> = BTreeMap::new();
+        for &(start, len) in rec_groups {
+            // Empty rec groups contribute no type indices, so they never
+            // establish a group span; the following bare type stays its own
+            // singleton group.
+            if len > 0 {
+                group_len.insert(start, len);
+            }
+        }
+
+        let mut canonical = vec![0u32; types.len()];
+        let mut group_ids: BTreeMap<Vec<CanonMember>, u32> = BTreeMap::new();
+        let mut member_classes: BTreeMap<(u32, u32), u32> = BTreeMap::new();
+        let mut next_group: u32 = 0;
+
+        let mut start: u32 = 0;
+        while (start as usize) < types.len() {
+            let len = group_len.get(&start).copied().unwrap_or(1);
+            let members: Vec<CanonMember> = (0..len)
+                .map(|k| canon_member(&types[(start + k) as usize], start, len, &canonical))
+                .collect();
+            let gid = match group_ids.get(&members) {
+                Some(&gid) => gid,
+                None => {
+                    let gid = next_group;
+                    next_group += 1;
+                    group_ids.insert(members, gid);
+                    gid
+                }
+            };
+            for k in 0..len {
+                let idx = start + k;
+                let class = *member_classes.entry((gid, k)).or_insert(idx);
+                canonical[idx as usize] = class;
+            }
+            start += len;
+        }
+
+        Self { canonical }
+    }
+
+    /// The canonical class representative for `idx`, if it exists.
+    pub fn canonical_id(&self, idx: TypeIdx) -> Option<u32> {
+        self.canonical.get(idx.0 as usize).copied()
+    }
+
+    /// Whether two type indices are canonically equivalent.
+    pub fn equivalent(&self, lhs: TypeIdx, rhs: TypeIdx) -> bool {
+        match (self.canonical_id(lhs), self.canonical_id(rhs)) {
+            (Some(lhs), Some(rhs)) => lhs == rhs,
+            _ => false,
+        }
+    }
+}
+
+fn canon_ref_token(idx: u32, start: u32, len: u32, canonical: &[u32]) -> u32 {
+    if idx >= start && idx < start + len {
+        // In-group: relative rec reference.
+        0x8000_0000 | (idx - start)
+    } else {
+        canonical.get(idx as usize).copied().unwrap_or(idx)
+    }
+}
+
+fn canon_heap(heap: HeapType, start: u32, len: u32, canonical: &[u32]) -> CanonHeap {
+    match heap {
+        HeapType::Type(idx) => {
+            if idx.0 >= start && idx.0 < start + len {
+                CanonHeap::InGroup(idx.0 - start)
+            } else {
+                CanonHeap::External(canon_ref_token(idx.0, start, len, canonical))
+            }
+        }
+        other => CanonHeap::Abstract(other),
+    }
+}
+
+fn canon_val(val: ValType, start: u32, len: u32, canonical: &[u32]) -> CanonVal {
+    match val {
+        ValType::Num(num) => CanonVal::Num(num),
+        ValType::Vec(vec) => CanonVal::Vec(vec),
+        ValType::Ref(RefType::FuncRef) => CanonVal::Ref(true, CanonHeap::Abstract(HeapType::Func)),
+        ValType::Ref(RefType::ExternRef) => {
+            CanonVal::Ref(true, CanonHeap::Abstract(HeapType::Extern))
+        }
+        ValType::Ref(RefType::Typed { nullable, heap }) => {
+            CanonVal::Ref(nullable, canon_heap(heap, start, len, canonical))
+        }
+    }
+}
+
+fn canon_storage(storage: StorageType, start: u32, len: u32, canonical: &[u32]) -> CanonStorage {
+    match storage {
+        StorageType::Val(val) => CanonStorage::Val(canon_val(val, start, len, canonical)),
+        StorageType::I8 => CanonStorage::I8,
+        StorageType::I16 => CanonStorage::I16,
+    }
+}
+
+fn canon_field(field: FieldType, start: u32, len: u32, canonical: &[u32]) -> CanonField {
+    CanonField {
+        mutable: field.mutable,
+        storage: canon_storage(field.storage, start, len, canonical),
+    }
+}
+
+fn canon_comp(comp: &CompType, start: u32, len: u32, canonical: &[u32]) -> CanonComp {
+    match comp {
+        CompType::Struct(fields) => CanonComp::Struct(
+            fields
+                .iter()
+                .map(|field| canon_field(*field, start, len, canonical))
+                .collect(),
+        ),
+        CompType::Array(field) => CanonComp::Array(canon_field(*field, start, len, canonical)),
+        CompType::Func(func) => CanonComp::Func(
+            func.params
+                .iter()
+                .map(|val| canon_val(*val, start, len, canonical))
+                .collect(),
+            func.results
+                .iter()
+                .map(|val| canon_val(*val, start, len, canonical))
+                .collect(),
+        ),
+    }
+}
+
+fn canon_member(sub: &SubType, start: u32, len: u32, canonical: &[u32]) -> CanonMember {
+    CanonMember {
+        is_final: sub.is_final,
+        supers: sub
+            .supertypes
+            .iter()
+            .map(|&s| canon_ref_token(s, start, len, canonical))
+            .collect(),
+        comp: canon_comp(&sub.comp, start, len, canonical),
+    }
 }
 
 #[cfg(test)]

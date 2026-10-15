@@ -38,7 +38,7 @@ pub fn parse_val_type_with_first_byte(
         0x7D => Ok(ValType::Num(NumType::F32)),
         0x7C => Ok(ValType::Num(NumType::F64)),
         0x7B => Ok(ValType::Vec(VecType::V128)),
-        0x70 | 0x6F | 0x63 | 0x64 | 0x69 => Ok(ValType::Ref(parse_ref_type_with_first_byte(
+        0x63 | 0x64 | 0x69..=0x74 => Ok(ValType::Ref(parse_ref_type_with_first_byte(
             cursor,
             first,
             absolute_offset,
@@ -50,6 +50,28 @@ pub fn parse_val_type_with_first_byte(
             kind: DecodeErrorKind::UnknownValType { byte },
         }),
     }
+}
+
+/// Map a single-byte abstract heap-type encoding to its [`HeapType`].
+///
+/// Abstract heap types are encoded as signed 7-bit values, so their byte
+/// encodings are `0x69..=0x74` (`noexn` .. `exn`).
+fn abstract_heap_type(byte: u8) -> Option<HeapType> {
+    Some(match byte {
+        0x74 => HeapType::NoExn,
+        0x73 => HeapType::NoFunc,
+        0x72 => HeapType::NoExtern,
+        0x71 => HeapType::None,
+        0x70 => HeapType::Func,
+        0x6F => HeapType::Extern,
+        0x6E => HeapType::Any,
+        0x6D => HeapType::Eq,
+        0x6C => HeapType::I31,
+        0x6B => HeapType::Struct,
+        0x6A => HeapType::Array,
+        0x69 => HeapType::Exn,
+        _ => return None,
+    })
 }
 
 pub fn parse_ref_type(
@@ -76,7 +98,10 @@ pub fn parse_ref_type_with_first_byte(
     match first {
         0x70 => Ok(RefType::FuncRef),
         0x6F => Ok(RefType::ExternRef),
-        0x69 => Ok(RefType::from_parts(true, HeapType::Exn)),
+        0x69..=0x74 => Ok(RefType::from_parts(
+            true,
+            abstract_heap_type(first).expect("range checked"),
+        )),
         0x63 => Ok(RefType::from_parts(
             true,
             parse_heap_type_at(cursor, context, absolute_offset + 1)?,
@@ -114,49 +139,30 @@ fn parse_heap_type_at(
         });
     };
 
-    match first {
-        0x70 => {
-            cursor.read_byte().map_err(|_| DecodeError {
-                offset: ByteOffset(absolute_offset),
-                context,
-                kind: DecodeErrorKind::UnexpectedEof,
-            })?;
-            Ok(HeapType::Func)
-        }
-        0x69 => {
-            cursor.read_byte().map_err(|_| DecodeError {
-                offset: ByteOffset(absolute_offset),
-                context,
-                kind: DecodeErrorKind::UnexpectedEof,
-            })?;
-            Ok(HeapType::Exn)
-        }
-        0x6F => {
-            cursor.read_byte().map_err(|_| DecodeError {
-                offset: ByteOffset(absolute_offset),
-                context,
-                kind: DecodeErrorKind::UnexpectedEof,
-            })?;
-            Ok(HeapType::Extern)
-        }
-        0x6E | 0x71 | 0x72 | 0x73 | 0x6D | 0x6B | 0x6A | 0x6C | 0x74 | 0x68 | 0x75 => {
-            Err(DecodeError {
-                offset: ByteOffset(absolute_offset),
-                context,
-                kind: DecodeErrorKind::UnknownRefType { byte: first },
+    // A byte with the continuation bit clear and the sign bit set is a
+    // single-byte negative `s7` value: an abstract heap type. Everything
+    // else starts a non-negative `s33` type index.
+    if first & 0x80 == 0 && first & 0x40 != 0 {
+        cursor.read_byte().map_err(|_| DecodeError {
+            offset: ByteOffset(absolute_offset),
+            context,
+            kind: DecodeErrorKind::UnexpectedEof,
+        })?;
+        abstract_heap_type(first).ok_or(DecodeError {
+            offset: ByteOffset(absolute_offset),
+            context,
+            kind: DecodeErrorKind::UnknownRefType { byte: first },
+        })
+    } else {
+        let start = cursor.position();
+        leb128::decode_u32(cursor)
+            .map(TypeIdx)
+            .map(HeapType::Type)
+            .map_err(|mut e| {
+                e.context = context;
+                e.offset = ByteOffset(absolute_offset + (e.offset.0 - start));
+                e
             })
-        }
-        _ => {
-            let start = cursor.position();
-            leb128::decode_u32(cursor)
-                .map(TypeIdx)
-                .map(HeapType::Type)
-                .map_err(|mut e| {
-                    e.context = context;
-                    e.offset = ByteOffset(absolute_offset + (e.offset.0 - start));
-                    e
-                })
-        }
     }
 }
 

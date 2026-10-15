@@ -70,7 +70,13 @@ pub fn validate_module(module: &Module<'_>) -> Result<(), ValidationError> {
     validate_start(module)?;
 
     for (func_idx, (type_idx, code)) in module.functions.iter().zip(module.codes()).enumerate() {
-        let ty = &module.types[type_idx.0 as usize];
+        let Some(ty) = module.func_type(*type_idx) else {
+            return Err(ValidationError {
+                offset: ByteOffset(0),
+                function: None,
+                kind: ValidationErrorKind::UnknownTypeIdx { idx: *type_idx },
+            });
+        };
         validate_function(
             module,
             FuncIdx(func_idx as u32),
@@ -83,17 +89,151 @@ pub fn validate_module(module: &Module<'_>) -> Result<(), ValidationError> {
     Ok(())
 }
 
+/// Group spans covering every type index: explicit `rec` groups as decoded,
+/// and every other index as its own singleton group.
+fn type_group_spans(module: &Module<'_>) -> Vec<(u32, u32)> {
+    // Empty rec groups contribute no indices, so only non-empty groups form
+    // spans; every other index is its own singleton group.
+    let mut by_start: alloc::collections::BTreeMap<u32, u32> = module
+        .rec_groups
+        .iter()
+        .filter(|&&(_, len)| len > 0)
+        .copied()
+        .collect();
+    let mut spans = Vec::new();
+    let mut start: u32 = 0;
+    while (start as usize) < module.types.len() {
+        let len = by_start.remove(&start).unwrap_or(1);
+        spans.push((start, len));
+        start += len;
+    }
+    spans
+}
+
+/// Validate the type section: roll & install each rec group, then check every
+/// supertype (`check_rectype` / `check_subtype_sub`, valid.ml:161-189).
+///
+/// A whole group is installed before its members are checked, so references
+/// to *later members of the same group* are legal; references to later groups
+/// are unknown-index errors, and supertypes must precede the group start.
 fn validate_type_definitions(module: &Module<'_>) -> Result<(), ValidationError> {
     let offset = module
         .section(crate::binary::section::SectionId::Type)
         .map(|section| section.offset)
         .unwrap_or(0);
 
-    for (idx, ty) in module.types.iter().enumerate() {
-        validate_func_type_definition_type_indices(module, TypeIdx(idx as u32), ty, offset)?;
+    for (start, len) in type_group_spans(module) {
+        let end = start + len;
+
+        // 1. Every referenced type index must be installed (`< end`); this
+        //    admits in-group forward references but rejects later groups.
+        for idx in start..end {
+            validate_sub_type_type_indices(&module.types[idx as usize], end, offset)?;
+        }
+
+        // 2. Supertype rules for each member of the group.
+        for idx in start..end {
+            let sub = &module.types[idx as usize];
+            for &supertype in &sub.supertypes {
+                if supertype >= start {
+                    return Err(ValidationError {
+                        offset: ByteOffset(offset),
+                        function: None,
+                        kind: ValidationErrorKind::ForwardUseOfTypeInSubType {
+                            sub: idx,
+                            supertype,
+                        },
+                    });
+                }
+                let sup = &module.types[supertype as usize];
+                if sup.is_final {
+                    return Err(ValidationError {
+                        offset: ByteOffset(offset),
+                        function: None,
+                        kind: ValidationErrorKind::FinalSupertype {
+                            sub: idx,
+                            supertype,
+                        },
+                    });
+                }
+                if !comptype_matches(module, &sub.comp, &sup.comp) {
+                    return Err(ValidationError {
+                        offset: ByteOffset(offset),
+                        function: None,
+                        kind: ValidationErrorKind::SubtypeComptypeMismatch {
+                            sub: idx,
+                            supertype,
+                        },
+                    });
+                }
+            }
+        }
     }
 
     Ok(())
+}
+
+fn validate_sub_type_type_indices(
+    sub: &crate::types::SubType,
+    group_end: u32,
+    offset: usize,
+) -> Result<(), ValidationError> {
+    for &supertype in &sub.supertypes {
+        if supertype >= group_end {
+            return Err(unknown_type_idx(TypeIdx(supertype), offset));
+        }
+    }
+    validate_comptype_type_indices(&sub.comp, group_end, offset)
+}
+
+fn validate_comptype_type_indices(
+    comp: &crate::types::CompType,
+    group_end: u32,
+    offset: usize,
+) -> Result<(), ValidationError> {
+    use crate::types::CompType;
+    match comp {
+        CompType::Struct(fields) => {
+            for field in fields {
+                validate_storage_type_indices(&field.storage, group_end, offset)?;
+            }
+            Ok(())
+        }
+        CompType::Array(field) => validate_storage_type_indices(&field.storage, group_end, offset),
+        CompType::Func(func) => {
+            for val in func.params.iter().chain(&func.results) {
+                if let ValType::Ref(ref_type) = val
+                    && let crate::types::HeapType::Type(idx) = ref_type.heap_type()
+                    && idx.0 >= group_end
+                {
+                    return Err(unknown_type_idx(idx, offset));
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_storage_type_indices(
+    storage: &crate::types::StorageType,
+    group_end: u32,
+    offset: usize,
+) -> Result<(), ValidationError> {
+    if let crate::types::StorageType::Val(ValType::Ref(ref_type)) = storage
+        && let crate::types::HeapType::Type(idx) = ref_type.heap_type()
+        && idx.0 >= group_end
+    {
+        return Err(unknown_type_idx(idx, offset));
+    }
+    Ok(())
+}
+
+fn unknown_type_idx(idx: TypeIdx, offset: usize) -> ValidationError {
+    ValidationError {
+        offset: ByteOffset(offset),
+        function: None,
+        kind: ValidationErrorKind::UnknownTypeIdx { idx },
+    }
 }
 
 fn validate_imports(module: &Module<'_>) -> Result<(), ValidationError> {
@@ -105,7 +245,7 @@ fn validate_imports(module: &Module<'_>) -> Result<(), ValidationError> {
     for import in module.imports() {
         match &import.desc {
             ImportDesc::Func(type_idx) => {
-                if module.types.get(type_idx.0 as usize).is_none() {
+                if module.func_type(*type_idx).is_none() {
                     return Err(ValidationError {
                         offset: ByteOffset(offset),
                         function: None,
@@ -3341,8 +3481,7 @@ fn resolve_block_type(
             })
         }
         BlockType::TypeIdx(idx) => module
-            .types
-            .get(idx as usize)
+            .func_type_at(idx as usize)
             .map(|ty| normalize_func_type(module, ty))
             .ok_or(ValidationError {
                 offset: ByteOffset(offset),
@@ -3360,8 +3499,7 @@ fn resolve_type(
 ) -> Result<FuncType, ValidationError> {
     let idx = canonicalize_func_type_idx(module, idx);
     module
-        .types
-        .get(idx.0 as usize)
+        .func_type(idx)
         .map(|ty| normalize_func_type(module, ty))
         .ok_or(ValidationError {
             offset: ByteOffset(offset),
@@ -3464,14 +3602,11 @@ fn resolve_func_type_with_context<'m>(
 ) -> Result<&'m FuncType, ValidationError> {
     let type_idx = resolve_func_type_idx_with_context(module, idx, function, offset)?;
 
-    module
-        .types
-        .get(type_idx.0 as usize)
-        .ok_or(ValidationError {
-            offset: ByteOffset(offset),
-            function,
-            kind: ValidationErrorKind::UnknownTypeIdx { idx: type_idx },
-        })
+    module.func_type(type_idx).ok_or(ValidationError {
+        offset: ByteOffset(offset),
+        function,
+        kind: ValidationErrorKind::UnknownTypeIdx { idx: type_idx },
+    })
 }
 
 fn resolve_func_type_idx_with_context(
@@ -3854,101 +3989,129 @@ fn finish_frame(
 }
 
 fn canonicalize_func_type_idx(module: &Module<'_>, idx: TypeIdx) -> TypeIdx {
-    if module.types.get(idx.0 as usize).is_none() {
-        return idx;
+    match module.type_canon.canonical_id(idx) {
+        Some(canonical) => TypeIdx(canonical),
+        None => idx,
     }
+}
 
-    for candidate in 0..idx.0 {
-        let candidate = TypeIdx(candidate);
-        if func_type_indices_equivalent(module, candidate, idx) {
-            return candidate;
+/// Module-aware reference-value subtyping (`match_valtype`, match.ml:128-159)
+/// used by type-section validation (comptype matching) and declared-supertype
+/// equality.
+fn valtype_matches_type(module: &Module<'_>, found: ValType, expected: ValType) -> bool {
+    match (found, expected) {
+        (ValType::Num(found), ValType::Num(expected)) => found == expected,
+        (ValType::Vec(found), ValType::Vec(expected)) => found == expected,
+        (ValType::Ref(found), ValType::Ref(expected)) => {
+            reftype_matches_type(module, found, expected)
         }
+        _ => false,
     }
-
-    idx
 }
 
-fn func_type_indices_equivalent(module: &Module<'_>, lhs: TypeIdx, rhs: TypeIdx) -> bool {
-    let mut seen = BTreeSet::new();
-    func_type_indices_equivalent_inner(module, lhs, rhs, &mut seen)
+fn resulttype_matches(module: &Module<'_>, found: &[ValType], expected: &[ValType]) -> bool {
+    found.len() == expected.len()
+        && found
+            .iter()
+            .zip(expected)
+            .all(|(found, expected)| valtype_matches_type(module, *found, *expected))
 }
 
-fn func_type_indices_equivalent_inner(
-    module: &Module<'_>,
-    lhs: TypeIdx,
-    rhs: TypeIdx,
-    seen: &mut BTreeSet<(u32, u32)>,
-) -> bool {
-    let key = if lhs.0 <= rhs.0 {
-        (lhs.0, rhs.0)
-    } else {
-        (rhs.0, lhs.0)
-    };
-    if !seen.insert(key) {
+fn reftype_matches_type(module: &Module<'_>, found: RefType, expected: RefType) -> bool {
+    (!found.is_nullable() || expected.is_nullable())
+        && heaptype_matches(module, found.heap_type(), expected.heap_type())
+}
+
+fn heaptype_matches(module: &Module<'_>, found: HeapType, expected: HeapType) -> bool {
+    use HeapType::*;
+    match (found, expected) {
+        (Eq | Struct | Array | I31, Any) => true,
+        (I31 | Struct | Array, Eq) => true,
+        (None, t) => heaptype_matches(module, t, Any),
+        (NoFunc, t) => heaptype_matches(module, t, Func),
+        (NoExn, t) => heaptype_matches(module, t, Exn),
+        (NoExtern, t) => heaptype_matches(module, t, Extern),
+        (Type(found), Type(expected)) => deftype_matches(module, found, expected),
+        (Type(found), t) => concrete_heap_matches(module, found, t),
+        _ => found == expected,
+    }
+}
+
+fn concrete_heap_matches(module: &Module<'_>, idx: TypeIdx, expected: HeapType) -> bool {
+    use HeapType::*;
+    match module.types.get(idx.0 as usize).map(|sub| &sub.comp) {
+        Some(crate::types::CompType::Struct(_)) => matches!(expected, Any | Eq | Struct),
+        Some(crate::types::CompType::Array(_)) => matches!(expected, Any | Eq | Array),
+        Some(crate::types::CompType::Func(_)) => matches!(expected, Func),
+        _ => false,
+    }
+}
+
+/// `match_deftype` (match.ml:151-159): canonical equality of rolled closed
+/// forms, or the declared supertype chain of `found` contains `expected`.
+fn deftype_matches(module: &Module<'_>, found: TypeIdx, expected: TypeIdx) -> bool {
+    if module.type_canon.equivalent(found, expected) {
         return true;
     }
-
-    let Some(lhs_ty) = module.types.get(lhs.0 as usize) else {
-        return false;
-    };
-    let Some(rhs_ty) = module.types.get(rhs.0 as usize) else {
-        return false;
-    };
-
-    lhs_ty.params.len() == rhs_ty.params.len()
-        && lhs_ty.results.len() == rhs_ty.results.len()
-        && lhs_ty
-            .params
+    match module.types.get(found.0 as usize) {
+        Some(sub) => sub
+            .supertypes
             .iter()
-            .zip(&rhs_ty.params)
-            .all(|(lhs, rhs)| valtype_equivalent_inner(module, *lhs, *rhs, seen))
-        && lhs_ty
-            .results
-            .iter()
-            .zip(&rhs_ty.results)
-            .all(|(lhs, rhs)| valtype_equivalent_inner(module, *lhs, *rhs, seen))
-}
-
-fn valtype_equivalent_inner(
-    module: &Module<'_>,
-    lhs: ValType,
-    rhs: ValType,
-    seen: &mut BTreeSet<(u32, u32)>,
-) -> bool {
-    match (lhs, rhs) {
-        (ValType::Ref(lhs), ValType::Ref(rhs)) => reftype_equivalent_inner(module, lhs, rhs, seen),
-        _ => lhs == rhs,
+            .any(|&supertype| deftype_matches(module, TypeIdx(supertype), expected)),
+        None => false,
     }
 }
 
-fn reftype_equivalent_inner(
+fn storage_matches(
     module: &Module<'_>,
-    lhs: RefType,
-    rhs: RefType,
-    seen: &mut BTreeSet<(u32, u32)>,
+    found: crate::types::StorageType,
+    expected: crate::types::StorageType,
 ) -> bool {
-    lhs.is_nullable() == rhs.is_nullable()
-        && match (lhs.heap_type(), rhs.heap_type()) {
-            (crate::types::HeapType::Type(lhs), crate::types::HeapType::Type(rhs)) => {
-                func_type_indices_equivalent_inner(module, lhs, rhs, seen)
-            }
-            (lhs, rhs) => lhs == rhs,
+    use crate::types::StorageType::*;
+    match (found, expected) {
+        (Val(found), Val(expected)) => valtype_matches_type(module, found, expected),
+        (I8, I8) | (I16, I16) => true,
+        _ => false,
+    }
+}
+
+fn field_matches(
+    module: &Module<'_>,
+    found: crate::types::FieldType,
+    expected: crate::types::FieldType,
+) -> bool {
+    if found.mutable != expected.mutable
+        || !storage_matches(module, found.storage, expected.storage)
+    {
+        return false;
+    }
+    // Mutable fields are invariant; const fields are covariant.
+    !found.mutable || storage_matches(module, expected.storage, found.storage)
+}
+
+/// `match_comptype` (match.ml:140-149).
+fn comptype_matches(
+    module: &Module<'_>,
+    found: &crate::types::CompType,
+    expected: &crate::types::CompType,
+) -> bool {
+    use crate::types::CompType::*;
+    match (found, expected) {
+        (Struct(found), Struct(expected)) => {
+            found.len() >= expected.len()
+                && found
+                    .iter()
+                    .zip(expected)
+                    .all(|(found, expected)| field_matches(module, *found, *expected))
         }
-}
-
-fn validate_func_type_definition_type_indices(
-    module: &Module<'_>,
-    current_type: TypeIdx,
-    ty: &FuncType,
-    offset: usize,
-) -> Result<(), ValidationError> {
-    for &param in &ty.params {
-        validate_valtype_type_indices_in_type_definition(module, current_type, param, offset)?;
+        (Array(found), Array(expected)) => field_matches(module, *found, *expected),
+        (Func(found), Func(expected)) => {
+            // Params are contravariant, results covariant.
+            resulttype_matches(module, &expected.params, &found.params)
+                && resulttype_matches(module, &found.results, &expected.results)
+        }
+        _ => false,
     }
-    for &result in &ty.results {
-        validate_valtype_type_indices_in_type_definition(module, current_type, result, offset)?;
-    }
-    Ok(())
 }
 
 fn validate_valtype_type_indices(
@@ -3959,18 +4122,6 @@ fn validate_valtype_type_indices(
 ) -> Result<(), ValidationError> {
     if let ValType::Ref(ref_type) = ty {
         validate_reftype_type_indices(module, ref_type, function, offset)?;
-    }
-    Ok(())
-}
-
-fn validate_valtype_type_indices_in_type_definition(
-    module: &Module<'_>,
-    current_type: TypeIdx,
-    ty: ValType,
-    offset: usize,
-) -> Result<(), ValidationError> {
-    if let ValType::Ref(ref_type) = ty {
-        validate_reftype_type_indices_in_type_definition(module, current_type, ref_type, offset)?;
     }
     Ok(())
 }
@@ -3987,25 +4138,6 @@ fn validate_reftype_type_indices(
         return Err(ValidationError {
             offset: ByteOffset(offset),
             function,
-            kind: ValidationErrorKind::UnknownTypeIdx { idx },
-        });
-    }
-
-    Ok(())
-}
-
-fn validate_reftype_type_indices_in_type_definition(
-    module: &Module<'_>,
-    current_type: TypeIdx,
-    ty: RefType,
-    offset: usize,
-) -> Result<(), ValidationError> {
-    if let crate::types::HeapType::Type(idx) = ty.heap_type()
-        && (idx.0 > current_type.0 || module.types.get(idx.0 as usize).is_none())
-    {
-        return Err(ValidationError {
-            offset: ByteOffset(offset),
-            function: None,
             kind: ValidationErrorKind::UnknownTypeIdx { idx },
         });
     }

@@ -28,7 +28,7 @@ use crate::binary::typesec;
 use crate::error::{ByteOffset, DecodeError, DecodeErrorKind};
 use crate::types::{
     CodeBody, DataSegment, ElementSegment, Export, FuncIdx, FuncType, Global, Import, MemType,
-    TableType, TypeIdx,
+    SubType, TableType, TypeCanon, TypeIdx,
 };
 
 /// A parsed WASM module. Contains the raw section data segmented by type.
@@ -39,8 +39,11 @@ use crate::types::{
 pub struct Module<'a> {
     /// All sections in the order they appeared, as raw byte spans.
     pub sections: Vec<RawSection<'a>>,
-    /// Decoded function signatures from the type section.
-    pub types: Vec<FuncType>,
+    /// Decoded subtype definitions from the type section (flattened across
+    /// `rec` groups). Use [`Module::func_type`] to view function types.
+    pub types: Vec<SubType>,
+    /// Hash-consed canonicalization of the type section (rolled closed forms).
+    pub type_canon: TypeCanon,
     /// Imported items declared by the module.
     pub imports: Vec<Import>,
     /// Exported items declared by the module.
@@ -87,6 +90,7 @@ impl<'a> Module<'a> {
         };
         let types = type_section.types;
         let rec_groups = type_section.rec_groups;
+        let type_canon = TypeCanon::new(&types, &rec_groups);
         let imports = match sections.iter().find(|s| s.id == SectionId::Import) {
             Some(section) => importsec::parse_import_section(section)?,
             None => Vec::new(),
@@ -150,6 +154,7 @@ impl<'a> Module<'a> {
         Ok(Module {
             sections,
             types,
+            type_canon,
             imports,
             exports,
             functions,
@@ -171,9 +176,20 @@ impl<'a> Module<'a> {
         self.sections.iter().find(|s| s.id == id)
     }
 
-    /// Function signatures declared in the type section.
-    pub fn types(&self) -> &[FuncType] {
+    /// Subtype definitions declared in the type section.
+    pub fn types(&self) -> &[SubType] {
         &self.types
+    }
+
+    /// The function signature at `idx`, if that type is a function type.
+    pub fn func_type(&self, idx: TypeIdx) -> Option<&FuncType> {
+        self.types.get(idx.0 as usize).and_then(SubType::as_func)
+    }
+
+    /// The function signature at raw index `idx`, if that type is a
+    /// function type.
+    pub fn func_type_at(&self, idx: usize) -> Option<&FuncType> {
+        self.types.get(idx).and_then(SubType::as_func)
     }
 
     /// Imported items declared by the module.
@@ -296,8 +312,9 @@ mod tests {
         assert_eq!(module.sections[1].id, SectionId::Function);
         assert_eq!(module.sections[2].id, SectionId::Code);
         assert_eq!(module.types.len(), 1);
-        assert!(module.types[0].params.is_empty());
-        assert!(module.types[0].results.is_empty());
+        let func = module.func_type(TypeIdx(0)).expect("type 0 is a func type");
+        assert!(func.params.is_empty());
+        assert!(func.results.is_empty());
         assert!(module.exports.is_empty());
         assert_eq!(module.functions, vec![TypeIdx(0)]);
         assert!(module.tables.is_empty());
@@ -360,73 +377,59 @@ mod tests {
     }
 
     #[test]
-    fn reject_gc_rec_type_group_boundary() {
-        // A rec group whose member is a GC sub-type (0x50), not a function
-        // type: rec groups of plain function types are accepted (flattened,
-        // for EH tag provenance); sub-typed members remain the GC boundary.
+    fn decode_gc_rec_type_group_with_sub_type() {
+        // `(rec (sub (func)))` now decodes: GC sub-typed rec groups are part
+        // of the U1 type grammar.
+        let bytes = include_bytes!("../../../baedeker-testdata/spec/valid/gc-rec-type-group.wasm");
+        let module = Module::decode(bytes).unwrap();
+        assert_eq!(module.types.len(), 1);
+        assert!(!module.types[0].is_final);
+        assert!(module.types[0].supertypes.is_empty());
+        assert!(module.types[0].as_func().is_some());
+        assert_eq!(module.rec_groups, vec![(0, 1)]);
+    }
+
+    #[test]
+    fn decode_gc_sub_type_definition() {
         let bytes =
-            include_bytes!("../../../baedeker-testdata/spec/invalid-decode/gc-rec-type-group.wasm");
-        let err = Module::decode(bytes).unwrap_err();
-        assert_eq!(err.offset, ByteOffset(13));
-        assert_eq!(err.context, crate::error::DecodeContext::TypeSection);
+            include_bytes!("../../../baedeker-testdata/spec/valid/gc-sub-type-definition.wasm");
+        let module = Module::decode(bytes).unwrap();
+        assert_eq!(module.types.len(), 1);
+        assert!(!module.types[0].is_final);
+        assert!(module.types[0].as_func().is_some());
+    }
+
+    #[test]
+    fn decode_gc_struct_type_definition() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/gc-struct-type-definition.wasm",);
+        let module = Module::decode(bytes).unwrap();
+        assert_eq!(module.types.len(), 1);
+        assert!(module.types[0].is_final);
         assert!(matches!(
-            err.kind,
-            DecodeErrorKind::UnexpectedByte {
-                expected: 0x60,
-                found: 0x50,
-            }
+            module.types[0].comp,
+            crate::types::CompType::Struct(ref fields) if fields.is_empty()
         ));
     }
 
     #[test]
-    fn reject_gc_sub_type_definition_boundary() {
-        let bytes = include_bytes!(
-            "../../../baedeker-testdata/spec/invalid-decode/gc-sub-type-definition.wasm",
-        );
-        let err = Module::decode(bytes).unwrap_err();
-        assert_eq!(err.offset, ByteOffset(11));
-        assert_eq!(err.context, crate::error::DecodeContext::TypeSection);
-        assert!(matches!(
-            err.kind,
-            DecodeErrorKind::UnexpectedByte {
-                expected: 0x60,
-                found: 0x50,
+    fn decode_gc_array_type_definition() {
+        let bytes =
+            include_bytes!("../../../baedeker-testdata/spec/valid/gc-array-type-definition.wasm",);
+        let module = Module::decode(bytes).unwrap();
+        assert_eq!(module.types.len(), 1);
+        match &module.types[0].comp {
+            crate::types::CompType::Array(field) => {
+                assert!(!field.mutable);
+                assert_eq!(
+                    field.storage,
+                    crate::types::StorageType::Val(crate::types::ValType::Num(
+                        crate::types::NumType::I32
+                    ))
+                );
             }
-        ));
-    }
-
-    #[test]
-    fn reject_gc_struct_type_definition_boundary() {
-        let bytes = include_bytes!(
-            "../../../baedeker-testdata/spec/invalid-decode/gc-struct-type-definition.wasm",
-        );
-        let err = Module::decode(bytes).unwrap_err();
-        assert_eq!(err.offset, ByteOffset(11));
-        assert_eq!(err.context, crate::error::DecodeContext::TypeSection);
-        assert!(matches!(
-            err.kind,
-            DecodeErrorKind::UnexpectedByte {
-                expected: 0x60,
-                found: 0x5F,
-            }
-        ));
-    }
-
-    #[test]
-    fn reject_gc_array_type_definition_boundary() {
-        let bytes = include_bytes!(
-            "../../../baedeker-testdata/spec/invalid-decode/gc-array-type-definition.wasm",
-        );
-        let err = Module::decode(bytes).unwrap_err();
-        assert_eq!(err.offset, ByteOffset(11));
-        assert_eq!(err.context, crate::error::DecodeContext::TypeSection);
-        assert!(matches!(
-            err.kind,
-            DecodeErrorKind::UnexpectedByte {
-                expected: 0x60,
-                found: 0x5E,
-            }
-        ));
+            other => panic!("expected array type, got {other:?}"),
+        }
     }
 
     #[test]

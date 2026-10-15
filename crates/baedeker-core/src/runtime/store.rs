@@ -436,7 +436,8 @@ fn expand_val(
                     return None; // cyclic: reject conservatively
                 }
                 path.push(idx.0);
-                let func = expand_func(types, rec_groups, types.get(idx.0 as usize)?, path);
+                let func_ty = types.get(idx.0 as usize)?;
+                let func = expand_func(types, rec_groups, func_ty, path);
                 path.pop();
                 let func = func?;
                 Some(ExpandedVal::ConcreteFunc {
@@ -445,6 +446,17 @@ fn expand_val(
                     results: func.results,
                 })
             }
+            // GC abstract heap types are not part of the EH-era link
+            // expansion; they are never produced by EH tag types.
+            HeapType::Any
+            | HeapType::None
+            | HeapType::Eq
+            | HeapType::I31
+            | HeapType::Struct
+            | HeapType::Array
+            | HeapType::NoFunc
+            | HeapType::NoExtern
+            | HeapType::NoExn => None,
         },
     }
 }
@@ -902,7 +914,9 @@ impl Store {
 
         // Register defined-tag types (module-agnostic tag ids).
         for type_idx in &module.tags {
-            store.register_tag_type(module.types[type_idx.0 as usize].clone());
+            if let Some(ty) = module.types.get(type_idx.0 as usize) {
+                store.register_tag_type(ty.clone());
+            }
         }
 
         let mut instantiation_error: Option<RuntimeError> = None;
