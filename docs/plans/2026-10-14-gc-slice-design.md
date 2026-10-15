@@ -11,124 +11,192 @@ convergence (breaker 12) → operator merge.
    never-free heap behind a collector-shaped interface; the real
    collector is slice 5b, gated by the article ladder below.
 2. **R0–R2 articles gate slice 5; R3–R4 are 5b's entry ticket.**
-3. **Grading = heap-stats API + ulimit harness** (stats hooks designed
-   into the slice-5 object model; caps promoted from the review-loop
-   recipe into CI).
+3. **Grading = heap-stats API + structured refusal harness**
+   (stats hooks designed into the slice-5 object model).
 
-Spec pin: `dfa3f32a881aecc60a8c792da3c25787ccb15572` (COMMIT.txt at
-`/tmp/wasm-spec-pin`). Reference corpus: 17 `test/core/gc/` files +
-6 GC-deferred core files (`type.wast`, `type-rec`, `type-canon`,
-`type-equivalence`, `ref_null`, and the GC-relevant remainder) ≈ 23
-files to vendor; exact inventory pinned at U5 contract time.
-Not-deferred typed-ref files (`call_ref`, `return_call_ref`,
-`ref_func`, `ref_is_null`, `ref_as_non_null`, `ref.wast`) already pass.
+Spec pin: `dfa3f32a881aecc60a8c792da3c25787ccb15572`
+(re-certified via `git rev-parse` in the pin clone at
+`/tmp/wasm-spec-pin`). Reference corpus to vendor: **exactly 22
+files** — 17 in `test/core/gc/` plus the 5 GC-deferred core files
+(`type.wast`, `type-rec.wast`, `type-canon.wast`,
+`type-equivalence.wast`, `ref_null.wast`). The two remaining deferrals
+(`skip-stack-guard-page`, `names`) are non-GC and stay deferred.
+Already passing today: `call_ref`, `return_call_ref`, `ref_func`,
+`ref_is_null`, `ref_as_non_null`, `ref.wast`.
 
 ## Scope
 
-- **Type grammar**: `rec` groups over struct/array/func; `sub` /
-  `sub final`; abstract heap types `any eq i31 struct array none extern
-  func noextern` (+ func sides); full canonicalization with canonical
-  indices as RTT identity; type equivalence/subtyping.
-- **Heap + instructions**: `GcHeap` object model; struct.new/get/set;
-  array.new/new_default/new_fixed/new_data/new_elem/get/set/len/
-  fill/copy/init_data/init_elem; i31.new/get; ref.eq; ref.test/ref.cast
-  (+ br_on_cast pair); extern.convert_any / any.convert_extern.
-- **Out of scope (5)**: collection itself (5b), host-side anyref
-  beyond what R0 requires (5b), shared-memory GC (threads slice),
-  custom page sizes, multi-memory.
+**Type grammar (all four heap-type hierarchies, complete):**
+
+- any-side: `any`, `eq`, `i31`, `struct`, `array`, `none`, concrete
+  struct/array types
+- func-side: `func`, concrete func types, `nofunc`
+- extern-side: `extern`, `noextern`
+- exn-side: `exn`, `noexn` (NEW in `HeapType` — current code has
+  `Exn` but no `NoExn`; `ref_null.wast` uses `(ref.null noexn)` ×5)
+
+`rec` groups over struct/array/func; `sub` / `sub final` with declared
+supertypes. **Recursive references are accepted**: the EH-era
+conservative cycle rejection was an exn-tag stopgap; GC requires full
+rec-group-aware canonicalization (install the whole group before
+checking members — valid.ml:178–189). Rejected: unknown type indices,
+supertype cycles, and supertypes not available at declaration point.
+Bare≡singleton-rec normalization (EH r4b) carries over.
+
+**Instruction inventory (explicit, frozen before U1):**
+
+- struct: `struct.new`, `struct.new_default`, `struct.get`,
+  `struct.get_s`, `struct.get_u`, `struct.set`
+- array: `array.new`, `array.new_default`, `array.new_fixed`,
+  `array.new_data`, `array.new_elem`, `array.get`, `array.get_s`,
+  `array.get_u`, `array.set`, `array.len`, `array.fill`, `array.copy`,
+  `array.init_data`, `array.init_elem`
+- i31: `ref.i31`, `i31.get_s`, `i31.get_u` (immediate tagged value —
+  NEVER a heap allocation; signed/unsigned 31-bit semantics)
+- casts: `ref.test`, `ref.test null`, `ref.cast`, `ref.cast null`,
+  `br_on_cast`, `br_on_cast_fail` (incl. `null` label forms)
+- misc: `ref.eq`, `any.convert_extern`, `extern.convert_any`
+- Constant-expression eligibility for the new forms enumerated in the
+  U1 contract (per valid.ml's const rules).
+
+**Out of scope (5):** collection itself (5b), host-side anyref beyond
+the R0-required conversion semantics (5b), shared-memory GC (threads
+slice), custom page sizes, multi-memory.
 
 ## Design
 
-- **Type system**: generalize the EH rec-group machinery
-  (`RecProvenance`) to the full grammar. Canonicalization extends the
-  EH r4b normalization (bare ≡ singleton rec) to full structural
-  canonical form; `ref.test`/`ref.cast` decide on canonical IDs, never
-  deep walks. Unresolvable/cyclic references reject conservatively
-  (same posture as EH).
-- **Heap**: `GcHeap` on the store, `ObjectId(u32)`-indexed object
-  table: struct{type_id, fields} | array{type_id, len, elems} |
-  i31(packed). Wasm references are `Value::GcRef(ObjectId)` — copies
-  freely, no Rc. Never-free: the table only grows (try_reserve
-  discipline, refusal = clean trap with untouched state — the memory64
-  resource-discipline contract transplanted). Index-stable so 5b swaps
-  allocation strategy behind the interface without touching AOT/FFI.
-- **GcStats**: `store.gc_stats() → { live_objects, live_bytes,
-  allocations_since(snapshot) }`. Byte accounting is EXACT, from a
-  documented formula: per object = header (type_id + discriminant +
-  length word) + payload by field type (packed i8/i16 per array
-  packing; ref = word). Graders assert exact equality — no tolerance
-  bands, no flaky articles.
-- **AOT v7** for new instruction forms + GcRef operands (handle ABI
-  unchanged underneath). FFI: `WasmValue::GcRef` opaque handle.
+- **Type system**: generalize EH rec-group machinery to the grammar
+  above. Canonicalization produces canonical indices; equivalence =
+  same canonical index. Cast decisions need more than equivalence:
+  **runtime subtype relation = declared supertype chains over
+  canonical IDs**, precomputed at validation (each canonical type →
+  optional supertype canonical ID); `ref.test`/`ref.cast` walk the
+  bounded chain (plus null/abstract-heap cases per valid.ml:732–741).
+  A5 exercises distinct-ID subtype successes, not just equivalence.
+- **Heap object model** (collector-shaped, never-free in 5):
+  `GcHeap` on the store: `ObjectId(u32)`-indexed table of
+  struct{type_id, fields} | array{type_id, len, elems}. Wasm
+  references: `Value::GcRef(ObjectId)` — copies freely, no Rc.
+  i31 is **immediate** (`Value`-level tagged i32), consuming no
+  object-table entry. Never-free: table only grows, try_reserve
+  discipline, refusal = clean trap with untouched state (the memory64
+  resource contract). Index-stable so 5b swaps strategy behind the
+  interface without touching AOT/FFI.
+- **Extern/any conversions** (representation decided in U2, before
+  U3): `any.convert_extern` wraps a host reference into an
+  anyref-compatible **wrapper representation**; `extern.convert_any`
+  unwraps; round trips are identity-preserving; null converts to null
+  (eval.ml:929–939). Wrapper IDs live in a namespace distinct from
+  both `ObjectId`s and host indices — no collisions. Wrapper
+  allocation counts in stats.
+- **GcStats — logical accounting, exact**: `store.gc_stats() →
+  { live_objects, live_bytes, allocations_since(snapshot) }`.
+  `live_bytes` = Σ logical bytes with the formula frozen in the U2
+  contract: struct = 8-byte header + Σ field widths; array = 12-byte
+  header + len × elem width; widths i8=1, i16=2, i32/f32=4,
+  i64/f64=8, packed ref handle=4. This is **logical** accounting —
+  explicitly NOT reserved capacity, table slack, allocator overhead,
+  or process RSS (separate stats expose reserved slots). Graders
+  assert exact equality against the formula. Snapshots taken at
+  article boundaries; `allocations_since` counts table insertions.
+- **AOT v7** for new instruction forms + reference operands (handle
+  ABI unchanged underneath). FFI: GC references as opaque handles.
   **Lowerer mirror rule**: duplicate operand type-checker gains the
-  full ref lattice (`pop_ref_in_heap`).
+  full ref lattice (`pop_ref_in_heap` + nullability + abstract
+  hierarchy).
+- **Runner**: `runtime_official.rs` needs GC-reference assertion and
+  input support (currently `RefHost` inputs map to `ExternRef` host
+  indices and `RefHost` results are unconditionally rejected —
+  lines ~695/~973) plus hostref round-trip plumbing for `extern.wast`.
 
 ## The article ladder
 
 | Rung | Articles | Proves | Gates |
 |---|---|---|---|
-| R0 | Official GC corpus (~23 files) | Spec-observable semantics under any collection schedule | 5 |
+| R0 | Official GC corpus (exactly 22 files) | Schedule-independent spec semantics | 5 |
 | R1 | wasm-smith GC-property modules, differential vs spec interpreter | Robustness on author-blind struct/array graphs, cast cascades | 5 |
-| R2 | Hand-built A1–A7 (below), graded by stats deltas + ulimit caps | Allocation accounting, refusal discipline, stats exactness | 5 |
+| R2 | Hand-built A1–A7 (below), graded by logical-stats deltas + structured refusal | Allocation accounting, refusal discipline, stats exactness | 5 |
 | R3 | Real compilers on wasm-GC: OCaml/wasm_of_ocaml, Dart/dart2wasm, Kotlin/Wasm | Collector under real allocation topology | **5b ticket** |
 | R4 | GHC wasm32-wasi substrate stress (no wasm-GC usage — RTS GC runs in linear memory) | Substrate robustness: giant modules, call_indirect storms, RTS memcpy storms, table churn | **5b ticket** |
 
-**GC-timing tolerance**: every assertion in every rung holds under any
-collection schedule — oracle is the (never-collecting) spec
-interpreter, which is exactly slice 5's semantics.
-**Refusal-first**: every rung runs under 48/64 MiB caps; exit 101
-clean, exit 134 = P1.
+**Assertion classes, kept distinct** (P2.8/P2.10 fix):
+- *Schedule-independent*: wasm results — hold under any collection
+  schedule; oracle is the never-collecting spec interpreter (= slice
+  5's semantics). Every rung.
+- *Slice-5 accounting*: never-free stats assertions (A3 monotonic
+  growth, A4/A5 zero-delta) — valid only while never-free; 5b
+  **replaces** these with bounded-retention assertions (A3 flips to
+  reclaim).
+- *5b instrumentation*: RSS flatness on bounded-live-set articles.
+
+**Refusal harness (structured, P2.9 fix)**: articles run in a child
+process; the runner asserts an *expected structured result* —
+`assert_trap` with the resource-exhaustion diagnostic. A plain Rust
+panic exit (101) is a FAILURE unless the runner's expected-trap
+machinery produced it; abort/SIGKILL (134/137) always fail. Caps:
+`ulimit -v 49152/65536` smoke (documented per article); grading
+covers every allocation path (struct/array/new_data/new_elem/init),
+not just the object table.
 
 GHC placement rationale, recorded honestly: GHC's wasm backend does
 not target wasm-GC; compiled Haskell challenges everything *around*
-the collector (module size, indirect calls, bulk-memory storms), which
-is where slice-5 regressions will hide. An early GHC smoke subset
-(parse + run hello-class binaries) may land during 5; full R4 with 5b.
+the collector. An early GHC smoke subset (parse + run hello-class
+binaries) may land during 5; full R4 with 5b.
 
 ### R2 articles
 
 | # | Article | Stresses | Pass criteria |
 |---|---|---|---|
-| A1 | ephemeral-churn: 10⁶ short-lived pairs, bounded live window | Allocation volume vs live set | results correct; `allocations_since` exact; caps → clean trap |
-| A2 | persistent-build: 10⁷-node list + tree, all live | Live-set accounting | `live_bytes` exactly = formula × count; refusal leaves state untouched |
-| A3 | cycle-farm: 10⁵ rotating cycles | Never-free honesty | `live_objects` monotonically grows; becomes 5b's primary convergence probe |
-| A4 | i31-boxing-storm: 10⁷ tagged ops vs boxed | i31 must never allocate | stats delta 0 across run |
-| A5 | cast-cascade: 10⁶ tests/casts, 30-deep subtype chain | RTT canonical-ID path | results exact; stats delta 0 |
-| A6 | new_data/new_elem hybrid + linear-memory pressure | Heap × linear-memory interaction | results correct; combined accounting exact |
+| A1 | ephemeral-churn: 10⁶ short-lived pairs, bounded live window | Allocation volume vs live set | schedule-independent results; `allocations_since` exact; capped run → structured resource trap |
+| A2a | persistent-build (accounting): 10⁶-node list + tree, all live, **provisioned runner (no caps)** | Logical live-set accounting | `live_bytes` exactly = formula × count |
+| A2b | persistent-build (refusal): 10⁷-node construction attempt under 48/64 MiB caps | Refusal discipline at scale | structured resource trap; stats snapshot shows state untouched |
+| A3 | cycle-farm: 10⁵ rotating cycles | Never-free honesty (slice-5 class) | schedule-independent results; slice-5: `live_objects` monotonic; 5b: flips to bounded retention |
+| A4 | i31-storm: 10⁷ `ref.i31`/`i31.get_*` vs boxed | i31 never allocates | stats delta 0 across run |
+| A5 | cast-cascade: 10⁶ tests/casts, 30-deep declared subtype chain, mixed outcomes incl. **distinct-ID subtype successes** | RTT canonical-ID + ancestry path | results exact; stats delta 0 |
+| A6 | new_data/new_elem hybrid + linear-memory pressure | Heap × linear-memory interaction | results correct; GC logical bytes and memory pages accounted separately |
 | A7 | mixed-ref-matrix: funcref/externref/GcRef in tables/globals/params | Reference-kind separation | results exact under every storage kind |
 
-Articles live in `tests/gc_articles/` (wast-authorable where the
-encoder allows; encoder-first discipline stays) + a runner harness
-that snapshots stats and applies caps. Articles bound their own loops
-(never-free can't reclaim); per-article caps documented.
-
-Deliberately missing: throughput/latency benchmarks — 5b instruments.
+Articles in `tests/gc_articles/` (wast-authorable where the encoder
+allows) + runner harness (child process, snapshots, structured
+expectations, caps). Articles self-bound; per-article caps documented.
+Throughput/latency benchmarks deliberately deferred to 5b.
 
 ## Units
 
 | Unit | Content | Contract |
 |---|---|---|
-| U1 | Type grammar: rec/sub/canonicalization in binary+validate; type-canon/equivalence/rec/type.wast green at validation level | `gc-unit1-contract.md` |
-| U2 | Heap + object model: GcHeap, ObjectId, GcStats (exact formula), struct/array/i31 instructions, AOT v7 | `gc-unit2-contract.md` |
-| U3 | Casts: RTTs on canonical IDs, ref.test/cast, br_on_cast pair, conversions; R0 green end-to-end | `gc-unit3-contract.md` |
-| U4 | Linkage/surface: GC types across imports/exports/globals/tables, lowerer lattice mirror, FFI handle, R1 smith wiring | `gc-unit4-contract.md` |
-| U5 | Articles A1–A7 + harness + caps in CI + corpus grind to zero | `gc-unit5-contract.md` |
+| U1 | Type grammar: all four hierarchies (incl. `noexn`), rec/sub with recursion ACCEPTED, canonicalization + equivalence + declared-supertype chains (precomputed ancestry) in binary+validate | `gc-unit1-contract.md` |
+| U2 | Heap + object model: GcHeap/ObjectId, i31 immediate, extern/any wrapper representation + identity rules, GcStats logical formula, struct/array/i31 instruction execution, AOT v7 | `gc-unit2-contract.md` |
+| U3 | Cast machinery: ref.test/cast (+null forms), br_on_cast pair, ref.eq, conversions — green on targeted tests (NOT full R0; see U4) | `gc-unit3-contract.md` |
+| U4 | Surface completion: GC types in globals/tables/elements/imports/exports, const-expr eligibility, lowerer lattice mirror, runner RefHost/assert-ref support, FFI handles, R1 smith wiring | `gc-unit4-contract.md` |
+| U5 | Vendor the 22 files, grind R0 to zero; articles A1–A7 + harness + caps in CI | `gc-unit5-contract.md` |
+
+R0 green end-to-end is delivered at **U5** (U4 supplies GC
+globals/tables/elements and runner support that i31.wast/extern.wast
+already require — corpus files cannot pass before U4 lands).
 
 ## 5b entry criteria
 
-R3 payloads curated and frozen (binaries + expected traces); R0–R2
-green. Collector converges when: A3 flips accumulate→reclaim (stats
-flat), RSS flat on A1/A2 at 10⁷ scale, every R0–R2 guarantee holds.
+**Ticket (R3 and R4 alike) = curated, executable, baseline-recorded**:
+payloads frozen; each runs on post-slice-5 Baedeker with recorded
+baseline behavior (schedule-independent results green; resource traps
+where they occur). Collector work converges when: A3 flips
+accumulate→reclaim (bounded retention), RSS flat on bounded-live-set
+articles, every schedule-independent guarantee and refusal-discipline
+guarantee still holds.
 
 ## Risks
 
 - **(a) Canonicalization is the silent killer** (EH burned two review
-  rounds there). Mitigation: pin canonical-form semantics from the
-  reference *before* the U1 contract; valid.ml discipline.
+  rounds; this plan's r1 review confirmed the recursion-acceptance
+  trap). Mitigation: pin canonical-form + supertype-installation
+  semantics from valid.ml *before* the U1 contract.
 - **(b) wasm-smith GC support**: verify our lockfile's smith generates
   GC modules; else R1 falls back to spec-interpreter differential on
   hand-mutated corpus modules.
-- **(c) live_bytes flakiness**: killed by design — exact formula, exact
-  equality, no tolerances.
+- **(c) live_bytes flakiness**: killed by design — logical-only
+  formula, exact equality, capacity/RSS explicitly out of scope.
 - **(d) Unbounded never-free runs**: articles self-bound; caps
   documented per article.
+- **(e) Runner GC-reference plumbing** (RefHost inputs/outputs) is
+  load-bearing for R0 — assigned explicitly to U4.
