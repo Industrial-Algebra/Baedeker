@@ -139,40 +139,42 @@ fn parse_heap_type_at(
         });
     };
 
-    // A byte with the continuation bit clear and the sign bit set is a
-    // single-byte negative `s7` value: an abstract heap type. Everything
-    // else starts a non-negative `s33` type index.
-    if first & 0x80 == 0 && first & 0x40 != 0 {
-        cursor.read_byte().map_err(|_| DecodeError {
-            offset: ByteOffset(absolute_offset),
-            context,
-            kind: DecodeErrorKind::UnexpectedEof,
-        })?;
-        abstract_heap_type(first).ok_or(DecodeError {
+    // Abstract heap types are single-byte negative `s7` values and occupy a
+    // DISJOINT opcode space from the concrete-index `s33` reader. Match the
+    // exact abstract bytes before the index path so that e.g. `0x7f`
+    // (an `s33` of -1) is treated as a malformed index, never as an abstract
+    // heap type.
+    if first & 0x80 == 0 {
+        if let Some(heap) = abstract_heap_type(first) {
+            cursor.read_byte().map_err(|_| DecodeError {
+                offset: ByteOffset(absolute_offset),
+                context,
+                kind: DecodeErrorKind::UnexpectedEof,
+            })?;
+            return Ok(heap);
+        }
+    }
+
+    // Otherwise the byte starts a concrete type index, decoded per the pin's
+    // `s33`: the 33-bit signed value is WRAPPED to `i32` (`Convert.I32_.wrap_i64`
+    // at `interpreter/binary/decode.ml`), and a negative wrapped value is a
+    // malformed type index (`typeuse` rejects `i < 0`). A nonnegative wrapped
+    // value is the index. Byte-count (6th byte = too long) and the 5th byte's
+    // unused-bit sign-extension check live in `decode_s33`.
+    let start = cursor.position();
+    let wrapped = leb128::decode_s33_wrapped(cursor).map_err(|mut e| {
+        e.context = context;
+        e.offset = ByteOffset(absolute_offset + (e.offset.0 - start));
+        e
+    })?;
+    if wrapped < 0 {
+        return Err(DecodeError {
             offset: ByteOffset(absolute_offset),
             context,
             kind: DecodeErrorKind::UnknownRefType { byte: first },
-        })
-    } else {
-        // A concrete type index is a non-negative `s33` (multi-byte signed
-        // LEB, range `0..=u32::MAX`). A negative value is malformed
-        // (decode.ml: `typeuse` rejects `i < 0`), never silently widened to
-        // a positive index.
-        let start = cursor.position();
-        let value = leb128::decode_s33(cursor).map_err(|mut e| {
-            e.context = context;
-            e.offset = ByteOffset(absolute_offset + (e.offset.0 - start));
-            e
-        })?;
-        if value < 0 {
-            return Err(DecodeError {
-                offset: ByteOffset(absolute_offset),
-                context,
-                kind: DecodeErrorKind::UnknownRefType { byte: first },
-            });
-        }
-        Ok(HeapType::Type(TypeIdx(value as u32)))
+        });
     }
+    Ok(HeapType::Type(TypeIdx(wrapped as u32)))
 }
 
 #[cfg(test)]
@@ -210,21 +212,82 @@ mod tests {
         );
     }
 
-    /// Review r2 P1: concrete heap indices are non-negative `s33`, so the
-    /// full `u32` range decodes (0xffffffff and 0x80000000 are valid
-    /// encodings; validation rejects unknown indices later).
+    /// Review r3b P1: concrete heap indices decode per the pin's `s33`, which
+    /// wraps the 33-bit signed value to `i32`; a negative wrapped value is a
+    /// malformed type index, a nonnegative one is the index.
     #[test]
-    fn parse_concrete_heap_type_full_u32_range() {
+    fn parse_concrete_heap_type_pinned_wrap_table() {
+        // Wraps to -1 → malformed.
         let mut cursor = Cursor::new(&[0xff, 0xff, 0xff, 0xff, 0x0f]);
         assert_eq!(
-            parse_heap_type(&mut cursor, 0, DecodeContext::TypeSection).unwrap(),
-            HeapType::Type(TypeIdx(u32::MAX))
+            parse_heap_type(&mut cursor, 0, DecodeContext::TypeSection)
+                .unwrap_err()
+                .kind,
+            DecodeErrorKind::UnknownRefType { byte: 0xff }
         );
+        // Wraps to i32::MIN → malformed.
         let mut cursor = Cursor::new(&[0x80, 0x80, 0x80, 0x80, 0x08]);
         assert_eq!(
-            parse_heap_type(&mut cursor, 0, DecodeContext::TypeSection).unwrap(),
-            HeapType::Type(TypeIdx(0x8000_0000))
+            parse_heap_type(&mut cursor, 0, DecodeContext::TypeSection)
+                .unwrap_err()
+                .kind,
+            DecodeErrorKind::UnknownRefType { byte: 0x80 }
         );
+        // `-2^32` wraps to 0 → index 0.
+        let mut cursor = Cursor::new(&[0x80, 0x80, 0x80, 0x80, 0x70]);
+        assert_eq!(
+            parse_heap_type(&mut cursor, 0, DecodeContext::TypeSection).unwrap(),
+            HeapType::Type(TypeIdx(0))
+        );
+        // Bits 5-6 do not sign-extend bit 4 at n=5 → integer too large.
+        let mut cursor = Cursor::new(&[0x80, 0x80, 0x80, 0x80, 0x10]);
+        assert_eq!(
+            parse_heap_type(&mut cursor, 0, DecodeContext::TypeSection)
+                .unwrap_err()
+                .kind,
+            DecodeErrorKind::Leb128Overflow
+        );
+        // Wraps to -1 → malformed.
+        let mut cursor = Cursor::new(&[0xff, 0xff, 0xff, 0xff, 0x7f]);
+        assert_eq!(
+            parse_heap_type(&mut cursor, 0, DecodeContext::TypeSection)
+                .unwrap_err()
+                .kind,
+            DecodeErrorKind::UnknownRefType { byte: 0xff }
+        );
+        // Plain `00` → index 0.
+        let mut cursor = Cursor::new(&[0x00]);
+        assert_eq!(
+            parse_heap_type(&mut cursor, 0, DecodeContext::TypeSection).unwrap(),
+            HeapType::Type(TypeIdx(0))
+        );
+        // A single byte `0x7f` is the `s33` value -1 → malformed type index.
+        // It MUST NOT be confused with the abstract heap-type bytes, which
+        // occupy the disjoint `0x69..=0x74` opcode space.
+        let mut cursor = Cursor::new(&[0x7f]);
+        assert_eq!(
+            parse_heap_type(&mut cursor, 0, DecodeContext::TypeSection)
+                .unwrap_err()
+                .kind,
+            DecodeErrorKind::UnknownRefType { byte: 0x7f }
+        );
+    }
+
+    /// Abstract heap-type single bytes remain abstract, not concrete indices.
+    #[test]
+    fn parse_abstract_single_bytes_stay_abstract() {
+        for (byte, expected) in [
+            (0x74u8, HeapType::NoExn),
+            (0x70, HeapType::Func),
+            (0x69, HeapType::Exn),
+        ] {
+            let bytes = [byte];
+            let mut cursor = Cursor::new(&bytes);
+            assert_eq!(
+                parse_heap_type(&mut cursor, 0, DecodeContext::TypeSection).unwrap(),
+                expected
+            );
+        }
     }
 
     /// Values above `u32::MAX` (bit 32 set without sign extension) stay

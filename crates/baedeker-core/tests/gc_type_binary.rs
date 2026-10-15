@@ -266,3 +266,32 @@ fn decode_multi_byte_concrete_heaptype_index() {
         ValType::Ref(RefType::concrete(true, TypeIdx(128)))
     );
 }
+
+/// Review r3b P1: the pinned `s33` reader wraps `-2^32` to 0, so the
+/// 5-byte encoding `80 80 80 80 70` is a concrete reference to type index 0.
+#[test]
+fn decode_wrapped_wide_heaptype_index_zero() {
+    let types = decode_ok(&[0x01, 0x60, 0x01, 0x63, 0x80, 0x80, 0x80, 0x80, 0x70, 0x00]);
+    let params = &func(&types, 0).params;
+    assert_eq!(params[0], ValType::Ref(RefType::concrete(true, TypeIdx(0))));
+}
+
+/// Review r3b P1: a func param `(ref null 0)` built from the wide wrapping
+/// encoding `63 80 80 80 80 70` must VALIDATE as referencing type index 0 when
+/// a type 0 exists (it must not be rejected as malformed).
+#[test]
+fn validate_wrapped_wide_heaptype_index_zero() {
+    let bytes = module_with_type_section(&[
+        0x02, // two types
+        0x5F, 0x01, 0x7F, 0x00, // type 0: (struct (field i32))
+        0x60, 0x01, 0x63, 0x80, 0x80, 0x80, 0x80, 0x70,
+        0x00, // type 1: (func (param (ref null 0)))
+    ]);
+    let module = Module::decode(&bytes).expect("wide wrapped index must decode");
+    module.validate().expect("wide wrapped index must validate");
+    let ty = module.func_type(TypeIdx(1)).expect("type 1 is a func type");
+    assert_eq!(
+        ty.params[0],
+        ValType::Ref(RefType::concrete(true, TypeIdx(0)))
+    );
+}

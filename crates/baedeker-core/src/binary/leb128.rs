@@ -237,6 +237,9 @@ pub fn decode_i32(cursor: &mut Cursor<'_>) -> Result<i32, DecodeError> {
 /// value bits 28-31 and the sign bit at value bit 32, so its bits 5-6 must
 /// sign-extend bit 4 exactly. Returns `i64` so the full `[-2^32, 2^32-1]`
 /// range is representable.
+///
+/// This is the raw 33-bit value; the pinned concrete-heap-index reader wraps
+/// it to `i32` (see [`decode_s33_wrapped`]).
 pub fn decode_s33(cursor: &mut Cursor<'_>) -> Result<i64, DecodeError> {
     let start = cursor.position();
     let mut result: i64 = 0;
@@ -282,6 +285,16 @@ pub fn decode_s33(cursor: &mut Cursor<'_>) -> Result<i64, DecodeError> {
         context: DecodeContext::Leb128,
         kind: DecodeErrorKind::Leb128TooLong,
     })
+}
+
+/// Decode a concrete heap-type index exactly as the pinned reference does:
+/// read an `s33` (see [`decode_s33`]), then apply
+/// `Convert.I32_.wrap_i64` so the 33-bit signed value is narrowed to `i32`
+/// (`interpreter/binary/decode.ml`). A **negative** wrapped value is a
+/// malformed type index; a nonnegative one is the index. Callers are
+/// responsible for rejecting the negative case.
+pub fn decode_s33_wrapped(cursor: &mut Cursor<'_>) -> Result<i32, DecodeError> {
+    decode_s33(cursor).map(|value| value as i32)
 }
 
 /// Decode a signed LEB128-encoded i64.
@@ -478,6 +491,32 @@ mod tests {
         // -2^32 = 0x80 0x80 0x80 0x80 0x70
         let mut c = Cursor::new(&[0x80, 0x80, 0x80, 0x80, 0x70]);
         assert_eq!(decode_s33(&mut c).unwrap(), -(1i64 << 32));
+    }
+
+    /// The pinned concrete-index reader wraps the 33-bit value to `i32`
+    /// (`Convert.I32_.wrap_i64 (sN 33 s)`). These are the exact classifications
+    /// from review r3b's table.
+    #[test]
+    fn s33_wrap_matches_pin() {
+        // 0xffffffff encodes +2^32-1, wraps to -1.
+        let mut c = Cursor::new(&[0xff, 0xff, 0xff, 0xff, 0x0f]);
+        assert_eq!(decode_s33_wrapped(&mut c).unwrap(), -1);
+        // 0x80000000 encodes +2^31, wraps to i32::MIN.
+        let mut c = Cursor::new(&[0x80, 0x80, 0x80, 0x80, 0x08]);
+        assert_eq!(decode_s33_wrapped(&mut c).unwrap(), i32::MIN);
+        // -2^32 wraps to 0 (an encoding of index 0).
+        let mut c = Cursor::new(&[0x80, 0x80, 0x80, 0x80, 0x70]);
+        assert_eq!(decode_s33_wrapped(&mut c).unwrap(), 0);
+        // Bits 5-6 must sign-extend bit 4 at n=5: otherwise integer-too-large.
+        let mut c = Cursor::new(&[0x80, 0x80, 0x80, 0x80, 0x10]);
+        assert_eq!(
+            decode_s33_wrapped(&mut c).unwrap_err().kind,
+            DecodeErrorKind::Leb128Overflow
+        );
+        // A single byte 0x7f is the s33 value -1 (wraps to -1), not an
+        // abstract heap type.
+        let mut c = Cursor::new(&[0x7f]);
+        assert_eq!(decode_s33_wrapped(&mut c).unwrap(), -1);
     }
 
     // ── decode_u64 ──────────────────────────────────────────

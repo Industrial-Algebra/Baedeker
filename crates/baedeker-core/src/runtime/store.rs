@@ -4,7 +4,6 @@
 //! Mutable runtime state for an instantiated module: linear memories and
 //! globals. See [Spec §4.4](https://webassembly.github.io/spec/core/exec/runtime.html).
 
-use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -14,8 +13,8 @@ use crate::runtime::gpu::{GpuBackend, GpuError, GpuKernelId};
 use crate::runtime::host::HostFunction;
 use crate::runtime::{RuntimeError, RuntimeErrorKind, RuntimeTrap, Value, trap};
 use crate::types::{
-    CompType, FieldType, FuncIdx, FuncType, GlobalType, HeapType, Limits, MemType, RefType,
-    StorageType, SubType, TableType, TypeIdx, ValType,
+    ClosedDefinedType, CompType, FieldType, FuncIdx, FuncType, GlobalType, HeapType, Limits,
+    MemType, RefType, StorageType, SubType, TableType, TypeIdx, ValType,
 };
 
 use crate::runtime::verify::F32_ADD_WGSL;
@@ -62,6 +61,12 @@ impl Imports {
     /// structurally (rolled closed forms) at link time rather than by raw
     /// type index. Call once per provider module before the fluent
     /// memory/global/table/tag registration.
+    ///
+    /// Precondition: invoke this **exactly once per `module` name**. The
+    /// registration is last-wins — a second call for the same name replaces
+    /// the earlier type section, so any provider registered against the
+    /// first context would be reinterpreted against the second. There is no
+    /// merge or duplicate detection here.
     pub fn with_module_types(mut self, module: &str, provider: &RegModule) -> Self {
         self.type_contexts.insert(
             module.into(),
@@ -520,10 +525,12 @@ pub struct ExceptionRecord {
     pub payload: Vec<Value>,
 }
 
-/// A reference type with concrete (indexed) references recursively
-/// expanded against the defining module's type list — the structural form
-/// in which tag types are compared at link time. Abstract heap types stay
-/// nominal; `(ref $t)` expands to the referred function signature.
+/// A reference type with concrete (indexed) references resolved to their
+/// defining module's rolled closed forms — the structural form in which tag
+/// types are compared at link time. Abstract heap types stay nominal; a
+/// concrete `(ref $t)` carries the complete [`ClosedDefinedType`] of `$t`
+/// (finality, declared supertypes, and comptype), so cross-module comparison
+/// is the spec's canonical defined-type equivalence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExpandedVal {
     Num(crate::types::NumType),
@@ -540,23 +547,15 @@ pub enum ExpandedVal {
     ExnRef {
         nullable: bool,
     },
-    /// `(ref $t)` where `$t` is a concrete function type, expanded.
-    ConcreteFunc {
+    /// `(ref $t)` where `$t` is a concrete defined type. The full rolled
+    /// closed form is carried — finality, declared supertypes, and comptype —
+    /// so that linking compares complete defined-type identity. In
+    /// particular a non-final `(sub (struct (field i32)))` does NOT compare
+    /// equal to a plain final `(struct (field i32))`, even though both are
+    /// struct-typed with the same fields.
+    ConcreteDefined {
         nullable: bool,
-        params: Vec<ExpandedVal>,
-        results: Vec<ExpandedVal>,
-    },
-    /// `(ref $t)` where `$t` is a concrete struct type, expanded. Keeping
-    /// the kind distinct from an empty function type is what makes a
-    /// struct-typed tag parameter fail to link against a func-typed one.
-    ConcreteStruct {
-        nullable: bool,
-        fields: Vec<ExpandedField>,
-    },
-    /// `(ref $t)` where `$t` is a concrete array type, expanded.
-    ConcreteArray {
-        nullable: bool,
-        field: Box<ExpandedField>,
+        def: ClosedDefinedType,
     },
 }
 
@@ -605,45 +604,38 @@ pub enum RecProvenance {
     Unresolvable,
 }
 
-/// Expand a composite type with its kind intact; `None` when a
-/// concrete-reference cycle is reachable (iso-recursive canonicalization
-/// is GC-era: cyclic tag types link-reject conservatively).
+/// Expand a composite type with its kind intact. Concrete references now
+/// carry their full rolled closed form, so this only fails on a genuinely
+/// unresolvable reference (unknown index or an external cycle, impossible
+/// for a validated module).
 fn expand_comp(
     types: &[SubType],
     rec_groups: &[(u32, u32)],
     comp: &CompType,
-    path: &mut Vec<u32>,
 ) -> Option<ExpandedComp> {
     Some(match comp {
-        CompType::Func(func) => ExpandedComp::Func(expand_func(types, rec_groups, func, path)?),
-        CompType::Struct(fields) => {
-            ExpandedComp::Struct(expand_fields(types, rec_groups, fields, path)?)
-        }
-        CompType::Array(field) => {
-            ExpandedComp::Array(expand_field(types, rec_groups, *field, path)?)
-        }
+        CompType::Func(func) => ExpandedComp::Func(expand_func(types, rec_groups, func)?),
+        CompType::Struct(fields) => ExpandedComp::Struct(expand_fields(types, rec_groups, fields)?),
+        CompType::Array(field) => ExpandedComp::Array(expand_field(types, rec_groups, *field)?),
     })
 }
 
-/// Expand one function type; `None` when a concrete-reference cycle is
-/// reachable (iso-recursive canonicalization is GC-era: cyclic tag types
-/// link-reject conservatively).
+/// Expand one function type.
 fn expand_func(
     types: &[SubType],
     rec_groups: &[(u32, u32)],
     ty: &crate::types::FuncType,
-    path: &mut Vec<u32>,
 ) -> Option<ExpandedFunc> {
     Some(ExpandedFunc {
         params: ty
             .params
             .iter()
-            .map(|v| expand_val(types, rec_groups, v, path))
+            .map(|v| expand_val(types, rec_groups, v))
             .collect::<Option<_>>()?,
         results: ty
             .results
             .iter()
-            .map(|v| expand_val(types, rec_groups, v, path))
+            .map(|v| expand_val(types, rec_groups, v))
             .collect::<Option<_>>()?,
     })
 }
@@ -652,11 +644,10 @@ fn expand_fields(
     types: &[SubType],
     rec_groups: &[(u32, u32)],
     fields: &[FieldType],
-    path: &mut Vec<u32>,
 ) -> Option<Vec<ExpandedField>> {
     fields
         .iter()
-        .map(|field| expand_field(types, rec_groups, *field, path))
+        .map(|field| expand_field(types, rec_groups, *field))
         .collect()
 }
 
@@ -664,12 +655,11 @@ fn expand_field(
     types: &[SubType],
     rec_groups: &[(u32, u32)],
     field: FieldType,
-    path: &mut Vec<u32>,
 ) -> Option<ExpandedField> {
     Some(ExpandedField {
         mutable: field.mutable,
         storage: match field.storage {
-            StorageType::Val(v) => ExpandedStorage::Val(expand_val(types, rec_groups, &v, path)?),
+            StorageType::Val(v) => ExpandedStorage::Val(expand_val(types, rec_groups, &v)?),
             StorageType::I8 => ExpandedStorage::I8,
             StorageType::I16 => ExpandedStorage::I16,
         },
@@ -680,7 +670,6 @@ fn expand_val(
     types: &[SubType],
     rec_groups: &[(u32, u32)],
     v: &crate::types::ValType,
-    path: &mut Vec<u32>,
 ) -> Option<ExpandedVal> {
     use crate::types::{HeapType, RefType, ValType};
     match v {
@@ -698,47 +687,18 @@ fn expand_val(
             HeapType::Exn => Some(ExpandedVal::ExnRef {
                 nullable: *nullable,
             }),
-            HeapType::Type(idx) => {
-                // Nested references into rec groups would need full
-                // iso-recursive canonicalization to compare across
-                // modules (group identity, not structure); treat them
-                // as non-comparable, like cycles.
-                if rec_groups
-                    .iter()
-                    .any(|&(start, len)| idx.0 >= start && idx.0 < start + len)
-                {
-                    return None;
+            // Carry the COMPLETE rolled closed form of the referenced defined
+            // type — finality, declared supertypes, and comptype — not just
+            // the expanded shape. This is what makes linking sensitive to
+            // finality and to differing supertype lists (review r3b P1).
+            // `ClosedDefinedType::of` resolves in-group references relative
+            // and external references recursively, and detects cycles.
+            HeapType::Type(idx) => ClosedDefinedType::of(types, rec_groups, *idx).map(|def| {
+                ExpandedVal::ConcreteDefined {
+                    nullable: *nullable,
+                    def,
                 }
-                if path.contains(&idx.0) {
-                    return None; // cyclic: reject conservatively
-                }
-                path.push(idx.0);
-                let sub = types.get(idx.0 as usize)?;
-                let expanded =
-                    match &sub.comp {
-                        CompType::Func(func) => {
-                            expand_func(types, rec_groups, func, path).map(|func| {
-                                ExpandedVal::ConcreteFunc {
-                                    nullable: *nullable,
-                                    params: func.params,
-                                    results: func.results,
-                                }
-                            })
-                        }
-                        CompType::Struct(fields) => expand_fields(types, rec_groups, fields, path)
-                            .map(|fields| ExpandedVal::ConcreteStruct {
-                                nullable: *nullable,
-                                fields,
-                            }),
-                        CompType::Array(field) => expand_field(types, rec_groups, *field, path)
-                            .map(|field| ExpandedVal::ConcreteArray {
-                                nullable: *nullable,
-                                field: Box::new(field),
-                            }),
-                    };
-                path.pop();
-                expanded
-            }
+            }),
             // GC abstract heap types are not part of the EH-era link
             // expansion; they are never produced by EH tag types.
             HeapType::Any
@@ -760,10 +720,12 @@ pub struct TagBinding {
     /// `(instance_id, module_local_tag_idx)` of the DEFINING instance.
     pub identity: (u32, u32),
     pub ty: FuncType,
-    /// Recursively expanded parameter types (concrete references
-    /// resolved against the defining module's types); `None` when an
-    /// expansion failure (cycle or nested rec reference) makes the type
-    /// non-comparable — such tags link-reject conservatively.
+    /// Parameter types with concrete references resolved to their full
+    /// rolled closed forms against the defining module's types (`None`
+    /// when expansion fails — an unknown index or an external cycle, which
+    /// a validated module cannot produce). Comparing these forms is the
+    /// spec's canonical defined-type equivalence, so finality and declared
+    /// supertypes participate.
     pub expanded_params: Option<Vec<ExpandedVal>>,
     /// Rec-group provenance of the tag type itself.
     pub rec: RecProvenance,
@@ -1098,9 +1060,7 @@ impl Store {
                 Some((sig, pos)) => {
                     let expanded: Option<Vec<ExpandedComp>> = sig
                         .iter()
-                        .map(|sub| {
-                            expand_comp(module_type_defs, module_recs, &sub.comp, &mut Vec::new())
-                        })
+                        .map(|sub| expand_comp(module_type_defs, module_recs, &sub.comp))
                         .collect();
                     match expanded {
                         Some(sig) => RecProvenance::Group(sig, *pos),
@@ -1122,7 +1082,7 @@ impl Store {
                 .ty
                 .params
                 .iter()
-                .map(|v| expand_val(module_type_defs, module_recs, v, &mut Vec::new()))
+                .map(|v| expand_val(module_type_defs, module_recs, v))
                 .collect();
             let declared_rec = rec_provenance(&declared.rec);
             // Bare types are implicit SINGLETON rec groups in the
@@ -1174,7 +1134,7 @@ impl Store {
             let expanded_params: Option<Vec<ExpandedVal>> = module_types[type_idx.0 as usize]
                 .params
                 .iter()
-                .map(|v| expand_val(module_type_defs, module_recs, v, &mut Vec::new()))
+                .map(|v| expand_val(module_type_defs, module_recs, v))
                 .collect();
             let raw_rec = module
                 .rec_groups

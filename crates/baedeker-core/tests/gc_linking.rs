@@ -353,3 +353,141 @@ fn different_struct_tag_params_do_not_link() {
     );
     assert_import_type_mismatch(group.try_add(&b, &imports));
 }
+
+// ── Review r3b P1: complete defined-type identity ───────────────────
+
+/// Provider tag parameter referencing a NON-FINAL `(sub (struct (field
+/// i32)))` must not link against a consumer parameter referencing a plain
+/// FINAL `(struct (field i32))`. The referenced defined types differ in
+/// finality, so their complete closed forms differ even though the expanded
+/// struct shapes are identical.
+#[test]
+fn tag_non_final_param_mismatches_final() {
+    let a = Rc::new(wat_module(
+        r#"
+(module
+  (type (sub (struct (field i32))))
+  (tag (export "e") (param (ref null 0))))"#,
+    ));
+    let b = Rc::new(wat_module(
+        r#"
+(module
+  (type (struct (field i32)))
+  (import "a" "e" (tag (param (ref null 0)))))"#,
+    ));
+
+    let mut group = Group::new();
+    let a_store = group.add(&a, &Imports::new());
+    let binding = tag_export_binding(&a_store.borrow(), &a, "e").expect("tag export binding");
+    let imports = Imports::new().tag(
+        "a",
+        "e",
+        binding.identity,
+        binding.ty.clone(),
+        binding.expanded_params.clone(),
+        binding.rec.clone(),
+    );
+    assert_import_type_mismatch(group.try_add(&b, &imports));
+}
+
+/// The same finality mismatch must still be rejected after the CONSUMER has
+/// been AOT serialized and deserialized: the closed form is recomputed from
+/// the serialized `type_defs`, not stored in the artifact.
+#[cfg(feature = "aot")]
+#[test]
+fn tag_non_final_param_mismatches_final_after_consumer_aot() {
+    let a = Rc::new(wat_module(
+        r#"
+(module
+  (type (sub (struct (field i32))))
+  (tag (export "e") (param (ref null 0))))"#,
+    ));
+    let consumer = wat_module(
+        r#"
+(module
+  (type (struct (field i32)))
+  (import "a" "e" (tag (param (ref null 0)))))"#,
+    );
+    let artifact = baedeker_core::aot::serialize(&consumer);
+    let b =
+        Rc::new(baedeker_core::aot::deserialize(&artifact).expect("consumer artifact roundtrips"));
+
+    let mut group = Group::new();
+    let a_store = group.add(&a, &Imports::new());
+    let binding = tag_export_binding(&a_store.borrow(), &a, "e").expect("tag export binding");
+    let imports = Imports::new().tag(
+        "a",
+        "e",
+        binding.identity,
+        binding.ty.clone(),
+        binding.expanded_params.clone(),
+        binding.rec.clone(),
+    );
+    assert_import_type_mismatch(group.try_add(&b, &imports));
+}
+
+/// Positive control: two identical non-final `(sub (struct (field i32)))`
+/// declarations must still link.
+#[test]
+fn identical_non_final_struct_tag_params_link() {
+    let a = Rc::new(wat_module(
+        r#"
+(module
+  (type (sub (struct (field i32))))
+  (tag (export "e") (param (ref null 0))))"#,
+    ));
+    let b = Rc::new(wat_module(
+        r#"
+(module
+  (type (sub (struct (field i32))))
+  (import "a" "e" (tag (param (ref null 0)))))"#,
+    ));
+
+    let mut group = Group::new();
+    let a_store = group.add(&a, &Imports::new());
+    let binding = tag_export_binding(&a_store.borrow(), &a, "e").expect("tag export binding");
+    let imports = Imports::new().tag(
+        "a",
+        "e",
+        binding.identity,
+        binding.ty.clone(),
+        binding.expanded_params.clone(),
+        binding.rec.clone(),
+    );
+    group
+        .try_add(&b, &imports)
+        .expect("identical non-final struct tag params must link");
+}
+
+/// Two non-final struct params whose declared supertype lists differ (one
+/// extends a base struct, the other has no supertypes) must not link: the
+/// compared closed form includes the declared supertype list.
+#[test]
+fn tag_param_differing_supertypes_mismatch() {
+    let a = Rc::new(wat_module(
+        r#"
+(module
+  (type $base (sub (struct (field i32))))
+  (type $s (sub $base (struct (field i32))))
+  (tag (export "e") (param (ref null $s))))"#,
+    ));
+    let b = Rc::new(wat_module(
+        r#"
+(module
+  (type $s (sub (struct (field i32))))
+  (import "a" "e" (tag (param (ref null $s)))))"#,
+    ));
+
+    let mut group = Group::new();
+    let a_store = group.add(&a, &Imports::new());
+    let binding = tag_export_binding(&a_store.borrow(), &a, "e").expect("tag export binding");
+    let imports = Imports::new().tag(
+        "a",
+        "e",
+        binding.identity,
+        binding.ty.clone(),
+        binding.expanded_params.clone(),
+        binding.rec.clone(),
+    );
+    assert_import_type_mismatch(group.try_add(&b, &imports));
+}
