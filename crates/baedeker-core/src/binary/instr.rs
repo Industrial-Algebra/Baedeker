@@ -554,6 +554,82 @@ pub enum Instr {
     Throw(TagIdx),
     /// `throw_ref` — re-raise the exception referenced by an exnref.
     ThrowRef,
+    /// `struct.new $x` — allocate a struct from its field operands.
+    StructNew(TypeIdx),
+    /// `struct.new_default $x` — allocate a struct with default field values.
+    StructNewDefault(TypeIdx),
+    /// `struct.get $x $i` — read an unpacked struct field.
+    StructGet {
+        type_idx: TypeIdx,
+        field: u32,
+    },
+    /// `struct.get_s $x $i` — read a packed struct field, sign-extended.
+    StructGetS {
+        type_idx: TypeIdx,
+        field: u32,
+    },
+    /// `struct.get_u $x $i` — read a packed struct field, zero-extended.
+    StructGetU {
+        type_idx: TypeIdx,
+        field: u32,
+    },
+    /// `struct.set $x $i` — write a struct field.
+    StructSet {
+        type_idx: TypeIdx,
+        field: u32,
+    },
+    /// `array.new $x` — allocate an array of `len` copies of the operand.
+    ArrayNew(TypeIdx),
+    /// `array.new_default $x` — allocate an array of default elements.
+    ArrayNewDefault(TypeIdx),
+    /// `array.new_fixed $x $n` — allocate an array from `n` operands.
+    ArrayNewFixed {
+        type_idx: TypeIdx,
+        count: u32,
+    },
+    /// `array.new_data $x $y` — allocate an array from a data segment.
+    ArrayNewData {
+        type_idx: TypeIdx,
+        data: crate::types::DataIdx,
+    },
+    /// `array.new_elem $x $y` — allocate an array from an element segment.
+    ArrayNewElem {
+        type_idx: TypeIdx,
+        elem: ElemIdx,
+    },
+    /// `array.get $x` — read an unpacked array element.
+    ArrayGet(TypeIdx),
+    /// `array.get_s $x` — read a packed array element, sign-extended.
+    ArrayGetS(TypeIdx),
+    /// `array.get_u $x` — read a packed array element, zero-extended.
+    ArrayGetU(TypeIdx),
+    /// `array.set $x` — write an array element.
+    ArraySet(TypeIdx),
+    /// `array.len` — the length of an abstract array reference.
+    ArrayLen,
+    /// `array.fill $x` — fill a range with a value.
+    ArrayFill(TypeIdx),
+    /// `array.copy $x $y` — copy between arrays.
+    ArrayCopy {
+        dst: TypeIdx,
+        src: TypeIdx,
+    },
+    /// `array.init_data $x $y` — initialize from a data segment.
+    ArrayInitData {
+        type_idx: TypeIdx,
+        data: crate::types::DataIdx,
+    },
+    /// `array.init_elem $x $y` — initialize from an element segment.
+    ArrayInitElem {
+        type_idx: TypeIdx,
+        elem: ElemIdx,
+    },
+    /// `ref.i31` — box an i32 into a 31-bit immediate reference.
+    RefI31,
+    /// `i31.get_s` — sign-extended payload.
+    I31GetS,
+    /// `i31.get_u` — zero-extended payload.
+    I31GetU,
 }
 
 impl<'a> CodeBody<'a> {
@@ -676,6 +752,7 @@ pub fn decode_instr_with_offset(
         0x26 => Instr::TableSet(parse_table_idx(cursor, base_offset)?),
         0xFC => decode_bulk_memory_instr(cursor, base_offset)?,
         0xFD => decode_simd_instr(cursor, base_offset)?,
+        0xFB => decode_gc_instr(cursor, base_offset)?,
         0x28 => Instr::I32Load(parse_memarg(cursor, base_offset)?),
         0x29 => Instr::I64Load(parse_memarg(cursor, base_offset)?),
         0x2A => Instr::F32Load(parse_memarg(cursor, base_offset)?),
@@ -855,6 +932,79 @@ pub fn decode_instr_with_offset(
         offset: ByteOffset(base_offset + opcode_offset),
         instr,
     })
+}
+
+fn decode_gc_instr(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Instr, DecodeError> {
+    let opcode = decode_u32(cursor, base_offset)?;
+    match opcode {
+        0x00 => Ok(Instr::StructNew(TypeIdx(decode_u32(cursor, base_offset)?))),
+        0x01 => Ok(Instr::StructNewDefault(TypeIdx(decode_u32(
+            cursor,
+            base_offset,
+        )?))),
+        0x02 => Ok(Instr::StructGet {
+            type_idx: TypeIdx(decode_u32(cursor, base_offset)?),
+            field: decode_u32(cursor, base_offset)?,
+        }),
+        0x03 => Ok(Instr::StructGetS {
+            type_idx: TypeIdx(decode_u32(cursor, base_offset)?),
+            field: decode_u32(cursor, base_offset)?,
+        }),
+        0x04 => Ok(Instr::StructGetU {
+            type_idx: TypeIdx(decode_u32(cursor, base_offset)?),
+            field: decode_u32(cursor, base_offset)?,
+        }),
+        0x05 => Ok(Instr::StructSet {
+            type_idx: TypeIdx(decode_u32(cursor, base_offset)?),
+            field: decode_u32(cursor, base_offset)?,
+        }),
+        0x06 => Ok(Instr::ArrayNew(TypeIdx(decode_u32(cursor, base_offset)?))),
+        0x07 => Ok(Instr::ArrayNewDefault(TypeIdx(decode_u32(
+            cursor,
+            base_offset,
+        )?))),
+        0x08 => Ok(Instr::ArrayNewFixed {
+            type_idx: TypeIdx(decode_u32(cursor, base_offset)?),
+            count: decode_u32(cursor, base_offset)?,
+        }),
+        0x09 => Ok(Instr::ArrayNewData {
+            type_idx: TypeIdx(decode_u32(cursor, base_offset)?),
+            data: crate::types::DataIdx(decode_u32(cursor, base_offset)?),
+        }),
+        0x0A => Ok(Instr::ArrayNewElem {
+            type_idx: TypeIdx(decode_u32(cursor, base_offset)?),
+            elem: ElemIdx(decode_u32(cursor, base_offset)?),
+        }),
+        0x0B => Ok(Instr::ArrayGet(TypeIdx(decode_u32(cursor, base_offset)?))),
+        0x0C => Ok(Instr::ArrayGetS(TypeIdx(decode_u32(cursor, base_offset)?))),
+        0x0D => Ok(Instr::ArrayGetU(TypeIdx(decode_u32(cursor, base_offset)?))),
+        0x0E => Ok(Instr::ArraySet(TypeIdx(decode_u32(cursor, base_offset)?))),
+        0x0F => Ok(Instr::ArrayLen),
+        0x10 => Ok(Instr::ArrayFill(TypeIdx(decode_u32(cursor, base_offset)?))),
+        0x11 => Ok(Instr::ArrayCopy {
+            dst: TypeIdx(decode_u32(cursor, base_offset)?),
+            src: TypeIdx(decode_u32(cursor, base_offset)?),
+        }),
+        0x12 => Ok(Instr::ArrayInitData {
+            type_idx: TypeIdx(decode_u32(cursor, base_offset)?),
+            data: crate::types::DataIdx(decode_u32(cursor, base_offset)?),
+        }),
+        0x13 => Ok(Instr::ArrayInitElem {
+            type_idx: TypeIdx(decode_u32(cursor, base_offset)?),
+            elem: ElemIdx(decode_u32(cursor, base_offset)?),
+        }),
+        0x1C => Ok(Instr::RefI31),
+        0x1D => Ok(Instr::I31GetS),
+        0x1E => Ok(Instr::I31GetU),
+        // 0x14–0x1B are casts/conversions (identity checks, br_on_cast,
+        // extern/any conversions). They are U3's scope; at this pin an
+        // unimplemented `0xFB` sub-opcode is an unknown opcode.
+        _ => Err(DecodeError {
+            offset: ByteOffset(base_offset),
+            context: DecodeContext::CodeSection,
+            kind: DecodeErrorKind::UnknownOpcode { byte: 0xFB },
+        }),
+    }
 }
 
 fn decode_bulk_memory_instr(

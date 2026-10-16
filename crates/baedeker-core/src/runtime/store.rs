@@ -9,6 +9,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::lower::{RegConstInstr, RegDataMode, RegElemValue, RegElementMode, RegModule};
+use crate::runtime::gcheap::{GcHeap, GcSnapshot, GcStats};
 use crate::runtime::gpu::{GpuBackend, GpuError, GpuKernelId};
 use crate::runtime::host::HostFunction;
 use crate::runtime::{RuntimeError, RuntimeErrorKind, RuntimeTrap, Value, trap};
@@ -806,6 +807,10 @@ pub struct Store {
     /// Module-local tag index → resolved global identity and type.
     /// Imported tags first, then defined (mirroring the validator/lowerer).
     tag_map: Vec<TagBinding>,
+    /// The never-free GC heap (slice 5). Store-global: all allocations in
+    /// this instance go through it, and `GcStats` is logical accounting for
+    /// the whole store. Per-instance isolation is not required by the spec.
+    gc_heap: alloc::rc::Rc<core::cell::RefCell<GcHeap>>,
 }
 
 impl Store {
@@ -1212,6 +1217,7 @@ impl Store {
             exceptions,
             tag_types: Vec::new(),
             tag_map,
+            gc_heap: Rc::new(core::cell::RefCell::new(GcHeap::new())),
         };
 
         // Register defined-tag types (module-agnostic tag ids).
@@ -1603,6 +1609,38 @@ impl Store {
     /// Read a global's current value by index-space index (embedding access).
     pub fn get_global(&self, idx: u32) -> Option<Value> {
         self.global(idx)
+    }
+
+    /// A logical snapshot of the GC heap's accounting.
+    pub fn gc_stats(&self) -> GcStats {
+        self.gc_heap.borrow().stats()
+    }
+
+    /// A GC allocation snapshot for `allocations_since`.
+    pub fn gc_snapshot(&self) -> GcSnapshot {
+        self.gc_heap.borrow().snapshot()
+    }
+
+    /// Object-table insertions since `snapshot`.
+    pub fn gc_allocations_since(&self, snapshot: GcSnapshot) -> u64 {
+        self.gc_heap.borrow().allocations_since(snapshot)
+    }
+
+    /// Shared handle of the GC heap.
+    pub fn gc_heap(&self) -> alloc::rc::Rc<core::cell::RefCell<GcHeap>> {
+        self.gc_heap.clone()
+    }
+
+    /// Read the GC heap via closure.
+    pub fn with_gc_heap<R>(&self, f: impl FnOnce(&GcHeap) -> R) -> R {
+        let heap = self.gc_heap.borrow();
+        f(&heap)
+    }
+
+    /// Mutate the GC heap via closure.
+    pub fn with_gc_heap_mut<R>(&self, f: impl FnOnce(&mut GcHeap) -> R) -> R {
+        let mut heap = self.gc_heap.borrow_mut();
+        f(&mut heap)
     }
 
     /// Read a memory's bytes by index-space index via closure (embedding

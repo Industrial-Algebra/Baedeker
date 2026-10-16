@@ -9,6 +9,7 @@
 
 use alloc::{string::String, vec::Vec};
 
+mod gcheap;
 mod store;
 mod table;
 
@@ -18,6 +19,7 @@ pub mod verify;
 
 pub use table::Table;
 
+pub use gcheap::{Ext, GcHeap, GcObject, GcSnapshot, GcStats, GcTypeId, GcTypeKind, ObjectId};
 pub use host::{HostFunction, link_func};
 pub use store::{
     ExceptionRecord, ExpandedComp, ExpandedField, ExpandedFunc, ExpandedStorage, ExpandedVal,
@@ -25,11 +27,14 @@ pub use store::{
 };
 
 use crate::lower::{
-    BinaryOp, LaneShape, Reg, RegFunc, RegInstr, RegModule, RegOp, RegTerm, UnaryOp,
+    BinaryOp, GcExt, LaneShape, Reg, RegFunc, RegInstr, RegModule, RegOp, RegTerm, UnaryOp,
     V128BinaryKind, V128CompareKind, V128ConvertKind, V128FloatUnaryKind, V128ShiftKind,
     V128UnaryKind,
 };
-use crate::types::{FuncIdx, HeapType, MemArg, NumType, RefType, TableIdx, ValType};
+use crate::runtime::gcheap::storage_width;
+use crate::types::{
+    CompType, FuncIdx, HeapType, MemArg, NumType, RefType, StorageType, TableIdx, TypeIdx, ValType,
+};
 
 /// A runtime WebAssembly value.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -52,6 +57,13 @@ pub enum Value {
     /// An exception reference: `None` is null; `Some(idx)` indexes the
     /// store's exception arena. Arena records live as long as the store.
     ExnRef(Option<u32>),
+    /// A GC aggregate reference: an index into the store's never-free
+    /// [`GcHeap`]. Copies freely (no `Rc`); null GC references use the
+    /// reference-kind null of the static type.
+    GcRef(ObjectId),
+    /// A 31-bit immediate integer (`ref.i31`). The payload is masked to
+    /// 31 bits; `I31` never allocates a heap object.
+    I31(i32),
 }
 
 impl Value {
@@ -65,6 +77,8 @@ impl Value {
             Value::ExternRef(_) => ValType::Ref(RefType::ExternRef),
             Value::V128(_) => ValType::Vec(crate::types::VecType::V128),
             Value::ExnRef(_) => ValType::Ref(RefType::from_parts(true, HeapType::Exn)),
+            Value::GcRef(_) => ValType::Ref(RefType::from_parts(true, HeapType::Any)),
+            Value::I31(_) => ValType::Ref(RefType::from_parts(false, HeapType::I31)),
         }
     }
 }
@@ -201,6 +215,14 @@ pub enum RuntimeTrap {
     InvalidConversionToInteger,
     NullFunctionReference,
     NullReference,
+    /// `struct.get`/`struct.set` on a null structure reference.
+    NullStructReference,
+    /// A struct/array access on a null array reference.
+    NullArrayReference,
+    /// `i31.get_s`/`i31.get_u` on a null i31 reference.
+    NullI31Reference,
+    /// An array index/range out of bounds (`out of bounds array access`).
+    OutOfBoundsArrayAccess,
 }
 
 impl RuntimeTrap {
@@ -219,6 +241,10 @@ impl RuntimeTrap {
             RuntimeTrap::InvalidConversionToInteger => "invalid conversion to integer",
             RuntimeTrap::NullFunctionReference => "null function reference",
             RuntimeTrap::NullReference => "null reference",
+            RuntimeTrap::NullStructReference => "null structure reference",
+            RuntimeTrap::NullArrayReference => "null array reference",
+            RuntimeTrap::NullI31Reference => "null i31 reference",
+            RuntimeTrap::OutOfBoundsArrayAccess => "out of bounds array access",
         }
     }
 }
@@ -993,7 +1019,7 @@ pub(crate) fn execute_func_in(
                         set_reg(&mut registers, dst, value)?;
                     }
                 } else {
-                    execute_reg_op(store, &mut registers, &mut locals, instr)?;
+                    execute_reg_op(module, store, &mut registers, &mut locals, instr)?;
                 }
             }
 
@@ -1261,6 +1287,7 @@ pub(crate) fn execute_func_in(
 }
 
 fn execute_reg_op(
+    module: Option<&RegModule>,
     store: Option<&Store>,
     registers: &mut [Option<Value>],
     locals: &mut [Option<Value>],
@@ -1335,6 +1362,354 @@ fn execute_reg_op(
                 return Err(trap(RuntimeTrap::NullReference));
             }
             set_reg(registers, *dst, val)?;
+        }
+        RegOp::StructNew {
+            dst,
+            type_idx,
+            fields,
+        } => {
+            let kind = gc_type_kind(module, *type_idx)?;
+            let mut values = Vec::with_capacity(fields.len());
+            for &reg in fields {
+                values.push(get_reg(registers, reg)?);
+            }
+            let store = require_store(store)?;
+            let heap = store.gc_heap();
+            let id = heap.borrow_mut().alloc_struct(kind, values)?;
+            set_reg(registers, *dst, Value::GcRef(id))?;
+        }
+        RegOp::StructNewDefault { dst, type_idx } => {
+            let kind = gc_type_kind(module, *type_idx)?;
+            let fields = match &kind {
+                GcTypeKind::Struct(fields) => fields
+                    .iter()
+                    .map(|field| default_for_storage(field.storage))
+                    .collect(),
+                GcTypeKind::Array(_) => return Err(unknown_type_err(*type_idx)),
+            };
+            let store = require_store(store)?;
+            let heap = store.gc_heap();
+            let id = heap.borrow_mut().alloc_struct(kind, fields)?;
+            set_reg(registers, *dst, Value::GcRef(id))?;
+        }
+        RegOp::StructGet {
+            dst,
+            field,
+            ext,
+            object,
+            ..
+        } => {
+            let object = get_reg(registers, *object)?;
+            let id = expect_gc_ref(object, RuntimeTrap::NullStructReference)?;
+            let store = require_store(store)?;
+            let value = store.with_gc_heap(|heap| heap.struct_get(id, *field, heap_ext(*ext)))?;
+            set_reg(registers, *dst, value)?;
+        }
+        RegOp::StructSet {
+            field,
+            object,
+            value,
+            ..
+        } => {
+            let value = get_reg(registers, *value)?;
+            let object = get_reg(registers, *object)?;
+            let id = expect_gc_ref(object, RuntimeTrap::NullStructReference)?;
+            let store = require_store(store)?;
+            store.with_gc_heap_mut(|heap| heap.struct_set(id, *field, value))?;
+        }
+        RegOp::ArrayNew {
+            dst,
+            type_idx,
+            len,
+            value,
+        } => {
+            let len = expect_u32(get_reg(registers, *len)?)?;
+            let value = get_reg(registers, *value)?;
+            let kind = gc_type_kind(module, *type_idx)?;
+            let store = require_store(store)?;
+            let heap = store.gc_heap();
+            let id = heap.borrow_mut().alloc_array(kind, len, value)?;
+            set_reg(registers, *dst, Value::GcRef(id))?;
+        }
+        RegOp::ArrayNewDefault { dst, type_idx, len } => {
+            let len = expect_u32(get_reg(registers, *len)?)?;
+            let kind = gc_type_kind(module, *type_idx)?;
+            let fill = match &kind {
+                GcTypeKind::Array(field) => default_for_storage(field.storage),
+                GcTypeKind::Struct(_) => return Err(unknown_type_err(*type_idx)),
+            };
+            let store = require_store(store)?;
+            let heap = store.gc_heap();
+            let id = heap.borrow_mut().alloc_array(kind, len, fill)?;
+            set_reg(registers, *dst, Value::GcRef(id))?;
+        }
+        RegOp::ArrayNewFixed {
+            dst,
+            type_idx,
+            values,
+        } => {
+            let mut elems = Vec::new();
+            elems
+                .try_reserve(values.len())
+                .map_err(|_| gc_allocation_failed())?;
+            for &reg in values {
+                elems.push(get_reg(registers, reg)?);
+            }
+            let kind = gc_type_kind(module, *type_idx)?;
+            let store = require_store(store)?;
+            let heap = store.gc_heap();
+            let id = heap.borrow_mut().alloc_fixed(kind, elems)?;
+            set_reg(registers, *dst, Value::GcRef(id))?;
+        }
+        RegOp::ArrayNewData {
+            dst,
+            type_idx,
+            data,
+            src,
+            len,
+        } => {
+            let src = expect_u32(get_reg(registers, *src)?)?;
+            let len = expect_u32(get_reg(registers, *len)?)?;
+            let kind = gc_type_kind(module, *type_idx)?;
+            let storage = gc_array_storage(&kind)?;
+            let width = storage_width(storage);
+            let store = require_store(store)?;
+            let slot = store
+                .with_data(data.0, |slot| slot.cloned())
+                .ok_or_else(|| unknown_data_err(data.0))?;
+            let bytes = slot.as_deref().unwrap_or(&[]);
+            let elems = data_segment_values(bytes, src, len, width, storage)?;
+            let heap = store.gc_heap();
+            let id = heap.borrow_mut().alloc_fixed(kind, elems)?;
+            set_reg(registers, *dst, Value::GcRef(id))?;
+        }
+        RegOp::ArrayNewElem {
+            dst,
+            type_idx,
+            elem,
+            src,
+            len,
+        } => {
+            let src = expect_u32(get_reg(registers, *src)?)?;
+            let len = expect_u32(get_reg(registers, *len)?)?;
+            let kind = gc_type_kind(module, *type_idx)?;
+            let store = require_store(store)?;
+            let slot = store
+                .with_elem(elem.0, |slot| slot.cloned())
+                .ok_or_else(|| unknown_elem_err(elem.0))?;
+            let values = slot.as_deref().unwrap_or(&[]);
+            let elems = elem_segment_values(values, src, len)?;
+            let heap = store.gc_heap();
+            let id = heap.borrow_mut().alloc_fixed(kind, elems)?;
+            set_reg(registers, *dst, Value::GcRef(id))?;
+        }
+        RegOp::ArrayGet {
+            dst,
+            array,
+            index,
+            ext,
+            ..
+        } => {
+            let index = expect_u32(get_reg(registers, *index)?)?;
+            let array = get_reg(registers, *array)?;
+            let id = expect_gc_ref(array, RuntimeTrap::NullArrayReference)?;
+            let store = require_store(store)?;
+            let len = with_array_len(store, id)?;
+            if array_index_oob(index, 1, len) {
+                return Err(trap(RuntimeTrap::OutOfBoundsArrayAccess));
+            }
+            let value = store.with_gc_heap(|heap| heap.array_get(id, index, heap_ext(*ext)))?;
+            set_reg(registers, *dst, value)?;
+        }
+        RegOp::ArraySet {
+            array,
+            index,
+            value,
+            ..
+        } => {
+            let value = get_reg(registers, *value)?;
+            let index = expect_u32(get_reg(registers, *index)?)?;
+            let array = get_reg(registers, *array)?;
+            let id = expect_gc_ref(array, RuntimeTrap::NullArrayReference)?;
+            let store = require_store(store)?;
+            let len = with_array_len(store, id)?;
+            if array_index_oob(index, 1, len) {
+                return Err(trap(RuntimeTrap::OutOfBoundsArrayAccess));
+            }
+            store.with_gc_heap_mut(|heap| heap.array_set(id, index, value))?;
+        }
+        RegOp::ArrayLen { dst, array } => {
+            let array = get_reg(registers, *array)?;
+            let id = expect_gc_ref(array, RuntimeTrap::NullArrayReference)?;
+            let store = require_store(store)?;
+            let len = store
+                .with_gc_heap(|heap| heap.array_len(id))
+                .ok_or_else(|| unknown_type_err(TypeIdx(0)))?;
+            set_reg(registers, *dst, Value::I32(len as i32))?;
+        }
+        RegOp::ArrayFill {
+            array,
+            index,
+            value,
+            len,
+            ..
+        } => {
+            let len = expect_u32(get_reg(registers, *len)?)?;
+            let value = get_reg(registers, *value)?;
+            let index = expect_u32(get_reg(registers, *index)?)?;
+            let array = get_reg(registers, *array)?;
+            let id = expect_gc_ref(array, RuntimeTrap::NullArrayReference)?;
+            let store = require_store(store)?;
+            let array_len = with_array_len(store, id)?;
+            if array_index_oob(index, len, array_len) {
+                return Err(trap(RuntimeTrap::OutOfBoundsArrayAccess));
+            }
+            if len == 0 {
+                return Ok(());
+            }
+            let heap = store.gc_heap();
+            let mut heap = heap.borrow_mut();
+            for i in 0..len {
+                heap.array_set(id, index + i, value)?;
+            }
+        }
+        RegOp::ArrayCopy {
+            dst,
+            dst_off,
+            src,
+            src_off,
+            len,
+            ..
+        } => {
+            let len = expect_u32(get_reg(registers, *len)?)?;
+            let src_off = expect_u32(get_reg(registers, *src_off)?)?;
+            let src_value = get_reg(registers, *src)?;
+            let dst_off = expect_u32(get_reg(registers, *dst_off)?)?;
+            let dst_value = get_reg(registers, *dst)?;
+            // Null checks precede bounds; the reference checks the SOURCE
+            // reference first (eval.ml's ArrayCopy pattern order).
+            let src_id = expect_gc_ref(src_value, RuntimeTrap::NullArrayReference)?;
+            let dst_id = expect_gc_ref(dst_value, RuntimeTrap::NullArrayReference)?;
+            let store = require_store(store)?;
+            let src_len = with_array_len(store, src_id)?;
+            let dst_len = with_array_len(store, dst_id)?;
+            if array_index_oob(src_off, len, src_len) || array_index_oob(dst_off, len, dst_len) {
+                return Err(trap(RuntimeTrap::OutOfBoundsArrayAccess));
+            }
+            if len == 0 {
+                return Ok(());
+            }
+            let ext = store.with_gc_heap(|heap| heap.array_ext(src_id));
+            let heap = store.gc_heap();
+            let mut heap = heap.borrow_mut();
+            if dst_off <= src_off {
+                for i in 0..len {
+                    let value = heap.array_get(src_id, src_off + i, ext)?;
+                    heap.array_set(dst_id, dst_off + i, value)?;
+                }
+            } else {
+                for i in (0..len).rev() {
+                    let value = heap.array_get(src_id, src_off + i, ext)?;
+                    heap.array_set(dst_id, dst_off + i, value)?;
+                }
+            }
+        }
+        RegOp::ArrayInitData {
+            type_idx,
+            data,
+            array,
+            dst_off,
+            src_off,
+            len,
+        } => {
+            let len = expect_u32(get_reg(registers, *len)?)?;
+            let src_off = expect_u32(get_reg(registers, *src_off)?)?;
+            let dst_off = expect_u32(get_reg(registers, *dst_off)?)?;
+            let array = get_reg(registers, *array)?;
+            let id = expect_gc_ref(array, RuntimeTrap::NullArrayReference)?;
+            let kind = gc_type_kind(module, *type_idx)?;
+            let storage = gc_array_storage(&kind)?;
+            let width = storage_width(storage);
+            let store = require_store(store)?;
+            let array_len = with_array_len(store, id)?;
+            // Array bounds before segment bounds (trap identity matters).
+            if array_index_oob(dst_off, len, array_len) {
+                return Err(trap(RuntimeTrap::OutOfBoundsArrayAccess));
+            }
+            let slot = store
+                .with_data(data.0, |slot| slot.cloned())
+                .ok_or_else(|| unknown_data_err(data.0))?;
+            let bytes = slot.as_deref().unwrap_or(&[]);
+            let elems = data_segment_values(bytes, src_off, len, width, storage)?;
+            if len == 0 {
+                return Ok(());
+            }
+            let heap = store.gc_heap();
+            let mut heap = heap.borrow_mut();
+            for (i, value) in elems.into_iter().enumerate() {
+                heap.array_set(id, dst_off + i as u32, value)?;
+            }
+        }
+        RegOp::ArrayInitElem {
+            type_idx,
+            elem,
+            array,
+            dst_off,
+            src_off,
+            len,
+        } => {
+            let len = expect_u32(get_reg(registers, *len)?)?;
+            let src_off = expect_u32(get_reg(registers, *src_off)?)?;
+            let dst_off = expect_u32(get_reg(registers, *dst_off)?)?;
+            let array = get_reg(registers, *array)?;
+            let id = expect_gc_ref(array, RuntimeTrap::NullArrayReference)?;
+            let _ = type_idx;
+            let store = require_store(store)?;
+            let array_len = with_array_len(store, id)?;
+            if array_index_oob(dst_off, len, array_len) {
+                return Err(trap(RuntimeTrap::OutOfBoundsArrayAccess));
+            }
+            let slot = store
+                .with_elem(elem.0, |slot| slot.cloned())
+                .ok_or_else(|| unknown_elem_err(elem.0))?;
+            let values = slot.as_deref().unwrap_or(&[]);
+            let elems = elem_segment_values(values, src_off, len)?;
+            if len == 0 {
+                return Ok(());
+            }
+            let heap = store.gc_heap();
+            let mut heap = heap.borrow_mut();
+            for (i, value) in elems.into_iter().enumerate() {
+                heap.array_set(id, dst_off + i as u32, value)?;
+            }
+        }
+        RegOp::RefI31 { dst, value } => {
+            let value = expect_u32(get_reg(registers, *value)?)?;
+            set_reg(registers, *dst, Value::I31((value & 0x7FFF_FFFF) as i32))?;
+        }
+        RegOp::I31Get { dst, value, signed } => {
+            let value = get_reg(registers, *value)?;
+            match value {
+                Value::I31(payload) => {
+                    let result = if *signed {
+                        (payload << 1) >> 1
+                    } else {
+                        payload
+                    };
+                    set_reg(registers, *dst, Value::I32(result))?;
+                }
+                other if is_null_ref(&other) => {
+                    return Err(trap(RuntimeTrap::NullI31Reference));
+                }
+                other => {
+                    return Err(RuntimeError {
+                        kind: RuntimeErrorKind::TypeMismatch {
+                            expected: ValType::Ref(RefType::from_parts(false, HeapType::I31)),
+                            found: other.val_type(),
+                        },
+                    });
+                }
+            }
         }
         RegOp::Load {
             op,
@@ -2334,17 +2709,34 @@ fn value_satisfies(expected: ValType, value: Value) -> bool {
                     Value::FuncRef(inner) => inner.is_some(),
                     Value::ExternRef(inner) => inner.is_some(),
                     Value::ExnRef(inner) => inner.is_some(),
+                    Value::GcRef(_) | Value::I31(_) => true,
                     _ => return false,
                 };
                 if !nullable && !non_null {
                     return false;
                 }
-                matches!(
-                    (heap, value),
-                    (HeapType::Func | HeapType::Type(_), Value::FuncRef(_))
-                        | (HeapType::Extern, Value::ExternRef(_))
-                        | (HeapType::Exn, Value::ExnRef(_))
-                )
+                match value {
+                    Value::GcRef(_) => matches!(
+                        heap,
+                        HeapType::Any
+                            | HeapType::Eq
+                            | HeapType::Struct
+                            | HeapType::Array
+                            | HeapType::I31
+                            | HeapType::None
+                            | HeapType::Type(_)
+                    ),
+                    Value::I31(_) => matches!(
+                        heap,
+                        HeapType::Any | HeapType::Eq | HeapType::I31 | HeapType::None
+                    ),
+                    _ => matches!(
+                        (heap, value),
+                        (HeapType::Func | HeapType::Type(_), Value::FuncRef(_))
+                            | (HeapType::Extern, Value::ExternRef(_))
+                            | (HeapType::Exn, Value::ExnRef(_))
+                    ),
+                }
             }
             _ => false,
         },
@@ -2518,6 +2910,202 @@ pub(crate) fn ref_null_value(ref_type: &RefType) -> Value {
             ..
         } => Value::ExnRef(None),
         _ => Value::FuncRef(None),
+    }
+}
+
+/// The default value for a storage slot (numeric/vector zero, nullable ref
+/// null). Validation guarantees the field is defaultable.
+fn default_for_storage(storage: StorageType) -> Value {
+    match storage {
+        StorageType::I8 | StorageType::I16 => Value::I32(0),
+        StorageType::Val(val) => default_for_val(val),
+    }
+}
+
+fn default_for_val(val: ValType) -> Value {
+    match val {
+        ValType::Num(NumType::I32) => Value::I32(0),
+        ValType::Num(NumType::I64) => Value::I64(0),
+        ValType::Num(NumType::F32) => Value::F32(0.0),
+        ValType::Num(NumType::F64) => Value::F64(0.0),
+        ValType::Vec(_) => Value::V128([0; 16]),
+        ValType::Ref(ref_type) => ref_null_value(&ref_type),
+    }
+}
+
+/// The heap's packed-read extension for a lowered GC `get` op.
+fn heap_ext(ext: GcExt) -> Option<Ext> {
+    match ext {
+        GcExt::None => None,
+        GcExt::S => Some(Ext::S),
+        GcExt::U => Some(Ext::U),
+    }
+}
+
+fn gc_allocation_failed() -> RuntimeError {
+    RuntimeError {
+        kind: RuntimeErrorKind::ResourceLimitExceeded { what: "gc heap" },
+    }
+}
+
+fn unknown_type_err(type_idx: TypeIdx) -> RuntimeError {
+    RuntimeError {
+        kind: RuntimeErrorKind::UnknownType {
+            type_idx: type_idx.0,
+        },
+    }
+}
+
+fn unknown_data_err(data: u32) -> RuntimeError {
+    RuntimeError {
+        kind: RuntimeErrorKind::UnknownDataSegment { data },
+    }
+}
+
+fn unknown_elem_err(elem: u32) -> RuntimeError {
+    RuntimeError {
+        kind: RuntimeErrorKind::UnknownElem { elem },
+    }
+}
+
+/// Resolve a GC aggregate type's layout from the current module.
+fn gc_type_kind(module: Option<&RegModule>, type_idx: TypeIdx) -> Result<GcTypeKind, RuntimeError> {
+    let module = module.ok_or_else(|| unknown_type_err(type_idx))?;
+    match module
+        .type_defs
+        .get(type_idx.0 as usize)
+        .map(|sub| &sub.comp)
+    {
+        Some(CompType::Struct(fields)) => Ok(GcTypeKind::Struct(fields.clone())),
+        Some(CompType::Array(field)) => Ok(GcTypeKind::Array(*field)),
+        _ => Err(unknown_type_err(type_idx)),
+    }
+}
+
+fn gc_array_storage(kind: &GcTypeKind) -> Result<StorageType, RuntimeError> {
+    match kind {
+        GcTypeKind::Array(field) => Ok(field.storage),
+        GcTypeKind::Struct(_) => Err(unknown_type_err(TypeIdx(0))),
+    }
+}
+
+fn with_array_len(store: &Store, id: ObjectId) -> Result<u32, RuntimeError> {
+    store
+        .with_gc_heap(|heap| heap.array_len(id))
+        .ok_or_else(|| unknown_type_err(TypeIdx(0)))
+}
+
+/// Null-check a GC reference operand before any heap access (every
+/// struct/array access traps on a null operand first).
+fn expect_gc_ref(value: Value, null_trap: RuntimeTrap) -> Result<ObjectId, RuntimeError> {
+    if is_null_ref(&value) {
+        return Err(trap(null_trap));
+    }
+    match value {
+        Value::GcRef(id) => Ok(id),
+        other => Err(RuntimeError {
+            kind: RuntimeErrorKind::TypeMismatch {
+                expected: ValType::Ref(RefType::from_parts(true, HeapType::Any)),
+                found: other.val_type(),
+            },
+        }),
+    }
+}
+
+fn expect_u32(value: Value) -> Result<u32, RuntimeError> {
+    match value {
+        Value::I32(value) => Ok(value as u32),
+        other => Err(RuntimeError {
+            kind: RuntimeErrorKind::TypeMismatch {
+                expected: ValType::Num(NumType::I32),
+                found: other.val_type(),
+            },
+        }),
+    }
+}
+
+/// `array_oob a i n` (eval.ml): `i + n > len`, unsigned with overflow as
+/// out of bounds.
+fn array_index_oob(index: u32, count: u32, len: u32) -> bool {
+    (index as u64)
+        .checked_add(count as u64)
+        .is_none_or(|end| end > len as u64)
+}
+
+/// Load `len` elements of `storage` from a data segment starting at byte
+/// `src` (`array.new_data` / `array.init_data`). Segment bounds precede any
+/// payload build, and the payload reserve is fallible.
+fn data_segment_values(
+    bytes: &[u8],
+    src: u32,
+    len: u32,
+    width: u64,
+    storage: StorageType,
+) -> Result<Vec<Value>, RuntimeError> {
+    let byte_len = (len as u64)
+        .checked_mul(width)
+        .ok_or_else(|| trap(RuntimeTrap::OutOfBoundsMemoryAccess))?;
+    let end = (src as u64)
+        .checked_add(byte_len)
+        .ok_or_else(|| trap(RuntimeTrap::OutOfBoundsMemoryAccess))?;
+    if end > bytes.len() as u64 {
+        return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
+    }
+    let mut values: Vec<Value> = Vec::new();
+    values
+        .try_reserve(len as usize)
+        .map_err(|_| gc_allocation_failed())?;
+    for i in 0..len as u64 {
+        let off = (src as u64 + i * width) as usize;
+        let width = width as usize;
+        values.push(read_storage_value(&bytes[off..off + width], storage));
+    }
+    Ok(values)
+}
+
+/// Copy `len` element values from an element segment (`array.new_elem` /
+/// `array.init_elem`). Segment bounds precede the payload reserve.
+fn elem_segment_values(values: &[Value], src: u32, len: u32) -> Result<Vec<Value>, RuntimeError> {
+    let end = (src as u64)
+        .checked_add(len as u64)
+        .ok_or_else(|| trap(RuntimeTrap::OutOfBoundsTableAccess))?;
+    if end > values.len() as u64 {
+        return Err(trap(RuntimeTrap::OutOfBoundsTableAccess));
+    }
+    let mut out: Vec<Value> = Vec::new();
+    out.try_reserve(len as usize)
+        .map_err(|_| gc_allocation_failed())?;
+    out.extend_from_slice(&values[src as usize..end as usize]);
+    Ok(out)
+}
+
+/// Read one storage value from a data segment (`Data.load_val_storage`):
+/// little-endian, packed i8/i16 zero-extended into an `i32`.
+fn read_storage_value(bytes: &[u8], storage: StorageType) -> Value {
+    match storage {
+        StorageType::I8 => Value::I32(bytes[0] as i32),
+        StorageType::I16 => Value::I32(u16::from_le_bytes([bytes[0], bytes[1]]) as i32),
+        StorageType::Val(val) => match val {
+            ValType::Num(NumType::I32) => {
+                Value::I32(i32::from_le_bytes(bytes.try_into().expect("width checked")))
+            }
+            ValType::Num(NumType::I64) => {
+                Value::I64(i64::from_le_bytes(bytes.try_into().expect("width checked")))
+            }
+            ValType::Num(NumType::F32) => Value::F32(f32::from_bits(u32::from_le_bytes(
+                bytes.try_into().expect("width checked"),
+            ))),
+            ValType::Num(NumType::F64) => Value::F64(f64::from_bits(u64::from_le_bytes(
+                bytes.try_into().expect("width checked"),
+            ))),
+            ValType::Vec(_) => {
+                let mut vec = [0u8; 16];
+                vec.copy_from_slice(bytes);
+                Value::V128(vec)
+            }
+            // Numeric/vector storages only are validated for data segments.
+            ValType::Ref(_) => Value::FuncRef(None),
+        },
     }
 }
 

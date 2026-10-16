@@ -119,6 +119,16 @@ fn validation_kind_name(kind: &ValidationErrorKind) -> &'static str {
         ValidationErrorKind::ForwardUseOfTypeInSubType { .. } => "ForwardUseOfTypeInSubType",
         ValidationErrorKind::FinalSupertype { .. } => "FinalSupertype",
         ValidationErrorKind::SubtypeComptypeMismatch { .. } => "SubtypeComptypeMismatch",
+        ValidationErrorKind::UnknownStruct { .. } => "UnknownStruct",
+        ValidationErrorKind::UnknownArray { .. } => "UnknownArray",
+        ValidationErrorKind::UnknownField { .. } => "UnknownField",
+        ValidationErrorKind::ImmutableField { .. } => "ImmutableField",
+        ValidationErrorKind::ImmutableArray { .. } => "ImmutableArray",
+        ValidationErrorKind::PackedFieldMismatch { .. } => "PackedFieldMismatch",
+        ValidationErrorKind::NonDefaultable { .. } => "NonDefaultable",
+        ValidationErrorKind::ElemFieldTypeMismatch { .. } => "ElemFieldTypeMismatch",
+        ValidationErrorKind::ArrayNotNumOrVec { .. } => "ArrayNotNumOrVec",
+        ValidationErrorKind::ArrayStorageMismatch { .. } => "ArrayStorageMismatch",
     }
 }
 

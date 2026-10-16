@@ -792,6 +792,146 @@ pub enum RegOp {
         dst: Reg,
         value: Reg,
     },
+    /// `struct.new $x`: allocate a struct from `fields` (declaration order).
+    StructNew {
+        dst: Reg,
+        type_idx: TypeIdx,
+        fields: Vec<Reg>,
+    },
+    /// `struct.new_default $x`: allocate a struct with default field values.
+    StructNewDefault {
+        dst: Reg,
+        type_idx: TypeIdx,
+    },
+    /// `struct.get{,s,u} $x $i`.
+    StructGet {
+        dst: Reg,
+        type_idx: TypeIdx,
+        field: u32,
+        ext: GcExt,
+        object: Reg,
+    },
+    /// `struct.set $x $i`.
+    StructSet {
+        type_idx: TypeIdx,
+        field: u32,
+        object: Reg,
+        value: Reg,
+    },
+    /// `array.new $x`: `len` copies of `value`.
+    ArrayNew {
+        dst: Reg,
+        type_idx: TypeIdx,
+        len: Reg,
+        value: Reg,
+    },
+    /// `array.new_default $x`.
+    ArrayNewDefault {
+        dst: Reg,
+        type_idx: TypeIdx,
+        len: Reg,
+    },
+    /// `array.new_fixed $x $n`.
+    ArrayNewFixed {
+        dst: Reg,
+        type_idx: TypeIdx,
+        values: Vec<Reg>,
+    },
+    /// `array.new_data $x $y`.
+    ArrayNewData {
+        dst: Reg,
+        type_idx: TypeIdx,
+        data: crate::types::DataIdx,
+        src: Reg,
+        len: Reg,
+    },
+    /// `array.new_elem $x $y`.
+    ArrayNewElem {
+        dst: Reg,
+        type_idx: TypeIdx,
+        elem: ElemIdx,
+        src: Reg,
+        len: Reg,
+    },
+    /// `array.get{,s,u} $x`.
+    ArrayGet {
+        dst: Reg,
+        type_idx: TypeIdx,
+        array: Reg,
+        index: Reg,
+        ext: GcExt,
+    },
+    /// `array.set $x`.
+    ArraySet {
+        type_idx: TypeIdx,
+        array: Reg,
+        index: Reg,
+        value: Reg,
+    },
+    /// `array.len`.
+    ArrayLen {
+        dst: Reg,
+        array: Reg,
+    },
+    /// `array.fill $x`.
+    ArrayFill {
+        type_idx: TypeIdx,
+        array: Reg,
+        index: Reg,
+        value: Reg,
+        len: Reg,
+    },
+    /// `array.copy $x $y`.
+    ArrayCopy {
+        dst_type: TypeIdx,
+        src_type: TypeIdx,
+        dst: Reg,
+        dst_off: Reg,
+        src: Reg,
+        src_off: Reg,
+        len: Reg,
+    },
+    /// `array.init_data $x $y`.
+    ArrayInitData {
+        type_idx: TypeIdx,
+        data: crate::types::DataIdx,
+        array: Reg,
+        dst_off: Reg,
+        src_off: Reg,
+        len: Reg,
+    },
+    /// `array.init_elem $x $y`.
+    ArrayInitElem {
+        type_idx: TypeIdx,
+        elem: ElemIdx,
+        array: Reg,
+        dst_off: Reg,
+        src_off: Reg,
+        len: Reg,
+    },
+    /// `ref.i31`: box an i32 into a 31-bit immediate.
+    RefI31 {
+        dst: Reg,
+        value: Reg,
+    },
+    /// `i31.get_s`/`i31.get_u`.
+    I31Get {
+        dst: Reg,
+        value: Reg,
+        signed: bool,
+    },
+}
+
+/// The packed-field extension marker carried in lowered GC `get` ops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum GcExt {
+    /// Unpacked read (`struct.get` / `array.get`).
+    None,
+    /// Sign-extended packed read.
+    S,
+    /// Zero-extended packed read.
+    U,
 }
 
 /// SIMD lane shapes.
@@ -2398,6 +2538,26 @@ fn min_num_type(lhs: NumType, rhs: NumType) -> NumType {
     }
 }
 
+/// The non-null concrete reference type `(ref $idx)`.
+fn gc_ref_type(type_idx: TypeIdx) -> ValType {
+    ValType::Ref(crate::types::RefType::concrete(false, type_idx))
+}
+
+/// The nullable concrete reference type `(ref null $idx)`.
+fn gc_ref_type_nullable(type_idx: TypeIdx) -> ValType {
+    ValType::Ref(crate::types::RefType::concrete(true, type_idx))
+}
+
+/// The unpacked value type of a storage type (packed i8/i16 → i32).
+fn gc_unpacked(storage: crate::types::StorageType) -> ValType {
+    match storage {
+        crate::types::StorageType::Val(val) => val,
+        crate::types::StorageType::I8 | crate::types::StorageType::I16 => {
+            ValType::Num(NumType::I32)
+        }
+    }
+}
+
 /// The kind of control structure a label frame describes.
 enum FrameKind {
     /// `block` (or the implicit function body frame).
@@ -3753,6 +3913,314 @@ impl<'b> FuncBuilder<'b> {
                     },
                 );
             }
+            Instr::StructNew(type_idx) => {
+                let field_types = self.gc_struct_field_types(offset, type_idx)?;
+                let mut fields = Vec::with_capacity(field_types.len());
+                for &field_ty in field_types.iter().rev() {
+                    fields.push(self.pop_expect(offset, "struct.new", field_ty)?.reg);
+                }
+                fields.reverse();
+                let ty = gc_ref_type(type_idx);
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(
+                    offset,
+                    RegOp::StructNew {
+                        dst,
+                        type_idx,
+                        fields,
+                    },
+                );
+            }
+            Instr::StructNewDefault(type_idx) => {
+                let _ = self.gc_struct_field_types(offset, type_idx)?;
+                let ty = gc_ref_type(type_idx);
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(offset, RegOp::StructNewDefault { dst, type_idx });
+            }
+            Instr::StructGet { type_idx, field } => {
+                self.lower_gc_field_get(offset, type_idx, field, GcExt::None)?;
+            }
+            Instr::StructGetS { type_idx, field } => {
+                self.lower_gc_field_get(offset, type_idx, field, GcExt::S)?;
+            }
+            Instr::StructGetU { type_idx, field } => {
+                self.lower_gc_field_get(offset, type_idx, field, GcExt::U)?;
+            }
+            Instr::StructSet { type_idx, field } => {
+                let field_ty = self.gc_struct_field(offset, type_idx, field)?;
+                let value = self.pop_expect(offset, "struct.set", field_ty)?;
+                let object =
+                    self.pop_expect(offset, "struct.set", gc_ref_type_nullable(type_idx))?;
+                self.emit(
+                    offset,
+                    RegOp::StructSet {
+                        type_idx,
+                        field,
+                        object: object.reg,
+                        value: value.reg,
+                    },
+                );
+            }
+            Instr::ArrayNew(type_idx) => {
+                let field_ty = self.gc_array_field(offset, type_idx)?;
+                let len = self.pop_expect(offset, "array.new", ValType::Num(NumType::I32))?;
+                let value = self.pop_expect(offset, "array.new", field_ty)?;
+                let ty = gc_ref_type(type_idx);
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(
+                    offset,
+                    RegOp::ArrayNew {
+                        dst,
+                        type_idx,
+                        len: len.reg,
+                        value: value.reg,
+                    },
+                );
+            }
+            Instr::ArrayNewDefault(type_idx) => {
+                let _ = self.gc_array_field(offset, type_idx)?;
+                let len =
+                    self.pop_expect(offset, "array.new_default", ValType::Num(NumType::I32))?;
+                let ty = gc_ref_type(type_idx);
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(
+                    offset,
+                    RegOp::ArrayNewDefault {
+                        dst,
+                        type_idx,
+                        len: len.reg,
+                    },
+                );
+            }
+            Instr::ArrayNewFixed { type_idx, count } => {
+                let field_ty = self.gc_array_field(offset, type_idx)?;
+                let mut values = Vec::with_capacity(count as usize);
+                for _ in 0..count {
+                    values.push(self.pop_expect(offset, "array.new_fixed", field_ty)?.reg);
+                }
+                values.reverse();
+                let ty = gc_ref_type(type_idx);
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(
+                    offset,
+                    RegOp::ArrayNewFixed {
+                        dst,
+                        type_idx,
+                        values,
+                    },
+                );
+            }
+            Instr::ArrayNewData { type_idx, data } => {
+                let _ = self.gc_array_field(offset, type_idx)?;
+                let len = self.pop_expect(offset, "array.new_data", ValType::Num(NumType::I32))?;
+                let src = self.pop_expect(offset, "array.new_data", ValType::Num(NumType::I32))?;
+                let ty = gc_ref_type(type_idx);
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(
+                    offset,
+                    RegOp::ArrayNewData {
+                        dst,
+                        type_idx,
+                        data,
+                        src: src.reg,
+                        len: len.reg,
+                    },
+                );
+            }
+            Instr::ArrayNewElem { type_idx, elem } => {
+                let _ = self.gc_array_field(offset, type_idx)?;
+                let len = self.pop_expect(offset, "array.new_elem", ValType::Num(NumType::I32))?;
+                let src = self.pop_expect(offset, "array.new_elem", ValType::Num(NumType::I32))?;
+                let ty = gc_ref_type(type_idx);
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(
+                    offset,
+                    RegOp::ArrayNewElem {
+                        dst,
+                        type_idx,
+                        elem,
+                        src: src.reg,
+                        len: len.reg,
+                    },
+                );
+            }
+            Instr::ArrayGet(type_idx) => {
+                self.lower_gc_array_get(offset, type_idx, GcExt::None)?;
+            }
+            Instr::ArrayGetS(type_idx) => {
+                self.lower_gc_array_get(offset, type_idx, GcExt::S)?;
+            }
+            Instr::ArrayGetU(type_idx) => {
+                self.lower_gc_array_get(offset, type_idx, GcExt::U)?;
+            }
+            Instr::ArraySet(type_idx) => {
+                let field_ty = self.gc_array_field(offset, type_idx)?;
+                let value = self.pop_expect(offset, "array.set", field_ty)?;
+                let index = self.pop_expect(offset, "array.set", ValType::Num(NumType::I32))?;
+                let array = self.pop_expect(offset, "array.set", gc_ref_type_nullable(type_idx))?;
+                self.emit(
+                    offset,
+                    RegOp::ArraySet {
+                        type_idx,
+                        array: array.reg,
+                        index: index.reg,
+                        value: value.reg,
+                    },
+                );
+            }
+            Instr::ArrayLen => {
+                let array = self.pop_any(offset, "array.len")?;
+                let ty = ValType::Num(NumType::I32);
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(
+                    offset,
+                    RegOp::ArrayLen {
+                        dst,
+                        array: array.reg,
+                    },
+                );
+            }
+            Instr::ArrayFill(type_idx) => {
+                let field_ty = self.gc_array_field(offset, type_idx)?;
+                let len = self.pop_expect(offset, "array.fill", ValType::Num(NumType::I32))?;
+                let value = self.pop_expect(offset, "array.fill", field_ty)?;
+                let index = self.pop_expect(offset, "array.fill", ValType::Num(NumType::I32))?;
+                let array =
+                    self.pop_expect(offset, "array.fill", gc_ref_type_nullable(type_idx))?;
+                self.emit(
+                    offset,
+                    RegOp::ArrayFill {
+                        type_idx,
+                        array: array.reg,
+                        index: index.reg,
+                        value: value.reg,
+                        len: len.reg,
+                    },
+                );
+            }
+            Instr::ArrayCopy { dst, src } => {
+                // dst_type and src_type must share storage; the validator
+                // proved it. Lowering only needs the reference types.
+                let dst_field = self.gc_array_field(offset, dst)?;
+                let _ = self.gc_array_field(offset, src)?;
+                let len = self.pop_expect(offset, "array.copy", ValType::Num(NumType::I32))?;
+                let src_off = self.pop_expect(offset, "array.copy", ValType::Num(NumType::I32))?;
+                let src_ref = self.pop_expect(offset, "array.copy", gc_ref_type_nullable(src))?;
+                let dst_off = self.pop_expect(offset, "array.copy", ValType::Num(NumType::I32))?;
+                let dst_ref = self.pop_expect(offset, "array.copy", gc_ref_type_nullable(dst))?;
+                let _ = dst_field;
+                self.emit(
+                    offset,
+                    RegOp::ArrayCopy {
+                        dst_type: dst,
+                        src_type: src,
+                        dst: dst_ref.reg,
+                        dst_off: dst_off.reg,
+                        src: src_ref.reg,
+                        src_off: src_off.reg,
+                        len: len.reg,
+                    },
+                );
+            }
+            Instr::ArrayInitData { type_idx, data } => {
+                let _ = self.gc_array_field(offset, type_idx)?;
+                let len = self.pop_expect(offset, "array.init_data", ValType::Num(NumType::I32))?;
+                let src_off =
+                    self.pop_expect(offset, "array.init_data", ValType::Num(NumType::I32))?;
+                let dst_off =
+                    self.pop_expect(offset, "array.init_data", ValType::Num(NumType::I32))?;
+                let array =
+                    self.pop_expect(offset, "array.init_data", gc_ref_type_nullable(type_idx))?;
+                self.emit(
+                    offset,
+                    RegOp::ArrayInitData {
+                        type_idx,
+                        data,
+                        array: array.reg,
+                        dst_off: dst_off.reg,
+                        src_off: src_off.reg,
+                        len: len.reg,
+                    },
+                );
+            }
+            Instr::ArrayInitElem { type_idx, elem } => {
+                let _ = self.gc_array_field(offset, type_idx)?;
+                let len = self.pop_expect(offset, "array.init_elem", ValType::Num(NumType::I32))?;
+                let src_off =
+                    self.pop_expect(offset, "array.init_elem", ValType::Num(NumType::I32))?;
+                let dst_off =
+                    self.pop_expect(offset, "array.init_elem", ValType::Num(NumType::I32))?;
+                let array =
+                    self.pop_expect(offset, "array.init_elem", gc_ref_type_nullable(type_idx))?;
+                self.emit(
+                    offset,
+                    RegOp::ArrayInitElem {
+                        type_idx,
+                        elem,
+                        array: array.reg,
+                        dst_off: dst_off.reg,
+                        src_off: src_off.reg,
+                        len: len.reg,
+                    },
+                );
+            }
+            Instr::RefI31 => {
+                let value = self.pop_expect(offset, "ref.i31", ValType::Num(NumType::I32))?;
+                let ty = ValType::Ref(crate::types::RefType::from_parts(false, HeapType::I31));
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(
+                    offset,
+                    RegOp::RefI31 {
+                        dst,
+                        value: value.reg,
+                    },
+                );
+            }
+            Instr::I31GetS => {
+                let value = self.pop_expect(
+                    offset,
+                    "i31.get_s",
+                    ValType::Ref(crate::types::RefType::from_parts(true, HeapType::I31)),
+                )?;
+                let ty = ValType::Num(NumType::I32);
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(
+                    offset,
+                    RegOp::I31Get {
+                        dst,
+                        value: value.reg,
+                        signed: true,
+                    },
+                );
+            }
+            Instr::I31GetU => {
+                let value = self.pop_expect(
+                    offset,
+                    "i31.get_u",
+                    ValType::Ref(crate::types::RefType::from_parts(true, HeapType::I31)),
+                )?;
+                let ty = ValType::Num(NumType::I32);
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(
+                    offset,
+                    RegOp::I31Get {
+                        dst,
+                        value: value.reg,
+                        signed: false,
+                    },
+                );
+            }
             Instr::V128Const(value) => {
                 let ty = ValType::Vec(crate::types::VecType::V128);
                 let dst = self.alloc_reg(ty);
@@ -4416,6 +4884,135 @@ impl<'b> FuncBuilder<'b> {
 
     fn emit(&mut self, offset: ByteOffset, op: RegOp) {
         self.current_instrs.push(RegInstr { offset, op });
+    }
+
+    /// Resolve a struct type's unpacked field value types in declaration
+    /// order. Lowering runs on validated modules, so a miss is a defensive
+    /// `InvalidType` (matching the validator's `UnknownStruct`).
+    fn gc_struct_field_types(
+        &self,
+        offset: ByteOffset,
+        type_idx: TypeIdx,
+    ) -> Result<Vec<ValType>, LowerError> {
+        match self
+            .tables
+            .types
+            .get(type_idx.0 as usize)
+            .map(|sub| &sub.comp)
+        {
+            Some(crate::types::CompType::Struct(fields)) => Ok(fields
+                .iter()
+                .map(|field| gc_unpacked(field.storage))
+                .collect()),
+            _ => Err(LowerError {
+                offset,
+                function: Some(self.func_idx),
+                kind: LowerErrorKind::InvalidType {
+                    type_idx: type_idx.0,
+                },
+            }),
+        }
+    }
+
+    fn gc_struct_field(
+        &self,
+        offset: ByteOffset,
+        type_idx: TypeIdx,
+        field: u32,
+    ) -> Result<ValType, LowerError> {
+        match self
+            .tables
+            .types
+            .get(type_idx.0 as usize)
+            .map(|sub| &sub.comp)
+        {
+            Some(crate::types::CompType::Struct(fields)) => fields
+                .get(field as usize)
+                .map(|field| gc_unpacked(field.storage))
+                .ok_or(LowerError {
+                    offset,
+                    function: Some(self.func_idx),
+                    kind: LowerErrorKind::InvalidType {
+                        type_idx: type_idx.0,
+                    },
+                }),
+            _ => Err(LowerError {
+                offset,
+                function: Some(self.func_idx),
+                kind: LowerErrorKind::InvalidType {
+                    type_idx: type_idx.0,
+                },
+            }),
+        }
+    }
+
+    fn gc_array_field(&self, offset: ByteOffset, type_idx: TypeIdx) -> Result<ValType, LowerError> {
+        match self
+            .tables
+            .types
+            .get(type_idx.0 as usize)
+            .map(|sub| &sub.comp)
+        {
+            Some(crate::types::CompType::Array(field)) => Ok(gc_unpacked(field.storage)),
+            _ => Err(LowerError {
+                offset,
+                function: Some(self.func_idx),
+                kind: LowerErrorKind::InvalidType {
+                    type_idx: type_idx.0,
+                },
+            }),
+        }
+    }
+
+    fn lower_gc_field_get(
+        &mut self,
+        offset: ByteOffset,
+        type_idx: TypeIdx,
+        field: u32,
+        ext: GcExt,
+    ) -> Result<(), LowerError> {
+        let field_ty = self.gc_struct_field(offset, type_idx, field)?;
+        let object = self.pop_expect(offset, "struct.get", gc_ref_type_nullable(type_idx))?;
+        let ty = field_ty;
+        let dst = self.alloc_reg(ty);
+        self.stack.push(RegValue { reg: dst, ty });
+        self.emit(
+            offset,
+            RegOp::StructGet {
+                dst,
+                type_idx,
+                field,
+                ext,
+                object: object.reg,
+            },
+        );
+        let _ = object;
+        Ok(())
+    }
+
+    fn lower_gc_array_get(
+        &mut self,
+        offset: ByteOffset,
+        type_idx: TypeIdx,
+        ext: GcExt,
+    ) -> Result<(), LowerError> {
+        let field_ty = self.gc_array_field(offset, type_idx)?;
+        let index = self.pop_expect(offset, "array.get", ValType::Num(NumType::I32))?;
+        let array = self.pop_expect(offset, "array.get", gc_ref_type_nullable(type_idx))?;
+        let ty = field_ty;
+        let dst = self.alloc_reg(ty);
+        self.stack.push(RegValue { reg: dst, ty });
+        self.emit(
+            offset,
+            RegOp::ArrayGet {
+                dst,
+                type_idx,
+                array: array.reg,
+                index: index.reg,
+                ext,
+            },
+        );
+        Ok(())
     }
 
     fn pop_any(&mut self, offset: ByteOffset, op: &'static str) -> Result<RegValue, LowerError> {

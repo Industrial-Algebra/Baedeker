@@ -90,7 +90,11 @@ impl BaedekerValue {
                 tag: BaedekerValueTag::V128 as u8,
                 data: BaedekerValueData { v128: bytes },
             },
-            Value::FuncRef(_) | Value::ExternRef(_) | Value::ExnRef(_) => return None,
+            Value::FuncRef(_)
+            | Value::ExternRef(_)
+            | Value::ExnRef(_)
+            | Value::GcRef(_)
+            | Value::I31(_) => return None,
         })
     }
 

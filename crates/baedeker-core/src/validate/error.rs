@@ -200,6 +200,54 @@ pub enum ValidationErrorKind {
         sub: u32,
         supertype: u32,
     },
+    /// `struct.*` referenced a type index that is not a struct comptype.
+    UnknownStruct {
+        idx: TypeIdx,
+    },
+    /// `array.*` referenced a type index that is not an array comptype.
+    UnknownArray {
+        idx: TypeIdx,
+    },
+    /// A struct field index outside the type's field count.
+    UnknownField {
+        idx: TypeIdx,
+        field: u32,
+    },
+    /// `struct.set` on an immutable field.
+    ImmutableField {
+        idx: TypeIdx,
+        field: u32,
+    },
+    /// `array.set`/`array.fill`/`array.copy`/`array.init_*` on an immutable
+    /// array element.
+    ImmutableArray {
+        idx: TypeIdx,
+    },
+    /// The `_s`/`_u` extension marker is present iff the field is packed.
+    PackedFieldMismatch {
+        idx: TypeIdx,
+        field: u32,
+        packed: bool,
+    },
+    /// `struct.new_default`/`array.new_default` on a non-defaultable field.
+    NonDefaultable {
+        idx: TypeIdx,
+    },
+    /// `array.new_elem`/`array.init_elem`: the element segment's reference
+    /// type does not match the array's field type.
+    ElemFieldTypeMismatch {
+        elem: RefType,
+        field: ValType,
+    },
+    /// `array.new_data`/`array.init_data` on a non-numeric/non-vector field.
+    ArrayNotNumOrVec {
+        idx: TypeIdx,
+    },
+    /// `array.copy`: the source and destination storage types do not match.
+    ArrayStorageMismatch {
+        dst: TypeIdx,
+        src: TypeIdx,
+    },
 }
 
 impl fmt::Display for ValidationError {
@@ -483,6 +531,48 @@ impl fmt::Display for ValidationErrorKind {
             }
             ValidationErrorKind::SubtypeComptypeMismatch { sub, supertype } => {
                 write!(f, "sub type {sub} does not match super type {supertype}")
+            }
+            ValidationErrorKind::UnknownStruct { idx } => {
+                write!(f, "non-structure type {}", idx.0)
+            }
+            ValidationErrorKind::UnknownArray { idx } => {
+                write!(f, "non-array type {}", idx.0)
+            }
+            ValidationErrorKind::UnknownField { idx, field } => {
+                write!(f, "unknown field {field} of type {}", idx.0)
+            }
+            ValidationErrorKind::ImmutableField { idx, field } => {
+                write!(f, "immutable field {field} of type {}", idx.0)
+            }
+            ValidationErrorKind::ImmutableArray { idx } => {
+                write!(f, "immutable array {}", idx.0)
+            }
+            ValidationErrorKind::PackedFieldMismatch { idx, field, packed } => {
+                write!(
+                    f,
+                    "field {field} of type {} is {}",
+                    idx.0,
+                    if *packed { "packed" } else { "unpacked" }
+                )
+            }
+            ValidationErrorKind::NonDefaultable { idx } => {
+                write!(f, "type {} has a non-defaultable field", idx.0)
+            }
+            ValidationErrorKind::ElemFieldTypeMismatch { elem, field } => {
+                write!(
+                    f,
+                    "element segment type {elem:?} does not match array field type {field:?}"
+                )
+            }
+            ValidationErrorKind::ArrayNotNumOrVec { idx } => {
+                write!(f, "array type {} is not numeric or vector", idx.0)
+            }
+            ValidationErrorKind::ArrayStorageMismatch { dst, src } => {
+                write!(
+                    f,
+                    "array types do not match: destination {} source {}",
+                    dst.0, src.0
+                )
             }
         }
     }

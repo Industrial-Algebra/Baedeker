@@ -3366,8 +3366,641 @@ fn validate_instr(
             )?;
             state.enter_unreachable();
         }
+        Instr::StructNew(type_idx) => {
+            let fields = struct_field_types(module, function, *type_idx, offset)?;
+            for field in fields.iter().rev() {
+                pop_expect(
+                    module,
+                    function,
+                    state,
+                    unpacked_valtype(field.storage),
+                    offset,
+                    "struct.new",
+                )?;
+            }
+            state
+                .operands
+                .push(ValType::Ref(RefType::concrete(false, *type_idx)));
+        }
+        Instr::StructNewDefault(type_idx) => {
+            let fields = struct_field_types(module, function, *type_idx, offset)?;
+            ensure_defaultable(
+                fields.iter().map(|field| field.storage),
+                *type_idx,
+                function,
+                offset,
+            )?;
+            state
+                .operands
+                .push(ValType::Ref(RefType::concrete(false, *type_idx)));
+        }
+        Instr::StructGet { type_idx, field } => {
+            validate_gc_field_get(module, function, state, *type_idx, *field, None, offset)?;
+        }
+        Instr::StructGetS { type_idx, field } => {
+            validate_gc_field_get(
+                module,
+                function,
+                state,
+                *type_idx,
+                *field,
+                Some(Ext::S),
+                offset,
+            )?;
+        }
+        Instr::StructGetU { type_idx, field } => {
+            validate_gc_field_get(
+                module,
+                function,
+                state,
+                *type_idx,
+                *field,
+                Some(Ext::U),
+                offset,
+            )?;
+        }
+        Instr::StructSet { type_idx, field } => {
+            let fields = struct_field_types(module, function, *type_idx, offset)?;
+            let field_type = field_at(fields, *field, *type_idx, function, offset)?;
+            if !field_type.mutable {
+                return Err(ValidationError {
+                    offset: ByteOffset(offset),
+                    function: Some(function),
+                    kind: ValidationErrorKind::ImmutableField {
+                        idx: *type_idx,
+                        field: *field,
+                    },
+                });
+            }
+            let t = unpacked_valtype(field_type.storage);
+            pop_expect(module, function, state, t, offset, "struct.set")?;
+            pop_expect(
+                module,
+                function,
+                state,
+                ValType::Ref(RefType::concrete(true, *type_idx)),
+                offset,
+                "struct.set",
+            )?;
+        }
+        Instr::ArrayNew(type_idx) => {
+            let field = array_field_type(module, function, *type_idx, offset)?;
+            pop_expect(
+                module,
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I32),
+                offset,
+                "array.new",
+            )?;
+            pop_expect(
+                module,
+                function,
+                state,
+                unpacked_valtype(field.storage),
+                offset,
+                "array.new",
+            )?;
+            state
+                .operands
+                .push(ValType::Ref(RefType::concrete(false, *type_idx)));
+        }
+        Instr::ArrayNewDefault(type_idx) => {
+            let field = array_field_type(module, function, *type_idx, offset)?;
+            ensure_defaultable(core::iter::once(field.storage), *type_idx, function, offset)?;
+            pop_expect(
+                module,
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I32),
+                offset,
+                "array.new_default",
+            )?;
+            state
+                .operands
+                .push(ValType::Ref(RefType::concrete(false, *type_idx)));
+        }
+        Instr::ArrayNewFixed { type_idx, count } => {
+            let field = array_field_type(module, function, *type_idx, offset)?;
+            let t = unpacked_valtype(field.storage);
+            if !is_stack_polymorphic(state) {
+                // Non-polymorphic: each successful pop shrinks the stack, so
+                // the loop is bounded by the current stack height even when
+                // `count` is huge. A huge `count` on a shallow stack underflows
+                // cleanly instead of allocating a `count`-sized vector.
+                for _ in 0..*count {
+                    pop_expect(module, function, state, t, offset, "array.new_fixed")?;
+                }
+            }
+            state
+                .operands
+                .push(ValType::Ref(RefType::concrete(false, *type_idx)));
+        }
+        Instr::ArrayNewData { type_idx, data } => {
+            let field = array_field_type(module, function, *type_idx, offset)?;
+            resolve_data_segment(module, *data, function, offset)?;
+            if !is_num_or_vec(field.storage) {
+                return Err(ValidationError {
+                    offset: ByteOffset(offset),
+                    function: Some(function),
+                    kind: ValidationErrorKind::ArrayNotNumOrVec { idx: *type_idx },
+                });
+            }
+            pop_expect(
+                module,
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I32),
+                offset,
+                "array.new_data",
+            )?;
+            pop_expect(
+                module,
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I32),
+                offset,
+                "array.new_data",
+            )?;
+            state
+                .operands
+                .push(ValType::Ref(RefType::concrete(false, *type_idx)));
+        }
+        Instr::ArrayNewElem { type_idx, elem } => {
+            let field = array_field_type(module, function, *type_idx, offset)?;
+            let segment = resolve_element_segment(module, *elem, function, offset)?;
+            let field_ty = unpacked_valtype(field.storage);
+            if !valtype_matches_type(module, ValType::Ref(segment.elem_type), field_ty) {
+                return Err(ValidationError {
+                    offset: ByteOffset(offset),
+                    function: Some(function),
+                    kind: ValidationErrorKind::ElemFieldTypeMismatch {
+                        elem: segment.elem_type,
+                        field: field_ty,
+                    },
+                });
+            }
+            pop_expect(
+                module,
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I32),
+                offset,
+                "array.new_elem",
+            )?;
+            pop_expect(
+                module,
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I32),
+                offset,
+                "array.new_elem",
+            )?;
+            state
+                .operands
+                .push(ValType::Ref(RefType::concrete(false, *type_idx)));
+        }
+        Instr::ArrayGet(type_idx) => {
+            validate_array_get(module, function, state, *type_idx, None, offset)?;
+        }
+        Instr::ArrayGetS(type_idx) => {
+            validate_array_get(module, function, state, *type_idx, Some(Ext::S), offset)?;
+        }
+        Instr::ArrayGetU(type_idx) => {
+            validate_array_get(module, function, state, *type_idx, Some(Ext::U), offset)?;
+        }
+        Instr::ArraySet(type_idx) => {
+            let field = array_field_type(module, function, *type_idx, offset)?;
+            if !field.mutable {
+                return Err(ValidationError {
+                    offset: ByteOffset(offset),
+                    function: Some(function),
+                    kind: ValidationErrorKind::ImmutableArray { idx: *type_idx },
+                });
+            }
+            pop_expect(
+                module,
+                function,
+                state,
+                unpacked_valtype(field.storage),
+                offset,
+                "array.set",
+            )?;
+            pop_expect(
+                module,
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I32),
+                offset,
+                "array.set",
+            )?;
+            pop_expect(
+                module,
+                function,
+                state,
+                ValType::Ref(RefType::concrete(true, *type_idx)),
+                offset,
+                "array.set",
+            )?;
+        }
+        Instr::ArrayLen => {
+            pop_expect(
+                module,
+                function,
+                state,
+                ValType::Ref(RefType::from_parts(true, HeapType::Array)),
+                offset,
+                "array.len",
+            )?;
+            state
+                .operands
+                .push(ValType::Num(crate::types::NumType::I32));
+        }
+        Instr::ArrayFill(type_idx) => {
+            let field = array_field_type(module, function, *type_idx, offset)?;
+            if !field.mutable {
+                return Err(ValidationError {
+                    offset: ByteOffset(offset),
+                    function: Some(function),
+                    kind: ValidationErrorKind::ImmutableArray { idx: *type_idx },
+                });
+            }
+            pop_expect(
+                module,
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I32),
+                offset,
+                "array.fill",
+            )?;
+            pop_expect(
+                module,
+                function,
+                state,
+                unpacked_valtype(field.storage),
+                offset,
+                "array.fill",
+            )?;
+            pop_expect(
+                module,
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I32),
+                offset,
+                "array.fill",
+            )?;
+            pop_expect(
+                module,
+                function,
+                state,
+                ValType::Ref(RefType::concrete(true, *type_idx)),
+                offset,
+                "array.fill",
+            )?;
+        }
+        Instr::ArrayCopy { dst, src } => {
+            let dst_field = array_field_type(module, function, *dst, offset)?;
+            let src_field = array_field_type(module, function, *src, offset)?;
+            if !dst_field.mutable {
+                return Err(ValidationError {
+                    offset: ByteOffset(offset),
+                    function: Some(function),
+                    kind: ValidationErrorKind::ImmutableArray { idx: *dst },
+                });
+            }
+            if !storage_matches(module, src_field.storage, dst_field.storage) {
+                return Err(ValidationError {
+                    offset: ByteOffset(offset),
+                    function: Some(function),
+                    kind: ValidationErrorKind::ArrayStorageMismatch {
+                        dst: *dst,
+                        src: *src,
+                    },
+                });
+            }
+            pop_expect(
+                module,
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I32),
+                offset,
+                "array.copy",
+            )?;
+            pop_expect(
+                module,
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I32),
+                offset,
+                "array.copy",
+            )?;
+            pop_expect(
+                module,
+                function,
+                state,
+                ValType::Ref(RefType::concrete(true, *src)),
+                offset,
+                "array.copy",
+            )?;
+            pop_expect(
+                module,
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I32),
+                offset,
+                "array.copy",
+            )?;
+            pop_expect(
+                module,
+                function,
+                state,
+                ValType::Ref(RefType::concrete(true, *dst)),
+                offset,
+                "array.copy",
+            )?;
+        }
+        Instr::ArrayInitData { type_idx, data } => {
+            let field = array_field_type(module, function, *type_idx, offset)?;
+            if !field.mutable {
+                return Err(ValidationError {
+                    offset: ByteOffset(offset),
+                    function: Some(function),
+                    kind: ValidationErrorKind::ImmutableArray { idx: *type_idx },
+                });
+            }
+            resolve_data_segment(module, *data, function, offset)?;
+            if !is_num_or_vec(field.storage) {
+                return Err(ValidationError {
+                    offset: ByteOffset(offset),
+                    function: Some(function),
+                    kind: ValidationErrorKind::ArrayNotNumOrVec { idx: *type_idx },
+                });
+            }
+            for _ in 0..3 {
+                pop_expect(
+                    module,
+                    function,
+                    state,
+                    ValType::Num(crate::types::NumType::I32),
+                    offset,
+                    "array.init_data",
+                )?;
+            }
+            pop_expect(
+                module,
+                function,
+                state,
+                ValType::Ref(RefType::concrete(true, *type_idx)),
+                offset,
+                "array.init_data",
+            )?;
+        }
+        Instr::ArrayInitElem { type_idx, elem } => {
+            let field = array_field_type(module, function, *type_idx, offset)?;
+            if !field.mutable {
+                return Err(ValidationError {
+                    offset: ByteOffset(offset),
+                    function: Some(function),
+                    kind: ValidationErrorKind::ImmutableArray { idx: *type_idx },
+                });
+            }
+            let segment = resolve_element_segment(module, *elem, function, offset)?;
+            let field_ty = unpacked_valtype(field.storage);
+            if !valtype_matches_type(module, ValType::Ref(segment.elem_type), field_ty) {
+                return Err(ValidationError {
+                    offset: ByteOffset(offset),
+                    function: Some(function),
+                    kind: ValidationErrorKind::ElemFieldTypeMismatch {
+                        elem: segment.elem_type,
+                        field: field_ty,
+                    },
+                });
+            }
+            for _ in 0..3 {
+                pop_expect(
+                    module,
+                    function,
+                    state,
+                    ValType::Num(crate::types::NumType::I32),
+                    offset,
+                    "array.init_elem",
+                )?;
+            }
+            pop_expect(
+                module,
+                function,
+                state,
+                ValType::Ref(RefType::concrete(true, *type_idx)),
+                offset,
+                "array.init_elem",
+            )?;
+        }
+        Instr::RefI31 => {
+            pop_expect(
+                module,
+                function,
+                state,
+                ValType::Num(crate::types::NumType::I32),
+                offset,
+                "ref.i31",
+            )?;
+            state
+                .operands
+                .push(ValType::Ref(RefType::from_parts(false, HeapType::I31)));
+        }
+        Instr::I31GetS | Instr::I31GetU => {
+            pop_expect(
+                module,
+                function,
+                state,
+                ValType::Ref(RefType::from_parts(true, HeapType::I31)),
+                offset,
+                "i31.get",
+            )?;
+            state
+                .operands
+                .push(ValType::Num(crate::types::NumType::I32));
+        }
     }
 
+    Ok(())
+}
+
+/// A packed-field read extension marker (validator view of `Some`/`None`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ext {
+    S,
+    U,
+}
+
+fn struct_field_types<'a>(
+    module: &'a Module<'_>,
+    function: FuncIdx,
+    type_idx: TypeIdx,
+    offset: usize,
+) -> Result<&'a [crate::types::FieldType], ValidationError> {
+    match module.types.get(type_idx.0 as usize).map(|sub| &sub.comp) {
+        Some(crate::types::CompType::Struct(fields)) => Ok(fields),
+        _ => Err(ValidationError {
+            offset: ByteOffset(offset),
+            function: Some(function),
+            kind: ValidationErrorKind::UnknownStruct { idx: type_idx },
+        }),
+    }
+}
+
+fn array_field_type(
+    module: &Module<'_>,
+    function: FuncIdx,
+    type_idx: TypeIdx,
+    offset: usize,
+) -> Result<crate::types::FieldType, ValidationError> {
+    match module.types.get(type_idx.0 as usize).map(|sub| &sub.comp) {
+        Some(crate::types::CompType::Array(field)) => Ok(*field),
+        _ => Err(ValidationError {
+            offset: ByteOffset(offset),
+            function: Some(function),
+            kind: ValidationErrorKind::UnknownArray { idx: type_idx },
+        }),
+    }
+}
+
+fn field_at(
+    fields: &[crate::types::FieldType],
+    field: u32,
+    type_idx: TypeIdx,
+    function: FuncIdx,
+    offset: usize,
+) -> Result<crate::types::FieldType, ValidationError> {
+    fields.get(field as usize).copied().ok_or(ValidationError {
+        offset: ByteOffset(offset),
+        function: Some(function),
+        kind: ValidationErrorKind::UnknownField {
+            idx: type_idx,
+            field,
+        },
+    })
+}
+
+fn unpacked_valtype(storage: crate::types::StorageType) -> ValType {
+    match storage {
+        crate::types::StorageType::Val(val) => val,
+        crate::types::StorageType::I8 | crate::types::StorageType::I16 => {
+            ValType::Num(crate::types::NumType::I32)
+        }
+    }
+}
+
+fn is_packed(storage: crate::types::StorageType) -> bool {
+    matches!(
+        storage,
+        crate::types::StorageType::I8 | crate::types::StorageType::I16
+    )
+}
+
+fn is_num_or_vec(storage: crate::types::StorageType) -> bool {
+    match storage {
+        crate::types::StorageType::I8 | crate::types::StorageType::I16 => true,
+        crate::types::StorageType::Val(val) => matches!(val, ValType::Num(_) | ValType::Vec(_)),
+    }
+}
+
+fn valtype_defaultable(val: ValType) -> bool {
+    match val {
+        ValType::Num(_) | ValType::Vec(_) => true,
+        ValType::Ref(ref_type) => ref_type.is_nullable(),
+    }
+}
+
+fn ensure_defaultable(
+    storages: impl Iterator<Item = crate::types::StorageType>,
+    type_idx: TypeIdx,
+    function: FuncIdx,
+    offset: usize,
+) -> Result<(), ValidationError> {
+    for storage in storages {
+        if !valtype_defaultable(unpacked_valtype(storage)) {
+            return Err(ValidationError {
+                offset: ByteOffset(offset),
+                function: Some(function),
+                kind: ValidationErrorKind::NonDefaultable { idx: type_idx },
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_gc_field_get(
+    module: &Module<'_>,
+    function: FuncIdx,
+    state: &mut ValidationState,
+    type_idx: TypeIdx,
+    field: u32,
+    ext: Option<Ext>,
+    offset: usize,
+) -> Result<(), ValidationError> {
+    let fields = struct_field_types(module, function, type_idx, offset)?;
+    let field_type = field_at(fields, field, type_idx, function, offset)?;
+    if (ext.is_some()) != is_packed(field_type.storage) {
+        return Err(ValidationError {
+            offset: ByteOffset(offset),
+            function: Some(function),
+            kind: ValidationErrorKind::PackedFieldMismatch {
+                idx: type_idx,
+                field,
+                packed: is_packed(field_type.storage),
+            },
+        });
+    }
+    pop_expect(
+        module,
+        function,
+        state,
+        ValType::Ref(RefType::concrete(true, type_idx)),
+        offset,
+        "struct.get",
+    )?;
+    state.operands.push(unpacked_valtype(field_type.storage));
+    Ok(())
+}
+
+fn validate_array_get(
+    module: &Module<'_>,
+    function: FuncIdx,
+    state: &mut ValidationState,
+    type_idx: TypeIdx,
+    ext: Option<Ext>,
+    offset: usize,
+) -> Result<(), ValidationError> {
+    let field = array_field_type(module, function, type_idx, offset)?;
+    if (ext.is_some()) != is_packed(field.storage) {
+        return Err(ValidationError {
+            offset: ByteOffset(offset),
+            function: Some(function),
+            kind: ValidationErrorKind::PackedFieldMismatch {
+                idx: type_idx,
+                field: 0,
+                packed: is_packed(field.storage),
+            },
+        });
+    }
+    pop_expect(
+        module,
+        function,
+        state,
+        ValType::Num(crate::types::NumType::I32),
+        offset,
+        "array.get",
+    )?;
+    pop_expect(
+        module,
+        function,
+        state,
+        ValType::Ref(RefType::concrete(true, type_idx)),
+        offset,
+        "array.get",
+    )?;
+    state.operands.push(unpacked_valtype(field.storage));
     Ok(())
 }
 
