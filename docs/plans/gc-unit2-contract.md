@@ -86,8 +86,11 @@ partial object.
    (count-first try_reserve of both table slot and payload);
    `grow`-style bounds (usize::MAX guard on 32-bit).
 2. **`Value`**: gains `GcRef(ObjectId)` and `I31(i32)` (31-bit-masked
-   payload). Both Copy-cheap; no allocation to hold. FFI: opaque
-   handles (GcRef) / i32 (I31) — extend `WasmValue` mechanically.
+   payload). Both Copy-cheap; no allocation to hold. FFI: AMENDED
+   (r1 review) — the GC value surface (opaque handles + i31 tag) is
+   DEFERRED to U4, where host plumbing and ownership rules land;
+   publishing C-ABI tags before any host consumer exists is not
+   reversible. U2's from_core None behavior stands.
 3. **`GcStats`** on the store: `live_objects`, `live_bytes`
    (LOGICAL: struct = 8 + Σ widths; array = 12 + len × width; widths
    i8=1 i16=2 i32/f32=4 i64/f64=8 v128=16 refhandle=4; i31/I31
