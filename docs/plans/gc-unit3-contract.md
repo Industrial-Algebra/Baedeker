@@ -72,8 +72,11 @@ const-expr wiring (U4), FFI handles (U4).
 514:    require (label c x <> []) e.at "..."
 516:    let ts0, t1 = Lib.List.split_last (label c x) in
 517:    require (match_valtype c.types (RefT rt1') t1) e.at "..."
-518:    (ts0 @ [RefT rt1']) --> (ts0 @ [RefT rt2]), []
+523:    (ts0 @ [RefT rt1]) --> (ts0 @ [RefT rt2]), []
 ```
+
+(CORRECTED r0: the fail-form OPERAND is the source `rt1` — the original
+transcription `rt1'` was the author's error; verified valid.ml:523.)
 
 - Both forms require rt2 <: rt1 (`match_reftype rt2 rt1`).
 - BrOnCast: label's LAST type must accept `RefT rt2`; pops `RefT rt1`,
@@ -87,8 +90,9 @@ const-expr wiring (U4), FFI handles (U4).
     | Null -> (NoNull, ht1)
     | NoNull -> (nul1, ht1)
   ```
-  i.e. the difference strips target nullness from source nullness over the
-  SOURCE heaptype.
+  i.e. NULLABLE TARGET → fall-through is always non-null (nulls would have
+  matched and branched); NON-NULL TARGET → fall-through keeps the source
+  nullness. (CORRECTED r0: earlier prose inverted this; the row above wins.)
 
 ### Execution rows (interpreter/exec/eval.ml)
 
@@ -139,27 +143,50 @@ eval.ml:929-941 (conversions, immediate re-tags — no allocation):
 
 - `ref.eq` semantics: i31⊕i31 = payload equality; object⊕object = identity
   (same heap AND ObjectId for us); null⊕null = true; cross-domain = false.
-- `any.convert_extern` (Internalize, 0x1a): externref → anyref with the
-  same host payload; null passes through. `extern.convert_any`
-  (Externalize, 0x1b): mirror. BOTH are immediate value-level re-tags —
-  NEVER heap entries (recorded U-plan decision; re-verified at the pin).
+- Conversion VALIDATION (valid.ml:356-359, 855-858 — CORRECTED r0; the
+  original text inverted the Externalize domain):
+  ```
+  356:  let type_externop op = match op with
+  358:    | Internalize -> ExternHT, AnyHT
+  359:    | Externalize -> AnyHT, ExternHT
+  855:  | ExternConvert op ->
+  857:    let (nul, _ht) = peek_ref 0 s e.at in
+  858:    [RefT (nul, ht1)] --> [RefT (nul, ht2)], []
+  ```
+  `any.convert_extern` (0x1a): externref → anyref. `extern.convert_any`
+  (0x1b): ANYREF → externref — the operand is any ANYREF (peek_ref keeps
+  ITS nullness): struct refs, array refs, i31s, internalized hosts ALL
+  externalize. eval wraps `Ref r → Ref (Extern.ExternRef r)` for ANY r.
+- BOTH are immediate value-level re-tags — NEVER heap entries (recorded
+  U-plan decision; re-verified at the pin).
 
 ## Runtime model decisions
 
-1. **Converted-extern domain tag.** New `Value` variant
-   `AnyExtern(Option<u32>)` (same payload type as `ExternRef`):
-   - `any.convert_extern`: `ExternRef(h) → AnyExtern(h)`; `null → null`.
-   - `extern.convert_any`: `AnyExtern(h) → ExternRef(h)`; null → null;
-     `GcRef/I31` operands cannot occur (validation types the operand
-     extern-domain — `top(extern)`); if they nevertheless reach the
-     interpreter, trap `TypeMismatch` (defensive, unreachable-by-valid).
-   - Boundary checks: `(ref extern)` accepts `ExternRef` only;
-     `(ref any)` accepts `GcRef` (resolving), `I31`, AND `AnyExtern`.
-     Raw `ExternRef` into an any-typed boundary param REJECTS (a real
-     externref is not an anyref — the pin distinguishes domains).
-   - `ref.test`/`ref.cast` against `any`: `AnyExtern` matches (non-null)
-     the any hierarchy top ONLY — any concrete struct/array/i31/eq/none
-     target does NOT match it; `extern` target does NOT match it.
+1. **Domain-crossing value model** (CORRECTED r0 — full bidirectional
+   crossing per the pin; the original `AnyExtern(Option<u32>)` model was
+   the author's domain inversion, caught by the implementer, verified at
+   the pin above). TWO variants:
+   - `Value::HostAny(Option<u32>)` — any-domain value holding a host
+     handle (internalized raw extern).
+   - `Value::ExternGc(Option<ExternPayload>)`,
+     `enum ExternPayload { Gc(HeapId, ObjectId), I31(i32) }` —
+     extern-domain value holding a GC-domain payload (externalized).
+   - `any.convert_extern`: `ExternRef(h)→HostAny(h)`;
+     `ExternGc(Gc(heap,id))→GcRef{heap,id}`; `ExternGc(I31(i))→I31(i)`;
+     null → null.
+   - `extern.convert_any`: `GcRef→ExternGc(Gc(..))`; `I31→ExternGc(I31)`;
+     `HostAny(h)→ExternRef(h)` (symmetric with internalize); null → null.
+   - Roundtrips are exact identities: internalize∘externalize = id for
+     every anyref; externalize∘internalize = id for every externref.
+   - Boundary checks: `(ref extern)` accepts `ExternRef` and `ExternGc`;
+     `(ref any)` accepts `GcRef` (resolving), `I31`, and `HostAny`.
+     Cross-domain values REJECT (a raw `ExternRef` into an any-typed
+     param; a `HostAny`/GC value into an extern-typed param).
+   - `ref.test`/`ref.cast` targets: `any` matches `GcRef`/`I31`/
+     `HostAny` (non-null); `extern` matches `ExternRef`/`ExternGc`;
+     `eq` matches `GcRef`/`I31` only; concrete struct/array match only
+     `GcRef` of that kind; `i31` matches `I31`; `none` never matches
+     non-null.
 2. **Runtime type queries via the heap.** Each `GcObject` already records
    its `GcTypeId`. Extend the heap type entry with a precomputed ancestor
    id chain: `ancestry: Vec<GcTypeId>` (declared supertypes, transitively
@@ -174,8 +201,16 @@ eval.ml:929-941 (conversions, immediate re-tags — no allocation):
      hierarchy bottoms per U1 lattice).
    - `GcRef{heap,id}` (resolving through own or foreign registry;
      unresolvable = boundary rules apply, internal ops validated so this
-     is defensive → trap): concrete target = target interned id ∈
-     {own} ∪ own.ancestry; abstract targets per kind: `struct`/`array`
+     is defensive → trap): concrete target: if the object's heap IS the
+     executing store's heap, target interned id ∈ {own} ∪ own.ancestry.
+     If the object resolves to a FOREIGN heap, the store-side precomputed
+     id indexes the WRONG table — resolve by looking the target type's
+     CLOSED FORM up in the OBJECT's heap (read-only find in the type-id
+     key table; no interning, zero alloc); miss → no match. Then id-walk
+     in the object's heap. (r0 correction: per-heap ids are positional;
+     cross-heap id comparison only works when intern order aligns — the
+     A5 test accidentally aligned; regressions must cover NON-aligned
+     intern order.) Abstract targets per kind: `struct`/`array`
      match objects of that kind regardless of concrete type; `eq` matches
      any object + i31; `any` matches every GC-domain value; `none` never
      matches non-null.
