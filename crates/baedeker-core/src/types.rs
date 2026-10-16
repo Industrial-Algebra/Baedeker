@@ -691,6 +691,35 @@ impl ClosedDefinedType {
         Self::resolve(types, rec_groups, idx, &mut path)
     }
 
+    /// Structural subtype test between two cross-module closed forms:
+    /// equality, or a declared-supertype chain rooted at `self` that reaches
+    /// `expected`. Mirrors the validator's `deftype_matches`, but works
+    /// across independent type sections (no module-local index is involved).
+    pub fn is_subtype_of(&self, expected: &Self) -> bool {
+        if self == expected {
+            return true;
+        }
+        let Some(member) = self.members.get(self.position as usize) else {
+            return false;
+        };
+        member.supers.iter().any(|sup| {
+            self.resolve_super(sup)
+                .is_some_and(|resolved| resolved.is_subtype_of(expected))
+        })
+    }
+
+    /// Resolve a declared supertype reference against `self`'s group.
+    fn resolve_super(&self, sup: &ClosedHeapRef) -> Option<Self> {
+        match sup {
+            ClosedHeapRef::Abstract(_) => None,
+            ClosedHeapRef::InGroup(position) => Some(Self {
+                members: self.members.clone(),
+                position: *position,
+            }),
+            ClosedHeapRef::External(closed) => Some((**closed).clone()),
+        }
+    }
+
     fn resolve(
         types: &[SubType],
         rec_groups: &[(u32, u32)],

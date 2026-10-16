@@ -3998,8 +3998,18 @@ impl<'b> FuncBuilder<'b> {
             }
             Instr::ArrayNewFixed { type_idx, count } => {
                 let field_ty = self.gc_array_field(offset, type_idx)?;
-                let mut values = Vec::with_capacity(count as usize);
+                // Mirror the validator's polymorphic-stack rule: in an
+                // unreachable frame at the frame boundary, `count` operands
+                // are conceptually present without existing. Do NOT
+                // materialize `count` registers (count is a u32 LEB, up to
+                // u32::MAX) — a huge count in dead code must lower without
+                // allocating. The emitted term never executes because the
+                // surrounding code is unreachable.
+                let mut values = Vec::new();
                 for _ in 0..count {
+                    if self.at_frame_boundary() && self.current_frame_unreachable() {
+                        break;
+                    }
                     values.push(self.pop_expect(offset, "array.new_fixed", field_ty)?.reg);
                 }
                 values.reverse();

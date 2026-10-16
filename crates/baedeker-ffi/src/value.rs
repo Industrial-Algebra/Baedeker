@@ -93,7 +93,7 @@ impl BaedekerValue {
             Value::FuncRef(_)
             | Value::ExternRef(_)
             | Value::ExnRef(_)
-            | Value::GcRef(_)
+            | Value::GcRef { .. }
             | Value::I31(_) => return None,
         })
     }

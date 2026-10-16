@@ -11,16 +11,35 @@
 //! refusal rather than an abort, and a refused allocation leaves no partial
 //! object behind.
 //!
+//! Each heap carries a process-unique [`HeapId`]; heap references
+//! (`Value::GcRef`) carry it so a reference created in one store's heap can
+//! be resolved against a registered foreign heap in a linked store rather
+//! than misinterpreted as a local `ObjectId`.
+//!
+//! Aggregate layout ids are interned by their **cross-module closed form**
+//! (U1's [`ClosedDefinedType`]) when allocated from a module, so two
+//! modules that declare structurally identical struct/array types share a
+//! layout id even when their local type indices differ.
+//!
 //! `live_bytes` is **logical** accounting, frozen by the design's formula:
 //! struct = 8-byte header + Σ field widths; array = 12-byte header +
 //! len × elem width; widths i8=1 i16=2 i32/f32=4 i64/f64=8 v128=16 and a
 //! reference handle is 4. `i31` values are immediates and contribute 0.
 
-use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::{RuntimeError, RuntimeErrorKind, Value};
-use crate::types::{FieldType, StorageType, ValType};
+use crate::types::{ClosedDefinedType, FieldType, StorageType, ValType};
+
+/// A process-unique heap identity. `Value::GcRef` carries one so object
+/// ids from different stores never alias.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct HeapId(pub u64);
+
+/// Source of fresh heap ids. The first heap gets 1 so 0 is never a valid
+/// heap identity (mirrors instance id 0 being reserved).
+static NEXT_HEAP_ID: AtomicU64 = AtomicU64::new(1);
 
 /// An index into the heap's object table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -39,6 +58,16 @@ pub struct GcTypeId(pub u32);
 pub enum GcTypeKind {
     Struct(Vec<FieldType>),
     Array(FieldType),
+}
+
+/// The interning key. `Raw` is used by the direct heap API (no module
+/// context); `Closed` is the cross-module structural identity produced by
+/// the runtime, so a nested concrete reference at a different local type
+/// index still interns equal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TypeKey {
+    Closed(ClosedDefinedType),
+    Raw(GcTypeKind),
 }
 
 /// A GC heap object. Never freed in slice 5.
@@ -121,18 +150,30 @@ fn alloc_failed() -> RuntimeError {
 }
 
 /// A never-free GC heap.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct GcHeap {
+    id: HeapId,
     objects: Vec<GcObject>,
     types: Vec<GcTypeKind>,
-    type_ids: BTreeMap<GcTypeKind, GcTypeId>,
+    type_ids: Vec<(TypeKey, GcTypeId)>,
     allocations: u64,
 }
 
 impl GcHeap {
-    /// An empty heap.
+    /// An empty heap with a fresh process-unique identity.
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            id: HeapId(NEXT_HEAP_ID.fetch_add(1, Ordering::Relaxed)),
+            objects: Vec::new(),
+            types: Vec::new(),
+            type_ids: Vec::new(),
+            allocations: 0,
+        }
+    }
+
+    /// This heap's process-unique identity.
+    pub fn heap_id(&self) -> HeapId {
+        self.id
     }
 
     /// Number of live objects.
@@ -145,20 +186,59 @@ impl GcHeap {
         self.objects.is_empty()
     }
 
-    /// Intern a layout, returning its stable id.
-    pub fn intern_type(&mut self, kind: GcTypeKind) -> GcTypeId {
-        if let Some(&id) = self.type_ids.get(&kind) {
-            return id;
+    /// Intern a layout, returning its stable id. Fallible end-to-end: the
+    /// key clone is try-reserved, then the table slots, so a refusal (OOM)
+    /// reports [`RuntimeErrorKind::ResourceLimitExceeded`] and leaves the
+    /// type table untouched.
+    pub fn intern_type(&mut self, kind: GcTypeKind) -> Result<GcTypeId, RuntimeError> {
+        let key = TypeKey::Raw(try_clone_kind(&kind)?);
+        self.intern_owned(key, kind)
+    }
+
+    /// Intern a layout by its cross-module closed form, so structurally
+    /// identical aggregate types at different module-local indices share an
+    /// id. The closed form is moved, not cloned. Fallible as
+    /// [`GcHeap::intern_type`].
+    pub fn intern_closed(
+        &mut self,
+        closed: ClosedDefinedType,
+        kind: GcTypeKind,
+    ) -> Result<GcTypeId, RuntimeError> {
+        self.intern_owned(TypeKey::Closed(closed), kind)
+    }
+
+    fn intern_owned(&mut self, key: TypeKey, layout: GcTypeKind) -> Result<GcTypeId, RuntimeError> {
+        if let Some((_, id)) = self.type_ids.iter().find(|(known, _)| *known == key) {
+            return Ok(*id);
         }
+        // Reserve every table slot before committing either push.
+        self.types.try_reserve(1).map_err(|_| alloc_failed())?;
+        self.type_ids.try_reserve(1).map_err(|_| alloc_failed())?;
         let id = GcTypeId(self.types.len() as u32);
-        self.types.push(kind.clone());
-        self.type_ids.insert(kind, id);
-        id
+        self.types.push(layout);
+        self.type_ids.push((key, id));
+        Ok(id)
     }
 
     /// The layout of an interned type.
     pub fn type_kind(&self, id: GcTypeId) -> Option<&GcTypeKind> {
         self.types.get(id.0 as usize)
+    }
+
+    /// The cross-module closed form of an interned type, when it was
+    /// interned from a module type (the direct-API `intern_type` path has
+    /// no closed form).
+    pub fn closed_type(&self, id: GcTypeId) -> Option<&ClosedDefinedType> {
+        self.type_ids.iter().find_map(|(key, tid)| {
+            if *tid == id {
+                match key {
+                    TypeKey::Closed(closed) => Some(closed),
+                    TypeKey::Raw(_) => None,
+                }
+            } else {
+                None
+            }
+        })
     }
 
     /// The object at `id`, if any.
@@ -216,24 +296,63 @@ impl GcHeap {
         }
     }
 
+    /// The interned type id of an object.
+    pub fn object_type_id(&self, id: ObjectId) -> Option<GcTypeId> {
+        match self.object(id)? {
+            GcObject::Struct { type_id, .. } | GcObject::Array { type_id, .. } => Some(*type_id),
+        }
+    }
+
     /// Allocate a struct. `fields` must already hold the (unpacked) field
     /// values in declaration order; packed storages are wrapped here.
+    ///
+    /// Fallible end-to-end: the payload vector is reserved before any field
+    /// is written, then the object-table slot, then the layout is interned;
+    /// a refusal at any stage leaves the heap untouched.
     pub fn alloc_struct(
         &mut self,
         kind: GcTypeKind,
         fields: Vec<Value>,
     ) -> Result<ObjectId, RuntimeError> {
-        // Count-first: reserve the table slot before interning/pushing.
-        self.objects.try_reserve(1).map_err(|_| alloc_failed())?;
-        let stored = match &kind {
-            GcTypeKind::Struct(field_types) => field_types
-                .iter()
-                .zip(fields)
-                .map(|(field, value)| pack_field(field.storage, value))
-                .collect(),
+        self.alloc_struct_inner(None, kind, fields)
+    }
+
+    /// Allocate a struct, interning by cross-module closed form.
+    pub fn alloc_struct_closed(
+        &mut self,
+        closed: ClosedDefinedType,
+        kind: GcTypeKind,
+        fields: Vec<Value>,
+    ) -> Result<ObjectId, RuntimeError> {
+        self.alloc_struct_inner(Some(closed), kind, fields)
+    }
+
+    fn alloc_struct_inner(
+        &mut self,
+        closed: Option<ClosedDefinedType>,
+        kind: GcTypeKind,
+        fields: Vec<Value>,
+    ) -> Result<ObjectId, RuntimeError> {
+        // Try-reserve the payload BEFORE building, then fill. Borrow the
+        // layout only for the duration of the fill so `kind` can move into
+        // interning afterwards (no infallible clone).
+        let mut stored: Vec<Value> = Vec::new();
+        match &kind {
+            GcTypeKind::Struct(field_types) => {
+                stored
+                    .try_reserve(field_types.len())
+                    .map_err(|_| alloc_failed())?;
+                for (field, value) in field_types.iter().zip(fields) {
+                    stored.push(pack_field(field.storage, value));
+                }
+            }
             GcTypeKind::Array(_) => return Err(alloc_failed()),
+        }
+        self.objects.try_reserve(1).map_err(|_| alloc_failed())?;
+        let type_id = match closed {
+            Some(closed) => self.intern_closed(closed, kind)?,
+            None => self.intern_type(kind)?,
         };
-        let type_id = self.intern_type(kind);
         let id = ObjectId(self.objects.len() as u32);
         self.objects.push(GcObject::Struct {
             type_id,
@@ -252,6 +371,27 @@ impl GcHeap {
         len: u32,
         fill: Value,
     ) -> Result<ObjectId, RuntimeError> {
+        self.alloc_array_inner(None, kind, len, fill)
+    }
+
+    /// Allocate an array, interning by cross-module closed form.
+    pub fn alloc_array_closed(
+        &mut self,
+        closed: ClosedDefinedType,
+        kind: GcTypeKind,
+        len: u32,
+        fill: Value,
+    ) -> Result<ObjectId, RuntimeError> {
+        self.alloc_array_inner(Some(closed), kind, len, fill)
+    }
+
+    fn alloc_array_inner(
+        &mut self,
+        closed: Option<ClosedDefinedType>,
+        kind: GcTypeKind,
+        len: u32,
+        fill: Value,
+    ) -> Result<ObjectId, RuntimeError> {
         let field = match &kind {
             GcTypeKind::Array(field) => *field,
             GcTypeKind::Struct(_) => return Err(alloc_failed()),
@@ -262,9 +402,12 @@ impl GcHeap {
         let mut elems: Vec<Value> = Vec::new();
         elems.try_reserve(count).map_err(|_| alloc_failed())?;
         self.objects.try_reserve(1).map_err(|_| alloc_failed())?;
+        let type_id = match closed {
+            Some(closed) => self.intern_closed(closed, kind)?,
+            None => self.intern_type(kind)?,
+        };
         let packed = pack_field(field.storage, fill);
         elems.resize(count, packed);
-        let type_id = self.intern_type(kind);
         let id = ObjectId(self.objects.len() as u32);
         self.objects.push(GcObject::Array {
             type_id,
@@ -282,17 +425,42 @@ impl GcHeap {
         kind: GcTypeKind,
         elems: Vec<Value>,
     ) -> Result<ObjectId, RuntimeError> {
+        self.alloc_fixed_inner(None, kind, elems)
+    }
+
+    /// Allocate a fixed array, interning by cross-module closed form.
+    pub fn alloc_fixed_closed(
+        &mut self,
+        closed: ClosedDefinedType,
+        kind: GcTypeKind,
+        elems: Vec<Value>,
+    ) -> Result<ObjectId, RuntimeError> {
+        self.alloc_fixed_inner(Some(closed), kind, elems)
+    }
+
+    fn alloc_fixed_inner(
+        &mut self,
+        closed: Option<ClosedDefinedType>,
+        kind: GcTypeKind,
+        elems: Vec<Value>,
+    ) -> Result<ObjectId, RuntimeError> {
         let field = match &kind {
             GcTypeKind::Array(field) => *field,
             GcTypeKind::Struct(_) => return Err(alloc_failed()),
         };
+        let mut stored: Vec<Value> = Vec::new();
+        stored
+            .try_reserve(elems.len())
+            .map_err(|_| alloc_failed())?;
+        for value in elems {
+            stored.push(pack_field(field.storage, value));
+        }
         self.objects.try_reserve(1).map_err(|_| alloc_failed())?;
-        let stored: Vec<Value> = elems
-            .into_iter()
-            .map(|value| pack_field(field.storage, value))
-            .collect();
+        let type_id = match closed {
+            Some(closed) => self.intern_closed(closed, kind)?,
+            None => self.intern_type(kind)?,
+        };
         let len = stored.len() as u32;
-        let type_id = self.intern_type(kind);
         let id = ObjectId(self.objects.len() as u32);
         self.objects.push(GcObject::Array {
             type_id,
@@ -445,6 +613,26 @@ impl GcHeap {
     }
 }
 
+impl Default for GcHeap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Wrap a value into a packed storage slot (low 8/16 bits).
+/// Fallibly clone a layout for use as a `Raw` interning key.
+fn try_clone_kind(kind: &GcTypeKind) -> Result<GcTypeKind, RuntimeError> {
+    match kind {
+        GcTypeKind::Struct(fields) => {
+            let mut out: Vec<FieldType> = Vec::new();
+            out.try_reserve(fields.len()).map_err(|_| alloc_failed())?;
+            out.extend_from_slice(fields);
+            Ok(GcTypeKind::Struct(out))
+        }
+        GcTypeKind::Array(field) => Ok(GcTypeKind::Array(*field)),
+    }
+}
+
 /// Wrap a value into a packed storage slot (low 8/16 bits).
 fn pack_field(storage: StorageType, value: Value) -> Value {
     match storage {
@@ -550,5 +738,13 @@ mod tests {
         heap.alloc_array(kind.clone(), 2, Value::I32(0)).unwrap();
         heap.alloc_array(kind, 0, Value::I32(0)).unwrap();
         assert_eq!(heap.allocations_since(snap), 2);
+    }
+
+    #[test]
+    fn heap_ids_are_unique() {
+        let a = GcHeap::new();
+        let b = GcHeap::new();
+        assert_ne!(a.heap_id(), b.heap_id());
+        assert_ne!(a.heap_id().0, 0);
     }
 }

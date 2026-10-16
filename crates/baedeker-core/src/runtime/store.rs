@@ -9,7 +9,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::lower::{RegConstInstr, RegDataMode, RegElemValue, RegElementMode, RegModule};
-use crate::runtime::gcheap::{GcHeap, GcSnapshot, GcStats};
+use crate::runtime::gcheap::{GcHeap, GcSnapshot, GcStats, HeapId};
 use crate::runtime::gpu::{GpuBackend, GpuError, GpuKernelId};
 use crate::runtime::host::HostFunction;
 use crate::runtime::{RuntimeError, RuntimeErrorKind, RuntimeTrap, Value, trap};
@@ -49,6 +49,11 @@ pub struct Imports {
     tags: Vec<TagProvider>,
     /// Per-provider-module type sections, keyed by the import module name.
     type_contexts: alloc::collections::BTreeMap<String, TypeContext>,
+    /// GC heaps of provider stores. Registered so that a `GcRef` value
+    /// crossing a shared global/table (or a cross-instance call/host round
+    /// trip) resolves against the heap that created it instead of being
+    /// misread as a local object id.
+    provider_heaps: Vec<alloc::rc::Rc<core::cell::RefCell<GcHeap>>>,
 }
 
 impl Imports {
@@ -76,6 +81,18 @@ impl Imports {
                 rec_groups: provider.rec_groups.clone(),
             },
         );
+        self
+    }
+
+    /// Register a provider store's GC heap.
+    ///
+    /// Call once per store whose GC values (shared globals/tables, thrown
+    /// exception payloads, or cross-instance call arguments) may reach this
+    /// consumer. Registration is idempotent and by heap identity, so
+    /// registering an unrelated heap is harmless; the consumer only resolves
+    /// a `GcRef` whose [`HeapId`] matches a registered heap.
+    pub fn provider_heap(mut self, heap: alloc::rc::Rc<core::cell::RefCell<GcHeap>>) -> Self {
+        self.provider_heaps.push(heap);
         self
     }
 
@@ -264,6 +281,21 @@ fn try_alloc_n<T: Clone>(n: usize, value: T) -> Option<Vec<T>> {
     vec.try_reserve(n).ok()?;
     vec.resize(n, value);
     Some(vec)
+}
+
+/// Snapshot the unique ids of provider heaps, dropping duplicates so a
+/// heap registered twice resolves identically.
+fn register_provider_heaps(
+    heaps: &[alloc::rc::Rc<core::cell::RefCell<GcHeap>>],
+) -> Vec<(HeapId, alloc::rc::Rc<core::cell::RefCell<GcHeap>>)> {
+    let mut out: Vec<(HeapId, alloc::rc::Rc<core::cell::RefCell<GcHeap>>)> = Vec::new();
+    for heap in heaps {
+        let id = heap.borrow().heap_id();
+        if !out.iter().any(|(known, _)| *known == id) {
+            out.push((id, heap.clone()));
+        }
+    }
+    out
 }
 
 /// Spec limits matching: provided limits must be at least as permissive as
@@ -811,6 +843,10 @@ pub struct Store {
     /// this instance go through it, and `GcStats` is logical accounting for
     /// the whole store. Per-instance isolation is not required by the spec.
     gc_heap: alloc::rc::Rc<core::cell::RefCell<GcHeap>>,
+    /// GC heaps registered from provider stores, keyed by their unique id.
+    /// A `GcRef` whose heap is neither this store's heap nor in this list is
+    /// a clean resolution error, never a misindexed local object.
+    foreign_heaps: Vec<(HeapId, alloc::rc::Rc<core::cell::RefCell<GcHeap>>)>,
 }
 
 impl Store {
@@ -834,6 +870,10 @@ impl Store {
         let (mut store, error) =
             Self::instantiate_internal(module, imports, instance_id, shared_exceptions.clone())?;
         store.link_group = Some(group.clone());
+        // Cross-instance calls and the group-shared exception arena can carry
+        // GC references from any already-registered member, so register every
+        // member's heap as a foreign heap up front.
+        store.register_group_heaps(group);
         let store = alloc::rc::Rc::new(core::cell::RefCell::new(store));
         // Register the instance even when instantiation failed partway:
         // spec semantics persist element segment writes into shared tables
@@ -1218,6 +1258,7 @@ impl Store {
             tag_types: Vec::new(),
             tag_map,
             gc_heap: Rc::new(core::cell::RefCell::new(GcHeap::new())),
+            foreign_heaps: register_provider_heaps(&imports.provider_heaps),
         };
 
         // Register defined-tag types (module-agnostic tag ids).
@@ -1641,6 +1682,59 @@ impl Store {
     pub fn with_gc_heap_mut<R>(&self, f: impl FnOnce(&mut GcHeap) -> R) -> R {
         let mut heap = self.gc_heap.borrow_mut();
         f(&mut heap)
+    }
+
+    /// This store's own GC heap identity.
+    pub fn gc_heap_id(&self) -> HeapId {
+        self.gc_heap.borrow().heap_id()
+    }
+
+    /// Resolve a heap identity to a heap handle: this store's own heap, a
+    /// registered foreign heap, or `None`. Never panics on an unknown id.
+    pub fn heap_handle(&self, heap: HeapId) -> Option<alloc::rc::Rc<core::cell::RefCell<GcHeap>>> {
+        if self.gc_heap.borrow().heap_id() == heap {
+            return Some(self.gc_heap.clone());
+        }
+        self.foreign_heaps
+            .iter()
+            .find(|(id, _)| *id == heap)
+            .map(|(_, handle)| handle.clone())
+    }
+
+    /// Read a (possibly foreign) GC heap via closure. `None` means the
+    /// reference's heap was never registered with this store.
+    pub fn with_heap<R>(&self, heap: HeapId, f: impl FnOnce(&GcHeap) -> R) -> Option<R> {
+        let handle = self.heap_handle(heap)?;
+        let heap = handle.borrow();
+        Some(f(&heap))
+    }
+
+    /// Mutate a (possibly foreign) GC heap via closure. `None` means the
+    /// reference's heap was never registered with this store.
+    pub fn with_heap_mut<R>(&self, heap: HeapId, f: impl FnOnce(&mut GcHeap) -> R) -> Option<R> {
+        let handle = self.heap_handle(heap)?;
+        let mut heap = handle.borrow_mut();
+        Some(f(&mut heap))
+    }
+
+    /// Register every already-instantiated link-group member's GC heap as a
+    /// foreign heap (deduplicated). Members added later are not retrograded;
+    /// callers that link a provider after this store should also register its
+    /// heap through [`Imports::provider_heap`].
+    fn register_group_heaps(&mut self, group: &alloc::rc::Rc<core::cell::RefCell<LinkGroup>>) {
+        let heaps: Vec<alloc::rc::Rc<core::cell::RefCell<GcHeap>>> = group
+            .borrow()
+            .iter()
+            .map(|(_, (_, store))| store.borrow().gc_heap.clone())
+            .collect();
+        for heap in heaps {
+            let id = heap.borrow().heap_id();
+            if id != self.gc_heap.borrow().heap_id()
+                && !self.foreign_heaps.iter().any(|(known, _)| *known == id)
+            {
+                self.foreign_heaps.push((id, heap));
+            }
+        }
     }
 
     /// Read a memory's bytes by index-space index via closure (embedding
