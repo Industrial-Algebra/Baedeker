@@ -35,8 +35,7 @@ use crate::lower::{
 };
 use crate::runtime::gcheap::storage_width;
 use crate::types::{
-    ClosedDefinedType, CompType, FuncIdx, HeapType, MemArg, NumType, RefType, StorageType,
-    TableIdx, TypeIdx, ValType,
+    CompType, FuncIdx, HeapType, MemArg, NumType, RefType, StorageType, TableIdx, TypeIdx, ValType,
 };
 
 /// A runtime WebAssembly value.
@@ -843,7 +842,15 @@ pub(crate) fn execute_func_in(
             }
         }
 
-        let mut locals = alloc::vec![None; func.locals.len()];
+        // Frame storage is fallible too: an armed allocator must yield a
+        // clean refusal (never an abort) when a function's local or register
+        // array is large — e.g. a reachable `array.new_fixed` with a large
+        // operand count, whose operands are materialized as registers.
+        let mut locals: Vec<Option<Value>> = Vec::new();
+        locals
+            .try_reserve(func.locals.len())
+            .map_err(|_| frame_allocation_failed())?;
+        locals.resize(func.locals.len(), None);
         for (idx, &arg) in args.iter().enumerate() {
             locals[idx] = Some(arg);
         }
@@ -865,7 +872,11 @@ pub(crate) fn execute_func_in(
             }
         }
 
-        let mut registers = alloc::vec![None; func.reg_types.len()];
+        let mut registers: Vec<Option<Value>> = Vec::new();
+        registers
+            .try_reserve(func.reg_types.len())
+            .map_err(|_| frame_allocation_failed())?;
+        registers.resize(func.reg_types.len(), None);
 
         if func.blocks.is_empty() {
             return Err(RuntimeError {
@@ -910,10 +921,7 @@ pub(crate) fn execute_func_in(
                     results,
                 } = &instr.op
                 {
-                    let call_args = arg_regs
-                        .iter()
-                        .map(|&reg| get_reg(&registers, reg))
-                        .collect::<Result<Vec<_>, _>>()?;
+                    let call_args = read_reg_list(&registers, arg_regs)?;
                     let returned = execute_call(module, store, callee_idx, &call_args, depth);
                     let returned = match returned {
                         Err(error) => {
@@ -956,10 +964,7 @@ pub(crate) fn execute_func_in(
                             .and_then(|s| s.table_type(table.0))
                             .is_some_and(|ty| ty.limits.is64),
                     )?;
-                    let call_args = arg_regs
-                        .iter()
-                        .map(|&reg| get_reg(&registers, reg))
-                        .collect::<Result<Vec<_>, _>>()?;
+                    let call_args = read_reg_list(&registers, arg_regs)?;
                     let returned = execute_call_indirect(
                         module, store, type_idx, table, idx, &call_args, depth,
                     );
@@ -998,10 +1003,7 @@ pub(crate) fn execute_func_in(
                 } = &instr.op
                 {
                     let target = get_reg(&registers, *func_ref)?;
-                    let call_args = arg_regs
-                        .iter()
-                        .map(|&reg| get_reg(&registers, reg))
-                        .collect::<Result<Vec<_>, _>>()?;
+                    let call_args = read_reg_list(&registers, arg_regs)?;
                     let returned =
                         execute_call_ref(module, store, type_idx, target, &call_args, depth);
                     let returned = match returned {
@@ -1032,17 +1034,14 @@ pub(crate) fn execute_func_in(
                         set_reg(&mut registers, dst, value)?;
                     }
                 } else {
-                    execute_reg_op(module, store, &mut registers, &mut locals, instr)?;
+                    execute_reg_op(store, &mut registers, &mut locals, instr)?;
                 }
             }
 
             // Follow the terminator
             match &block.term {
                 RegTerm::Throw { tag, values } => {
-                    let mut payload = Vec::with_capacity(values.len());
-                    for &reg in values {
-                        payload.push(get_reg(&registers, reg)?);
-                    }
+                    let payload = read_reg_list(&registers, values)?;
                     let Some(store) = store else {
                         return Err(RuntimeError {
                             kind: RuntimeErrorKind::UncaughtException { exn: None },
@@ -1109,20 +1108,14 @@ pub(crate) fn execute_func_in(
                     }
                 }
                 RegTerm::Return { values } => {
-                    let mut results = Vec::with_capacity(values.len());
-                    for &reg in values {
-                        results.push(get_reg(&registers, reg)?);
-                    }
+                    let results = read_reg_list(&registers, values)?;
                     return Ok(results);
                 }
                 RegTerm::TailCall {
                     func: callee_idx,
                     args: arg_regs,
                 } => {
-                    let call_args = arg_regs
-                        .iter()
-                        .map(|&reg| get_reg(&registers, reg))
-                        .collect::<Result<Vec<_>, _>>()?;
+                    let call_args = read_reg_list(&registers, arg_regs)?;
                     match resolve_tail_direct(module, store, callee_idx, &call_args)? {
                         TailTarget::Defined(callee) => {
                             func = callee;
@@ -1145,10 +1138,7 @@ pub(crate) fn execute_func_in(
                             .and_then(|s| s.table_type(table.0))
                             .is_some_and(|ty| ty.limits.is64),
                     )?;
-                    let call_args = arg_regs
-                        .iter()
-                        .map(|&reg| get_reg(&registers, reg))
-                        .collect::<Result<Vec<_>, _>>()?;
+                    let call_args = read_reg_list(&registers, arg_regs)?;
                     let (instance_id, target_func_idx) = table_lookup_target(store, table, idx)?;
                     match resolve_tail_funcref(
                         module,
@@ -1174,10 +1164,7 @@ pub(crate) fn execute_func_in(
                     args: arg_regs,
                 } => {
                     let target = get_reg(&registers, *func_reg)?;
-                    let call_args = arg_regs
-                        .iter()
-                        .map(|&reg| get_reg(&registers, reg))
-                        .collect::<Result<Vec<_>, _>>()?;
+                    let call_args = read_reg_list(&registers, arg_regs)?;
                     let Value::FuncRef(func_idx) = target else {
                         return Err(RuntimeError {
                             kind: RuntimeErrorKind::TypeMismatch {
@@ -1300,7 +1287,6 @@ pub(crate) fn execute_func_in(
 }
 
 fn execute_reg_op(
-    module: Option<&RegModule>,
     store: Option<&Store>,
     registers: &mut [Option<Value>],
     locals: &mut [Option<Value>],
@@ -1381,34 +1367,42 @@ fn execute_reg_op(
             type_idx,
             fields,
         } => {
-            let kind = gc_type_kind(module, *type_idx)?;
-            let closed = gc_type_closed(module, *type_idx)?;
-            let mut values = Vec::with_capacity(fields.len());
+            let store = require_store(store)?;
+            let type_id = store.gc_type_id(*type_idx)?;
+            let mut values: Vec<Value> = Vec::new();
+            values
+                .try_reserve(fields.len())
+                .map_err(|_| gc_allocation_failed())?;
             for &reg in fields {
                 values.push(get_reg(registers, reg)?);
             }
-            let store = require_store(store)?;
             let heap = store.gc_heap();
-            let id = heap
-                .borrow_mut()
-                .alloc_struct_closed(closed, kind, values)?;
+            let id = heap.borrow_mut().alloc_struct_typed(type_id, values)?;
             set_reg(registers, *dst, own_gc_ref(store, id))?;
         }
         RegOp::StructNewDefault { dst, type_idx } => {
-            let kind = gc_type_kind(module, *type_idx)?;
-            let closed = gc_type_closed(module, *type_idx)?;
-            let fields = match &kind {
-                GcTypeKind::Struct(fields) => fields
-                    .iter()
-                    .map(|field| default_for_storage(field.storage))
-                    .collect(),
-                GcTypeKind::Array(_) => return Err(unknown_type_err(*type_idx)),
-            };
             let store = require_store(store)?;
+            let type_id = store.gc_type_id(*type_idx)?;
             let heap = store.gc_heap();
-            let id = heap
-                .borrow_mut()
-                .alloc_struct_closed(closed, kind, fields)?;
+            let mut values: Vec<Value> = Vec::new();
+            {
+                let borrowed = heap.borrow();
+                let kind = borrowed
+                    .type_kind(type_id)
+                    .ok_or_else(|| unknown_type_err(*type_idx))?;
+                match kind {
+                    GcTypeKind::Struct(fields) => {
+                        values
+                            .try_reserve(fields.len())
+                            .map_err(|_| gc_allocation_failed())?;
+                        for field in fields {
+                            values.push(default_for_storage(field.storage));
+                        }
+                    }
+                    GcTypeKind::Array(_) => return Err(unknown_type_err(*type_idx)),
+                }
+            }
+            let id = heap.borrow_mut().alloc_struct_typed(type_id, values)?;
             set_reg(registers, *dst, own_gc_ref(store, id))?;
         }
         RegOp::StructGet {
@@ -1448,28 +1442,28 @@ fn execute_reg_op(
         } => {
             let len = expect_u32(get_reg(registers, *len)?)?;
             let value = get_reg(registers, *value)?;
-            let kind = gc_type_kind(module, *type_idx)?;
-            let closed = gc_type_closed(module, *type_idx)?;
             let store = require_store(store)?;
+            let type_id = store.gc_type_id(*type_idx)?;
             let heap = store.gc_heap();
-            let id = heap
-                .borrow_mut()
-                .alloc_array_closed(closed, kind, len, value)?;
+            let id = heap.borrow_mut().alloc_array_typed(type_id, len, value)?;
             set_reg(registers, *dst, own_gc_ref(store, id))?;
         }
         RegOp::ArrayNewDefault { dst, type_idx, len } => {
             let len = expect_u32(get_reg(registers, *len)?)?;
-            let kind = gc_type_kind(module, *type_idx)?;
-            let closed = gc_type_closed(module, *type_idx)?;
-            let fill = match &kind {
-                GcTypeKind::Array(field) => default_for_storage(field.storage),
-                GcTypeKind::Struct(_) => return Err(unknown_type_err(*type_idx)),
-            };
             let store = require_store(store)?;
+            let type_id = store.gc_type_id(*type_idx)?;
             let heap = store.gc_heap();
-            let id = heap
-                .borrow_mut()
-                .alloc_array_closed(closed, kind, len, fill)?;
+            let fill = {
+                let borrowed = heap.borrow();
+                let kind = borrowed
+                    .type_kind(type_id)
+                    .ok_or_else(|| unknown_type_err(*type_idx))?;
+                match kind {
+                    GcTypeKind::Array(field) => default_for_storage(field.storage),
+                    GcTypeKind::Struct(_) => return Err(unknown_type_err(*type_idx)),
+                }
+            };
+            let id = heap.borrow_mut().alloc_array_typed(type_id, len, fill)?;
             set_reg(registers, *dst, own_gc_ref(store, id))?;
         }
         RegOp::ArrayNewFixed {
@@ -1477,18 +1471,17 @@ fn execute_reg_op(
             type_idx,
             values,
         } => {
-            let mut elems = Vec::new();
+            let store = require_store(store)?;
+            let type_id = store.gc_type_id(*type_idx)?;
+            let mut elems: Vec<Value> = Vec::new();
             elems
                 .try_reserve(values.len())
                 .map_err(|_| gc_allocation_failed())?;
             for &reg in values {
                 elems.push(get_reg(registers, reg)?);
             }
-            let kind = gc_type_kind(module, *type_idx)?;
-            let closed = gc_type_closed(module, *type_idx)?;
-            let store = require_store(store)?;
             let heap = store.gc_heap();
-            let id = heap.borrow_mut().alloc_fixed_closed(closed, kind, elems)?;
+            let id = heap.borrow_mut().alloc_fixed_typed(type_id, elems)?;
             set_reg(registers, *dst, own_gc_ref(store, id))?;
         }
         RegOp::ArrayNewData {
@@ -1500,18 +1493,28 @@ fn execute_reg_op(
         } => {
             let src = expect_u32(get_reg(registers, *src)?)?;
             let len = expect_u32(get_reg(registers, *len)?)?;
-            let kind = gc_type_kind(module, *type_idx)?;
-            let closed = gc_type_closed(module, *type_idx)?;
-            let storage = gc_array_storage(&kind)?;
-            let width = storage_width(storage);
             let store = require_store(store)?;
-            let slot = store
-                .with_data(data.0, |slot| slot.cloned())
-                .ok_or_else(|| unknown_data_err(data.0))?;
-            let bytes = slot.as_deref().unwrap_or(&[]);
-            let elems = data_segment_values(bytes, src, len, width, storage)?;
+            let type_id = store.gc_type_id(*type_idx)?;
             let heap = store.gc_heap();
-            let id = heap.borrow_mut().alloc_fixed_closed(closed, kind, elems)?;
+            let storage = heap
+                .borrow()
+                .type_kind(type_id)
+                .and_then(|kind| match kind {
+                    GcTypeKind::Array(field) => Some(field.storage),
+                    GcTypeKind::Struct(_) => None,
+                })
+                .ok_or_else(|| unknown_type_err(*type_idx))?;
+            let width = storage_width(storage);
+            // Build and allocate inside the segment borrow, so the element
+            // payload is reserved fallibly with no full-segment clone.
+            let id = store
+                .with_data(data.0, |slot| -> Result<ObjectId, RuntimeError> {
+                    let bytes = slot.map_or(&[][..], |v| v.as_slice());
+                    let elems = data_segment_values(bytes, src, len, width, storage)?;
+                    let mut heap = heap.borrow_mut();
+                    heap.alloc_fixed_typed(type_id, elems)
+                })
+                .ok_or_else(|| unknown_data_err(data.0))??;
             set_reg(registers, *dst, own_gc_ref(store, id))?;
         }
         RegOp::ArrayNewElem {
@@ -1523,16 +1526,17 @@ fn execute_reg_op(
         } => {
             let src = expect_u32(get_reg(registers, *src)?)?;
             let len = expect_u32(get_reg(registers, *len)?)?;
-            let kind = gc_type_kind(module, *type_idx)?;
-            let closed = gc_type_closed(module, *type_idx)?;
             let store = require_store(store)?;
-            let slot = store
-                .with_elem(elem.0, |slot| slot.cloned())
-                .ok_or_else(|| unknown_elem_err(elem.0))?;
-            let values = slot.as_deref().unwrap_or(&[]);
-            let elems = elem_segment_values(values, src, len)?;
+            let type_id = store.gc_type_id(*type_idx)?;
             let heap = store.gc_heap();
-            let id = heap.borrow_mut().alloc_fixed_closed(closed, kind, elems)?;
+            let id = store
+                .with_elem(elem.0, |slot| -> Result<ObjectId, RuntimeError> {
+                    let values = slot.map_or(&[][..], |v| v.as_slice());
+                    let elems = elem_segment_values(values, src, len)?;
+                    let mut heap = heap.borrow_mut();
+                    heap.alloc_fixed_typed(type_id, elems)
+                })
+                .ok_or_else(|| unknown_elem_err(elem.0))??;
             set_reg(registers, *dst, own_gc_ref(store, id))?;
         }
         RegOp::ArrayGet {
@@ -1681,28 +1685,37 @@ fn execute_reg_op(
             let dst_off = expect_u32(get_reg(registers, *dst_off)?)?;
             let array = get_reg(registers, *array)?;
             let (heap_id, id) = expect_gc_ref(array, RuntimeTrap::NullArrayReference)?;
-            let kind = gc_type_kind(module, *type_idx)?;
-            let storage = gc_array_storage(&kind)?;
-            let width = storage_width(storage);
             let store = require_store(store)?;
+            let type_id = store.gc_type_id(*type_idx)?;
+            let storage = store
+                .with_gc_heap(|heap| {
+                    heap.type_kind(type_id).and_then(|kind| match kind {
+                        GcTypeKind::Array(field) => Some(field.storage),
+                        GcTypeKind::Struct(_) => None,
+                    })
+                })
+                .ok_or_else(|| unknown_type_err(*type_idx))?;
+            let width = storage_width(storage);
             let array_len = with_array_len(store, heap_id, id)?;
             // Array bounds before segment bounds (trap identity matters).
             if array_index_oob(dst_off, len, array_len) {
                 return Err(trap(RuntimeTrap::OutOfBoundsArrayAccess));
             }
-            let slot = store
-                .with_data(data.0, |slot| slot.cloned())
-                .ok_or_else(|| unknown_data_err(data.0))?;
-            let bytes = slot.as_deref().unwrap_or(&[]);
-            let elems = data_segment_values(bytes, src_off, len, width, storage)?;
-            if len == 0 {
-                return Ok(());
-            }
             let handle = require_heap(store, heap_id)?;
-            let mut heap = handle.borrow_mut();
-            for (i, value) in elems.into_iter().enumerate() {
-                heap.array_set(id, dst_off + i as u32, value)?;
-            }
+            store
+                .with_data(data.0, |slot| -> Result<(), RuntimeError> {
+                    let bytes = slot.map_or(&[][..], |v| v.as_slice());
+                    let elems = data_segment_values(bytes, src_off, len, width, storage)?;
+                    if len == 0 {
+                        return Ok(());
+                    }
+                    let mut heap = handle.borrow_mut();
+                    for (i, value) in elems.into_iter().enumerate() {
+                        heap.array_set(id, dst_off + i as u32, value)?;
+                    }
+                    Ok(())
+                })
+                .ok_or_else(|| unknown_data_err(data.0))??;
         }
         RegOp::ArrayInitElem {
             type_idx,
@@ -1723,19 +1736,21 @@ fn execute_reg_op(
             if array_index_oob(dst_off, len, array_len) {
                 return Err(trap(RuntimeTrap::OutOfBoundsArrayAccess));
             }
-            let slot = store
-                .with_elem(elem.0, |slot| slot.cloned())
-                .ok_or_else(|| unknown_elem_err(elem.0))?;
-            let values = slot.as_deref().unwrap_or(&[]);
-            let elems = elem_segment_values(values, src_off, len)?;
-            if len == 0 {
-                return Ok(());
-            }
             let handle = require_heap(store, heap_id)?;
-            let mut heap = handle.borrow_mut();
-            for (i, value) in elems.into_iter().enumerate() {
-                heap.array_set(id, dst_off + i as u32, value)?;
-            }
+            store
+                .with_elem(elem.0, |slot| -> Result<(), RuntimeError> {
+                    let values = slot.map_or(&[][..], |v| v.as_slice());
+                    let elems = elem_segment_values(values, src_off, len)?;
+                    if len == 0 {
+                        return Ok(());
+                    }
+                    let mut heap = handle.borrow_mut();
+                    for (i, value) in elems.into_iter().enumerate() {
+                        heap.array_set(id, dst_off + i as u32, value)?;
+                    }
+                    Ok(())
+                })
+                .ok_or_else(|| unknown_elem_err(elem.0))??;
         }
         RegOp::RefI31 { dst, value } => {
             let value = expect_u32(get_reg(registers, *value)?)?;
@@ -2776,9 +2791,18 @@ fn value_satisfies(
                 HeapType::Func => matches!(value, Value::FuncRef(_)),
                 HeapType::Extern => matches!(value, Value::ExternRef(_)),
                 HeapType::Exn => matches!(value, Value::ExnRef(_)),
-                HeapType::Any | HeapType::Eq => {
-                    matches!(value, Value::GcRef { .. } | Value::I31(_))
-                }
+                HeapType::Any | HeapType::Eq => match value {
+                    // i31 immediates are valid any/eq values and need no
+                    // heap resolution.
+                    Value::I31(_) => true,
+                    // A `GcRef` must RESOLVE (own heap or a registered
+                    // foreign heap, object in bounds) even though the
+                    // declared heap type is abstract: an unregistered or
+                    // stale reference is a clean rejection, never a dangling
+                    // handle admitted across the boundary.
+                    Value::GcRef { heap, id } => gc_ref_resolves(store, heap, id),
+                    _ => false,
+                },
                 HeapType::Struct => gc_value_is_kind(store, &value, true),
                 HeapType::Array => gc_value_is_kind(store, &value, false),
                 HeapType::I31 => matches!(value, Value::I31(_)),
@@ -2801,20 +2825,15 @@ fn null_satisfies_heap(heap: crate::types::HeapType, value: &Value) -> bool {
     }
 }
 
-/// Resolve a `GcRef`'s object shape: `(is_struct, is_array, closed_type)`.
-fn gc_object_shape(
-    store: &Store,
-    heap: HeapId,
-    id: ObjectId,
-) -> Option<(bool, bool, Option<ClosedDefinedType>)> {
+/// Whether a `GcRef` resolves against this store: its heap is the store's
+/// own or a registered foreign heap, and the object id is in bounds.
+fn gc_ref_resolves(store: Option<&Store>, heap: HeapId, id: ObjectId) -> bool {
+    let Some(store) = store else {
+        return false;
+    };
     store
-        .with_heap(heap, |heap| {
-            let type_id = heap.object_type_id(id)?;
-            let is_struct = matches!(heap.type_kind(type_id), Some(GcTypeKind::Struct(_)));
-            let is_array = matches!(heap.type_kind(type_id), Some(GcTypeKind::Array(_)));
-            Some((is_struct, is_array, heap.closed_type(type_id).cloned()))
-        })
-        .flatten()
+        .with_heap(heap, |heap| heap.object_type_id(id).is_some())
+        .unwrap_or(false)
 }
 
 /// Whether a `GcRef` object is a struct (`want_struct`) or array, resolving
@@ -2826,16 +2845,18 @@ fn gc_value_is_kind(store: Option<&Store>, value: &Value, want_struct: bool) -> 
     let Some(store) = store else {
         return false;
     };
-    match gc_object_shape(store, *heap, *id) {
-        Some((is_struct, is_array, _)) => {
-            if want_struct {
-                is_struct
-            } else {
-                is_array
+    store
+        .with_heap(*heap, |heap| {
+            let Some(type_id) = heap.object_type_id(*id) else {
+                return false;
+            };
+            match heap.type_kind(type_id) {
+                Some(GcTypeKind::Struct(_)) => want_struct,
+                Some(GcTypeKind::Array(_)) => !want_struct,
+                None => false,
             }
-        }
-        None => false,
-    }
+        })
+        .unwrap_or(false)
 }
 
 /// Module-aware match of a runtime value against a concrete defined type
@@ -2862,14 +2883,28 @@ fn concrete_value_matches(
             let Some(store) = store else {
                 return false;
             };
-            let Some((_, _, Some(actual))) = gc_object_shape(store, *heap, *id) else {
+            // Both closed forms come from interned tables: the expected one
+            // from the store's instantiation-time cache, the actual one from
+            // the value's heap. No closed-form construction (and no layout
+            // clone) happens on the boundary path.
+            let Ok(expected_id) = store.gc_type_id(idx) else {
                 return false;
             };
-            let Some(expected) = ClosedDefinedType::of(&module.type_defs, &module.rec_groups, idx)
-            else {
-                return false;
-            };
-            actual.is_subtype_of(&expected)
+            store
+                .with_heap(*heap, |value_heap| {
+                    let Some(actual_id) = value_heap.object_type_id(*id) else {
+                        return false;
+                    };
+                    let Some(actual) = value_heap.closed_type(actual_id) else {
+                        return false;
+                    };
+                    store.with_gc_heap(|own_heap| {
+                        own_heap
+                            .closed_type(expected_id)
+                            .is_some_and(|expected| actual.is_subtype_of(expected))
+                    })
+                })
+                .unwrap_or(false)
         }
         None => false,
     }
@@ -3079,6 +3114,14 @@ fn gc_allocation_failed() -> RuntimeError {
     }
 }
 
+fn frame_allocation_failed() -> RuntimeError {
+    RuntimeError {
+        kind: RuntimeErrorKind::ResourceLimitExceeded {
+            what: "interpreter frame",
+        },
+    }
+}
+
 fn unknown_type_err(type_idx: TypeIdx) -> RuntimeError {
     RuntimeError {
         kind: RuntimeErrorKind::UnknownType {
@@ -3096,38 +3139,6 @@ fn unknown_data_err(data: u32) -> RuntimeError {
 fn unknown_elem_err(elem: u32) -> RuntimeError {
     RuntimeError {
         kind: RuntimeErrorKind::UnknownElem { elem },
-    }
-}
-
-/// Resolve a GC aggregate type's layout from the current module.
-fn gc_type_kind(module: Option<&RegModule>, type_idx: TypeIdx) -> Result<GcTypeKind, RuntimeError> {
-    let module = module.ok_or_else(|| unknown_type_err(type_idx))?;
-    match module
-        .type_defs
-        .get(type_idx.0 as usize)
-        .map(|sub| &sub.comp)
-    {
-        Some(CompType::Struct(fields)) => Ok(GcTypeKind::Struct(fields.clone())),
-        Some(CompType::Array(field)) => Ok(GcTypeKind::Array(*field)),
-        _ => Err(unknown_type_err(type_idx)),
-    }
-}
-
-/// Resolve a GC aggregate type's cross-module closed form from the current
-/// module, so heap interning is independent of the local type index.
-fn gc_type_closed(
-    module: Option<&RegModule>,
-    type_idx: TypeIdx,
-) -> Result<ClosedDefinedType, RuntimeError> {
-    let module = module.ok_or_else(|| unknown_type_err(type_idx))?;
-    ClosedDefinedType::of(&module.type_defs, &module.rec_groups, type_idx)
-        .ok_or_else(|| unknown_type_err(type_idx))
-}
-
-fn gc_array_storage(kind: &GcTypeKind) -> Result<StorageType, RuntimeError> {
-    match kind {
-        GcTypeKind::Array(field) => Ok(field.storage),
-        GcTypeKind::Struct(_) => Err(unknown_type_err(TypeIdx(0))),
     }
 }
 
@@ -4210,6 +4221,19 @@ fn get_reg(registers: &[Option<Value>], reg: Reg) -> Result<Value, RuntimeError>
         .ok_or(RuntimeError {
             kind: RuntimeErrorKind::UninitializedRegister { reg },
         })
+}
+
+/// Read a list of registers into a fresh value vector, reserving fallibly:
+/// an armed allocator must yield a clean refusal rather than abort on a
+/// large call or return operand list.
+fn read_reg_list(registers: &[Option<Value>], regs: &[Reg]) -> Result<Vec<Value>, RuntimeError> {
+    let mut out: Vec<Value> = Vec::new();
+    out.try_reserve(regs.len())
+        .map_err(|_| frame_allocation_failed())?;
+    for &reg in regs {
+        out.push(get_reg(registers, reg)?);
+    }
+    Ok(out)
 }
 
 fn execute_unary_op(

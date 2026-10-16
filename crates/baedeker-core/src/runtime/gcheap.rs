@@ -471,6 +471,93 @@ impl GcHeap {
         Ok(id)
     }
 
+    /// Allocate a struct for a type already interned in this heap (the
+    /// instantiation-time metadata cache). The layout is borrowed from the
+    /// heap's own type table, so no layout or closed form is cloned on the
+    /// execution path; the caller-supplied payload is packed in place
+    /// (already fallibly reserved) and only the object-table slot is
+    /// reserved here. A refusal leaves the heap untouched.
+    pub fn alloc_struct_typed(
+        &mut self,
+        type_id: GcTypeId,
+        mut values: Vec<Value>,
+    ) -> Result<ObjectId, RuntimeError> {
+        let storages = match self.types.get(type_id.0 as usize) {
+            Some(GcTypeKind::Struct(fields)) => fields.as_slice(),
+            _ => return Err(alloc_failed()),
+        };
+        for (slot, field) in values.iter_mut().zip(storages) {
+            *slot = pack_field(field.storage, *slot);
+        }
+        self.objects.try_reserve(1).map_err(|_| alloc_failed())?;
+        let id = ObjectId(self.objects.len() as u32);
+        self.objects.push(GcObject::Struct {
+            type_id,
+            fields: values,
+        });
+        self.allocations += 1;
+        Ok(id)
+    }
+
+    /// Allocate an array for a type already interned in this heap
+    /// (`array.new` / `array.new_default`). The element storage comes from
+    /// the heap's own type table (no layout clone); the payload reserve is
+    /// fallible before any fill, so a huge length refuses cleanly.
+    pub fn alloc_array_typed(
+        &mut self,
+        type_id: GcTypeId,
+        len: u32,
+        fill: Value,
+    ) -> Result<ObjectId, RuntimeError> {
+        let storage = match self.types.get(type_id.0 as usize) {
+            Some(GcTypeKind::Array(field)) => field.storage,
+            _ => return Err(alloc_failed()),
+        };
+        let count = len as usize;
+        let mut elems: Vec<Value> = Vec::new();
+        elems.try_reserve(count).map_err(|_| alloc_failed())?;
+        self.objects.try_reserve(1).map_err(|_| alloc_failed())?;
+        let packed = pack_field(storage, fill);
+        elems.resize(count, packed);
+        let id = ObjectId(self.objects.len() as u32);
+        self.objects.push(GcObject::Array {
+            type_id,
+            len,
+            elems,
+        });
+        self.allocations += 1;
+        Ok(id)
+    }
+
+    /// Allocate a fixed array for a type already interned in this heap
+    /// (`array.new_fixed` / `array.new_data` / `array.new_elem`). The element
+    /// storage comes from the heap's own type table; the caller-supplied
+    /// payload is packed in place and only the object-table slot is reserved
+    /// here.
+    pub fn alloc_fixed_typed(
+        &mut self,
+        type_id: GcTypeId,
+        mut elems: Vec<Value>,
+    ) -> Result<ObjectId, RuntimeError> {
+        let storage = match self.types.get(type_id.0 as usize) {
+            Some(GcTypeKind::Array(field)) => field.storage,
+            _ => return Err(alloc_failed()),
+        };
+        for slot in elems.iter_mut() {
+            *slot = pack_field(storage, *slot);
+        }
+        self.objects.try_reserve(1).map_err(|_| alloc_failed())?;
+        let len = elems.len() as u32;
+        let id = ObjectId(self.objects.len() as u32);
+        self.objects.push(GcObject::Array {
+            type_id,
+            len,
+            elems,
+        });
+        self.allocations += 1;
+        Ok(id)
+    }
+
     /// Read a struct field (packed fields are zero/sign-extended per `ext`).
     pub fn struct_get(
         &self,

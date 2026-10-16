@@ -9,7 +9,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::lower::{RegConstInstr, RegDataMode, RegElemValue, RegElementMode, RegModule};
-use crate::runtime::gcheap::{GcHeap, GcSnapshot, GcStats, HeapId};
+use crate::runtime::gcheap::{GcHeap, GcSnapshot, GcStats, GcTypeId, GcTypeKind, HeapId};
 use crate::runtime::gpu::{GpuBackend, GpuError, GpuKernelId};
 use crate::runtime::host::HostFunction;
 use crate::runtime::{RuntimeError, RuntimeErrorKind, RuntimeTrap, Value, trap};
@@ -281,6 +281,53 @@ fn try_alloc_n<T: Clone>(n: usize, value: T) -> Option<Vec<T>> {
     vec.try_reserve(n).ok()?;
     vec.resize(n, value);
     Some(vec)
+}
+
+/// Resolve every defined GC aggregate type in `module` to a heap-interned
+/// `GcTypeId` once, before any instance state exists.
+///
+/// The execution path then looks metadata up by module-local type index and
+/// performs zero layout/closed-form allocation per allocation. The layout is
+/// cloned fallibly (the only per-type allocation here) and interned by its
+/// cross-module closed form, so structurally identical aggregates at
+/// different local indices share an id. A refusal (OOM) is a clean
+/// `ResourceLimitExceeded` with no partial instance.
+fn precompute_gc_type_ids(
+    module: &RegModule,
+    heap: &mut GcHeap,
+) -> Result<Vec<Option<GcTypeId>>, RuntimeError> {
+    let mut out: Vec<Option<GcTypeId>> = Vec::new();
+    out.try_reserve(module.type_defs.len())
+        .map_err(|_| allocation_failed("gc type cache"))?;
+    for idx in 0..module.type_defs.len() as u32 {
+        let type_idx = TypeIdx(idx);
+        let entry = match module.type_defs.get(idx as usize).map(|sub| &sub.comp) {
+            Some(CompType::Struct(fields)) => {
+                let mut cloned = Vec::new();
+                cloned
+                    .try_reserve(fields.len())
+                    .map_err(|_| allocation_failed("gc type layout"))?;
+                cloned.extend_from_slice(fields);
+                let kind = GcTypeKind::Struct(cloned);
+                let closed = ClosedDefinedType::of(&module.type_defs, &module.rec_groups, type_idx)
+                    .ok_or(RuntimeError {
+                        kind: RuntimeErrorKind::UnknownType { type_idx: idx },
+                    })?;
+                Some(heap.intern_closed(closed, kind)?)
+            }
+            Some(CompType::Array(field)) => {
+                let kind = GcTypeKind::Array(*field);
+                let closed = ClosedDefinedType::of(&module.type_defs, &module.rec_groups, type_idx)
+                    .ok_or(RuntimeError {
+                        kind: RuntimeErrorKind::UnknownType { type_idx: idx },
+                    })?;
+                Some(heap.intern_closed(closed, kind)?)
+            }
+            Some(CompType::Func(_)) | None => None,
+        };
+        out.push(entry);
+    }
+    Ok(out)
 }
 
 /// Snapshot the unique ids of provider heaps, dropping duplicates so a
@@ -847,6 +894,10 @@ pub struct Store {
     /// A `GcRef` whose heap is neither this store's heap nor in this list is
     /// a clean resolution error, never a misindexed local object.
     foreign_heaps: Vec<(HeapId, alloc::rc::Rc<core::cell::RefCell<GcHeap>>)>,
+    /// Module-local defined-type index → heap-interned GC layout id,
+    /// resolved once at instantiation so execution never allocates to build
+    /// a `GcTypeKind` or a closed form. `None` for function types.
+    gc_type_ids: Vec<Option<GcTypeId>>,
 }
 
 impl Store {
@@ -1226,6 +1277,14 @@ impl Store {
             });
         }
 
+        // Resolve GC aggregate metadata once, fallibly, before any instance
+        // state exists: every defined struct/array type is laid out and
+        // interned by its cross-module closed form into this store's heap.
+        // Execution then allocates without ever cloning a layout or closed
+        // form; a refusal here produces no partial instance.
+        let mut gc_heap = GcHeap::new();
+        let gc_type_ids = precompute_gc_type_ids(module, &mut gc_heap)?;
+
         let mut store = Self {
             memories,
             memory_types,
@@ -1257,8 +1316,9 @@ impl Store {
             exceptions,
             tag_types: Vec::new(),
             tag_map,
-            gc_heap: Rc::new(core::cell::RefCell::new(GcHeap::new())),
+            gc_heap: Rc::new(core::cell::RefCell::new(gc_heap)),
             foreign_heaps: register_provider_heaps(&imports.provider_heaps),
+            gc_type_ids,
         };
 
         // Register defined-tag types (module-agnostic tag ids).
@@ -1687,6 +1747,21 @@ impl Store {
     /// This store's own GC heap identity.
     pub fn gc_heap_id(&self) -> HeapId {
         self.gc_heap.borrow().heap_id()
+    }
+
+    /// The heap-interned layout id for the store's module-local defined-type
+    /// index, or a clean `UnknownType` when the index names no GC aggregate
+    /// (out of range or a function type). Resolved at instantiation; never
+    /// allocates.
+    pub(crate) fn gc_type_id(&self, type_idx: TypeIdx) -> Result<GcTypeId, RuntimeError> {
+        self.gc_type_ids
+            .get(type_idx.0 as usize)
+            .and_then(|slot| *slot)
+            .ok_or(RuntimeError {
+                kind: RuntimeErrorKind::UnknownType {
+                    type_idx: type_idx.0,
+                },
+            })
     }
 
     /// Resolve a heap identity to a heap handle: this store's own heap, a

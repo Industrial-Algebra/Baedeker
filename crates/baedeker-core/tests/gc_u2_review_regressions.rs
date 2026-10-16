@@ -374,3 +374,103 @@ fn intern_final_struct_raw(heap: &mut GcHeap, module: &RegModule) -> GcTypeId {
     };
     heap.intern_type(kind).expect("interning succeeds")
 }
+
+// ── r2: abstract GC boundary params resolve provenance ───────────────
+
+const POLICY_PROVIDER: &str = r#"
+(module
+  (type $s (struct (field (mut i32))))
+  (func (export "make") (result (ref $s))
+    i32.const 5 struct.new $s))"#;
+
+const POLICY_CONSUMER: &str = r#"
+(module
+  (type $s (struct (field (mut i32))))
+  (func (export "take_any") (param (ref any)))
+  (func (export "take_eq") (param (ref eq))))"#;
+
+/// Reviewer reproduction: a foreign `GcRef` passed to a `(ref any)` param
+/// whose heap was never registered must be rejected at the boundary, not
+/// accepted because the declared heap type is abstract.
+#[test]
+fn r2_unregistered_foreign_ref_into_abstract_param_rejects() {
+    let provider = wat_module(POLICY_PROVIDER);
+    let consumer = wat_module(POLICY_CONSUMER);
+    let provider_store = Store::instantiate(&provider).unwrap();
+    let value = execute_export(&provider, &provider_store, "make", &[]).unwrap()[0];
+    let consumer_store = Store::instantiate(&consumer).unwrap();
+
+    let error = execute_export(&consumer, &consumer_store, "take_any", &[value])
+        .expect_err("unregistered heap must reject");
+    assert!(
+        matches!(error.kind, RuntimeErrorKind::TypeMismatch { .. }),
+        "expected TypeMismatch, got {error:?}"
+    );
+}
+
+/// Positive control: registering the provider heap lets the same reference
+/// cross the abstract `(ref any)` boundary.
+#[test]
+fn r2_registered_foreign_ref_into_abstract_param_succeeds() {
+    let provider = wat_module(POLICY_PROVIDER);
+    let consumer = wat_module(POLICY_CONSUMER);
+    let provider_store = Store::instantiate(&provider).unwrap();
+    let value = execute_export(&provider, &provider_store, "make", &[]).unwrap()[0];
+    let imports = Imports::new().provider_heap(provider_store.gc_heap());
+    let consumer_store = Store::instantiate_with_imports(&consumer, &imports).unwrap();
+
+    assert_eq!(
+        execute_export(&consumer, &consumer_store, "take_any", &[value]),
+        Ok(Vec::new())
+    );
+}
+
+/// A reference whose provider store (and heap) has been dropped resolves
+/// nothing: heap ids are process-unique and never reused, so a fresh store
+/// cannot alias it. The boundary rejects cleanly.
+#[test]
+fn r2_stale_ref_after_provider_drop_rejects() {
+    let provider = wat_module(POLICY_PROVIDER);
+    let consumer = wat_module(POLICY_CONSUMER);
+    let value = {
+        let provider_store = Store::instantiate(&provider).unwrap();
+        execute_export(&provider, &provider_store, "make", &[]).unwrap()[0]
+    };
+    let replacement = Store::instantiate(&provider).unwrap();
+    let consumer_store = Store::instantiate(&consumer).unwrap();
+
+    let error = execute_export(&consumer, &consumer_store, "take_any", &[value])
+        .expect_err("stale heap must reject");
+    assert!(
+        matches!(error.kind, RuntimeErrorKind::TypeMismatch { .. }),
+        "expected TypeMismatch, got {error:?}"
+    );
+
+    let Value::GcRef {
+        heap: stale_heap, ..
+    } = value
+    else {
+        panic!("provider returned a GC reference");
+    };
+    assert_ne!(
+        stale_heap,
+        replacement.gc_heap_id(),
+        "a dropped heap's id must never be reused by a fresh heap"
+    );
+}
+
+/// i31 immediates are valid any/eq values and need no heap resolution, so
+/// they still cross the abstract-parameter boundary.
+#[test]
+fn r2_i31_into_abstract_params_succeeds() {
+    let consumer = wat_module(POLICY_CONSUMER);
+    let store = Store::instantiate(&consumer).unwrap();
+    assert_eq!(
+        execute_export(&consumer, &store, "take_any", &[Value::I31(42)]),
+        Ok(Vec::new())
+    );
+    assert_eq!(
+        execute_export(&consumer, &store, "take_eq", &[Value::I31(-1)]),
+        Ok(Vec::new())
+    );
+}
