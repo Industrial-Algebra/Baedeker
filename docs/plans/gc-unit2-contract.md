@@ -105,11 +105,13 @@ partial object.
    ArrayNew{,Default,Fixed,Data,Elem}, ArrayGet{,S,U}, ArraySet,
    ArrayLen, ArrayFill, ArrayCopy, ArrayInitData, ArrayInitElem,
    RefI31, I31Get{S,U}) with immediates; lowerer operand checks
-   MIRROR the validator tables (pop_ref_in_heap-class helpers);
-   GcRef/I31 RegConst values for const-expr eligibility limited to
-   what U2 supports (struct.new/array.new*/ref.i31 are NOT const
-   eligible at this pin — verify against valid.ml const rules;
-   report).
+   MIRROR the validator tables (pop_ref_in_heap-class helpers).
+   CONST-ELIGIBILITY (corrected per is_const @ valid.ml:1030 — the
+   original parenthetical here was wrong, author-side): RefI31,
+   StructNew (both forms), ArrayNew (both forms), ArrayNewFixed, and
+   ExternConvert ARE const-true at the pin. GC const-expr wiring is
+   U4's unit; U2's validator rejects GC const forms (conformance gap,
+   classified observable, routed to U4).
 6. **Execution** (`runtime/mod.rs`): dispatch per eval.ml tables —
    null-before-bounds ordering, trap identities, packed loads
    (libm-free), direction-safe copy, init_* ordering. AOT **v9**
