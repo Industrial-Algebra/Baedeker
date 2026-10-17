@@ -83,6 +83,13 @@ impl TypeStack {
         self.values.pop()
     }
 
+    /// Reserve capacity for `additional` more operands. Returns `false` when
+    /// the allocator refuses, so callers can surface a clean resource error
+    /// instead of aborting on infallible growth.
+    pub fn try_reserve(&mut self, additional: usize) -> bool {
+        self.values.try_reserve(additional).is_ok()
+    }
+
     pub fn as_slice(&self) -> &[OperandType] {
         &self.values
     }

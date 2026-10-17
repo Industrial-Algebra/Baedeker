@@ -1532,7 +1532,15 @@ fn parse_block_type(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Block
         return Ok(BlockType::Empty);
     }
 
-    if matches!(first, 0x7B..=0x7F | 0x70 | 0x6F | 0x63 | 0x64 | 0x69) {
+    // A single-byte value type: numeric/vector `0x7B..=0x7F`, or any
+    // reference-type shorthand our U1 grammar accepts. The pin's `reftype`
+    // (`interpreter/binary/decode.ml:201-218`) reads `s7` values
+    // `-0x0c..=-0x17` as the Null abstract shorthands (`0x74` noexn ..
+    // `0x69` exn, covering anyref/eqref/i31ref/structref/arrayref and the
+    // abstract null forms), `-0x1c` (`0x64`) as `(ref ht)`, and `-0x1d`
+    // (`0x63`) as `(ref null ht)`. `parse_val_type_with_first_byte` owns the
+    // per-byte grammar; this discriminator only decides value-vs-index.
+    if matches!(first, 0x7B..=0x7F | 0x63 | 0x64 | 0x69..=0x74) {
         return Ok(BlockType::Val(parse_val_type_with_first_byte(
             cursor,
             first,

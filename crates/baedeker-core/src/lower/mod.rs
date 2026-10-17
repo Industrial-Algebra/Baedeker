@@ -5232,7 +5232,7 @@ impl<'b> FuncBuilder<'b> {
     ) -> Result<(), LowerError> {
         let value = self.pop_expect(offset, "br_on_cast", ValType::Ref(src))?;
         let frame_pos = self.label_position(offset, label)?;
-        let (branch_types, loop_header) = self.branch_types_at(frame_pos);
+        let (branch_types, loop_header) = self.branch_types_at_fallible(offset, frame_pos)?;
         let Some((_, leading)) = branch_types.split_last() else {
             return Err(LowerError {
                 offset,
@@ -5240,8 +5240,11 @@ impl<'b> FuncBuilder<'b> {
                 kind: LowerErrorKind::InvalidLabel { label: label.0 },
             });
         };
-        let leading = leading.to_vec();
-        let mut values = Vec::with_capacity(branch_types.len());
+        let leading = self.fallible_copy(offset, "br_on_cast leading types", leading)?;
+        let mut values: Vec<Reg> = Vec::new();
+        values
+            .try_reserve(branch_types.len())
+            .map_err(|_| self.resource_error(offset, "br_on_cast branch values"))?;
         for &expected in leading.iter().rev() {
             let found = self.pop_expect(offset, "br_on_cast", expected)?;
             values.push(found.reg);
@@ -5290,19 +5293,27 @@ impl<'b> FuncBuilder<'b> {
         values.push(value.reg);
         let br_block_idx = self.blocks.len();
         if let Some(loop_target) = loop_header {
+            let forwarded = self.fallible_copy(offset, "br_on_cast trampoline values", &values)?;
+            self.pending_trampolines
+                .try_reserve(1)
+                .map_err(|_| self.resource_error(offset, "br_on_cast trampolines"))?;
             self.pending_trampolines.push(TrampolineReq {
                 block: br_block_idx,
                 slot: BranchSlot::Single,
                 param_regs: loop_target.param_regs,
-                values: values.clone(),
+                values: forwarded,
                 header: loop_target.header,
                 offset,
             });
         } else {
+            let forwarded = self.fallible_copy(offset, "br_on_cast pending values", &values)?;
+            self.pending_branches
+                .try_reserve(1)
+                .map_err(|_| self.resource_error(offset, "br_on_cast pending branches"))?;
             self.pending_branches.push(PendingBranch {
                 block: br_block_idx,
                 frame_pos,
-                values: values.clone(),
+                values: forwarded,
                 slot: BranchSlot::Single,
             });
         }
@@ -5312,6 +5323,61 @@ impl<'b> FuncBuilder<'b> {
             values,
         });
         Ok(())
+    }
+
+    /// A clean lowering resource-limit error (a refused bookkeeping
+    /// reservation), mirroring the runtime's `ResourceLimitExceeded`.
+    fn resource_error(&self, offset: ByteOffset, what: &'static str) -> LowerError {
+        LowerError {
+            offset,
+            function: Some(self.func_idx),
+            kind: LowerErrorKind::Validation(ValidationErrorKind::ResourceLimitExceeded { what }),
+        }
+    }
+
+    /// Fallibly clone `src` into a fresh `Vec` (try_reserve-then-fill).
+    fn fallible_copy<T: Clone>(
+        &self,
+        offset: ByteOffset,
+        what: &'static str,
+        src: &[T],
+    ) -> Result<Vec<T>, LowerError> {
+        let mut out = Vec::new();
+        out.try_reserve(src.len())
+            .map_err(|_| self.resource_error(offset, what))?;
+        out.extend_from_slice(src);
+        Ok(out)
+    }
+
+    /// Fallible [`FuncBuilder::branch_types_at`] used by `br_on_cast`: every
+    /// label/loop bookkeeping clone is try-reserved before it is filled.
+    fn branch_types_at_fallible(
+        &self,
+        offset: ByteOffset,
+        frame_pos: usize,
+    ) -> Result<(Vec<ValType>, Option<LoopTarget>), LowerError> {
+        let frame = &self.label_stack[frame_pos];
+        match frame.kind {
+            FrameKind::Loop { header_block } => Ok((
+                self.fallible_copy(
+                    offset,
+                    "br_on_cast loop parameter types",
+                    &frame.param_types,
+                )?,
+                Some(LoopTarget {
+                    header: header_block,
+                    param_regs: self.fallible_copy(
+                        offset,
+                        "br_on_cast loop parameter registers",
+                        &frame.param_regs,
+                    )?,
+                }),
+            )),
+            _ => Ok((
+                self.fallible_copy(offset, "br_on_cast label types", &frame.result_types)?,
+                None,
+            )),
+        }
     }
 
     /// Whether the operand stack is exactly at the current frame's entry

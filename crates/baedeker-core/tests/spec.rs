@@ -129,6 +129,7 @@ fn validation_kind_name(kind: &ValidationErrorKind) -> &'static str {
         ValidationErrorKind::ElemFieldTypeMismatch { .. } => "ElemFieldTypeMismatch",
         ValidationErrorKind::ArrayNotNumOrVec { .. } => "ArrayNotNumOrVec",
         ValidationErrorKind::ArrayStorageMismatch { .. } => "ArrayStorageMismatch",
+        ValidationErrorKind::ResourceLimitExceeded { .. } => "ResourceLimitExceeded",
     }
 }
 

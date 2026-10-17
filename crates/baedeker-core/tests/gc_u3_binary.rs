@@ -11,7 +11,7 @@
 use baedeker_core::binary::instr::{Instr, decode_instr, decode_instr_sequence};
 use baedeker_core::binary::leb128::Cursor;
 use baedeker_core::error::DecodeErrorKind;
-use baedeker_core::types::{HeapType, LabelIdx, RefType, TypeIdx};
+use baedeker_core::types::{BlockType, HeapType, LabelIdx, RefType, TypeIdx, ValType};
 
 fn decode(bytes: &[u8]) -> Result<Instr, baedeker_core::error::DecodeError> {
     let mut cursor = Cursor::new(bytes);
@@ -242,4 +242,97 @@ fn new_opcodes_roundtrip_through_wasm_encoding() {
     assert!(saw_br, "br_on_cast present");
     assert!(saw_eq, "ref.eq present");
     assert_eq!(saw_conversions, 2, "both conversions present");
+}
+
+// ── FIX 2: block-type shorthand accepts every GC reference type ──────
+//
+// `parse_block_type` must accept the same single-byte reftype shorthands the
+// U1 valtype grammar accepts (`typeparser.rs` `parse_val_type_with_first_byte`):
+// `0x63`/`0x64` (`ref`/`ref null`) plus every abstract heap-type byte
+// `0x69..=0x74`. Before the fix the discriminator only admitted `0x69` and
+// `0x6f`/`0x70`, so e.g. `(block (result (ref null any))` — encoded by the
+// toolchain as the `0x6e` shorthand — was misread as a type-index LEB and
+// failed with `Leb128Overflow`.
+
+/// The pinned abstract heap-type byte table (`typeparser.rs`).
+const ABSTRACT_HEAP_BYTES: &[(u8, HeapType)] = &[
+    (0x74, HeapType::NoExn),
+    (0x73, HeapType::NoFunc),
+    (0x72, HeapType::NoExtern),
+    (0x71, HeapType::None),
+    (0x70, HeapType::Func),
+    (0x6F, HeapType::Extern),
+    (0x6E, HeapType::Any),
+    (0x6D, HeapType::Eq),
+    (0x6C, HeapType::I31),
+    (0x6B, HeapType::Struct),
+    (0x6A, HeapType::Array),
+    (0x69, HeapType::Exn),
+];
+
+#[test]
+fn block_accepts_every_gc_reftype_shorthand() {
+    for &(byte, heap) in ABSTRACT_HEAP_BYTES {
+        let expected = BlockType::Val(ValType::Ref(RefType::from_parts(true, heap)));
+        assert_eq!(
+            decode(&[0x02, byte]).unwrap(),
+            Instr::Block(expected),
+            "block result shorthand byte {byte:#04x}"
+        );
+    }
+}
+
+#[test]
+fn loop_accepts_every_gc_reftype_shorthand() {
+    for &(byte, heap) in ABSTRACT_HEAP_BYTES {
+        let expected = BlockType::Val(ValType::Ref(RefType::from_parts(true, heap)));
+        assert_eq!(
+            decode(&[0x03, byte]).unwrap(),
+            Instr::Loop(expected),
+            "loop result shorthand byte {byte:#04x}"
+        );
+    }
+}
+
+#[test]
+fn block_accepts_ref_and_ref_null_heaptype_forms() {
+    // `0x63 ht` = `(ref null ht)`, `0x64 ht` = `(ref ht)`.
+    assert_eq!(
+        decode(&[0x02, 0x63, 0x6E]).unwrap(),
+        Instr::Block(BlockType::Val(ValType::Ref(RefType::from_parts(
+            true,
+            HeapType::Any
+        ))))
+    );
+    assert_eq!(
+        decode(&[0x02, 0x64, 0x6B]).unwrap(),
+        Instr::Block(BlockType::Val(ValType::Ref(RefType::from_parts(
+            false,
+            HeapType::Struct
+        ))))
+    );
+}
+
+#[test]
+fn block_result_anyref_does_not_decode_as_type_index() {
+    // The reviewer's failure byte: `0x6e` must be the anyref shorthand, not
+    // the start of a concrete type index.
+    let decoded = decode(&[0x02, 0x6E]).unwrap();
+    assert_eq!(
+        decoded,
+        Instr::Block(BlockType::Val(ValType::Ref(RefType::from_parts(
+            true,
+            HeapType::Any
+        ))))
+    );
+    // A genuinely encoded concrete type index still decodes as an index
+    // (not mistaken for a shorthand byte).
+    assert_eq!(
+        decode(&[0x02, 0x00]).unwrap(),
+        Instr::Block(BlockType::TypeIdx(0))
+    );
+    assert_eq!(
+        decode(&[0x02, 0x05]).unwrap(),
+        Instr::Block(BlockType::TypeIdx(5))
+    );
 }

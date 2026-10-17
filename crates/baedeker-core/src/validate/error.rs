@@ -248,6 +248,14 @@ pub enum ValidationErrorKind {
         dst: TypeIdx,
         src: TypeIdx,
     },
+    /// A validator bookkeeping allocation was refused by the allocator.
+    ///
+    /// Validation is fallible at attacker-sized growth points (mirrors the
+    /// runtime's `ResourceLimitExceeded`): a refused reservation surfaces as
+    /// this error rather than aborting the process.
+    ResourceLimitExceeded {
+        what: &'static str,
+    },
 }
 
 impl fmt::Display for ValidationError {
@@ -573,6 +581,9 @@ impl fmt::Display for ValidationErrorKind {
                     "array types do not match: destination {} source {}",
                     dst.0, src.0
                 )
+            }
+            ValidationErrorKind::ResourceLimitExceeded { what } => {
+                write!(f, "resource limit exceeded while validating {what}")
             }
         }
     }

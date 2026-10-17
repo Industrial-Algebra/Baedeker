@@ -360,3 +360,50 @@ fn converted_extern_is_refused_by_eq_typed_consumers() {
         Err(ValidationErrorKind::TypeMismatch { op: "ref.eq", .. })
     ));
 }
+
+// ── FIX 2: block/loop GC shorthand result types ──────────────────────
+
+/// Every GC reference shorthand the U1 grammar supports is accepted as a
+/// `block`/`loop` result type (WAT → encode → decode → validate). Before the
+/// fix the block-type discriminator only admitted `0x69`/`0x6f`/`0x70` plus
+/// `ref`/`ref null`, so the other shorthand bytes misdecoded as type indices.
+#[test]
+fn block_and_loop_accept_every_gc_shorthand_result() {
+    for shorthand in [
+        "anyref",
+        "eqref",
+        "i31ref",
+        "structref",
+        "arrayref",
+        "nullref",
+        "nullfuncref",
+        "nullexternref",
+        "exnref",
+        "nullexnref",
+        "funcref",
+        "externref",
+    ] {
+        for form in ["block", "loop"] {
+            let source = format!(
+                r#"(module (func (result {shorthand}) ({form} (result {shorthand}) unreachable)))"#
+            );
+            assert_eq!(
+                validate(&source),
+                Ok(()),
+                "{form} result shorthand `{shorthand}` must validate"
+            );
+        }
+    }
+}
+
+/// The reviewer's exact shorthand, spelled `(ref null any)`, is accepted too.
+#[test]
+fn block_accepts_ref_null_any_result() {
+    let source = r#"(module
+  (func (param (ref null any)) (result i32 (ref null any))
+    (block $b (result i32 (ref null any))
+      i32.const 7
+      local.get 0
+      br_on_cast $b (ref null any) (ref struct))))"#;
+    assert_eq!(validate(source), Ok(()));
+}

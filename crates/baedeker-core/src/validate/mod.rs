@@ -5141,6 +5141,25 @@ fn pop_ref_expect_heap(
     })
 }
 
+/// Fallibly copy a slice of value types (mirrors the runtime's
+/// try_reserve-then-fill discipline). A refused reservation is a clean
+/// [`ValidationErrorKind::ResourceLimitExceeded`], never a process abort.
+fn copy_valtypes_fallible(
+    function: FuncIdx,
+    offset: usize,
+    what: &'static str,
+    types: &[ValType],
+) -> Result<Vec<ValType>, ValidationError> {
+    let mut out = Vec::new();
+    out.try_reserve(types.len()).map_err(|_| ValidationError {
+        offset: ByteOffset(offset),
+        function: Some(function),
+        kind: ValidationErrorKind::ResourceLimitExceeded { what },
+    })?;
+    out.extend_from_slice(types);
+    Ok(out)
+}
+
 /// `br_on_cast` / `br_on_cast_fail` (`valid/valid.ml:492-519`).
 #[allow(clippy::too_many_arguments)]
 fn validate_br_on_cast(
@@ -5168,7 +5187,12 @@ fn validate_br_on_cast(
         });
     }
 
-    let label_types = validate_label(function, state, label, offset)?.to_vec();
+    let label_types = copy_valtypes_fallible(
+        function,
+        offset,
+        "br_on_cast label types",
+        validate_label(function, state, label, offset)?,
+    )?;
     let branch_ref = if fail { diff_reftype(src, tgt) } else { tgt };
     let last_ok = label_types
         .split_last()
@@ -5179,7 +5203,12 @@ fn validate_br_on_cast(
             function: Some(function),
             kind: ValidationErrorKind::BranchTypeMismatch {
                 label,
-                expected: vec![ValType::Ref(branch_ref)],
+                expected: copy_valtypes_fallible(
+                    function,
+                    offset,
+                    "br_on_cast expected type",
+                    &[ValType::Ref(branch_ref)],
+                )?,
                 found: label_types,
             },
         });
@@ -5196,7 +5225,19 @@ fn validate_br_on_cast(
         "br_on_cast",
     )?;
     let (_, leading) = label_types.split_last().expect("label non-empty checked");
-    let leading = leading.to_vec();
+    let leading = copy_valtypes_fallible(function, offset, "br_on_cast leading types", leading)?;
+    // The pops below free at least this much capacity, so this reservation
+    // normally reuses it; it exists so a refused operand-stack growth is a
+    // clean resource error rather than an abort.
+    if !state.operands.try_reserve(leading.len() + 1) {
+        return Err(ValidationError {
+            offset: ByteOffset(offset),
+            function: Some(function),
+            kind: ValidationErrorKind::ResourceLimitExceeded {
+                what: "br_on_cast operand stack",
+            },
+        });
+    }
     pop_branch_types(module, function, state, label, &leading, offset)?;
     for ty in leading {
         state.operands.push(ty);

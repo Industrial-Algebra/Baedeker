@@ -789,3 +789,66 @@ fn foreign_heap_structurally_different_target_misses() {
         error.kind
     );
 }
+
+// ── FIX 2: block result shorthand `(ref null any)` ───────────────────
+//
+// The reviewer's exact case: a `br_on_cast` into a block whose result is the
+// `(ref null any)` shorthand (binary byte `0x6e`). Before the block-type
+// decoder accepted the full GC shorthand set this module failed to decode.
+// With an i31 input the cast to `(ref struct)` misses, the fall-through ref
+// is retained, and `ref.is_null` yields 0.
+
+#[test]
+fn br_on_cast_into_ref_null_any_block_result_executes() {
+    let source = r#"
+(module
+  (type $s (sub (struct (field i32))))
+  (func (export "f") (param (ref null any)) (result i32)
+    (block $b (result (ref null any))
+      local.get 0
+      br_on_cast $b (ref null any) (ref struct))
+    ref.is_null))"#;
+    let module = wat_module(source);
+    let store = Store::instantiate(&module).unwrap();
+
+    // i31 input: cast to struct misses, fall-through keeps the non-null ref.
+    let i31 = execute_export(&module, &store, "f", &[Value::I31(7)]).unwrap();
+    assert_eq!(i31, vec![Value::I32(0)], "i31 input is not null");
+}
+
+#[test]
+fn block_and_loop_gc_shorthand_results_roundtrip_and_execute() {
+    // Each GC shorthand is used as a block/loop result, and the module is
+    // encoded, decoded, validated and executed.
+    let source = r#"
+(module
+  (type $s (sub (struct (field i32))))
+  (type $a (array i32))
+  (func (export "anyref") (result anyref)
+    (block (result anyref) i32.const 7 ref.i31))
+  (func (export "eqref") (result eqref)
+    (block (result eqref) i32.const 7 ref.i31))
+  (func (export "i31ref") (result i31ref)
+    (loop (result i31ref) i32.const 7 ref.i31))
+  (func (export "structref") (result structref)
+    (block (result structref)
+      i32.const 1 struct.new $s))
+  (func (export "arrayref") (result arrayref)
+    (block (result arrayref)
+      i32.const 5
+      i32.const 1
+      array.new $a)))"#;
+    let module = wat_module(source);
+    let store = Store::instantiate(&module).unwrap();
+
+    let anyref = execute_export(&module, &store, "anyref", &[]).unwrap();
+    assert!(matches!(anyref.as_slice(), [Value::I31(7)]));
+    let eqref = execute_export(&module, &store, "eqref", &[]).unwrap();
+    assert!(matches!(eqref.as_slice(), [Value::I31(7)]));
+    let i31 = execute_export(&module, &store, "i31ref", &[]).unwrap();
+    assert!(matches!(i31.as_slice(), [Value::I31(7)]));
+    let structref = execute_export(&module, &store, "structref", &[]).unwrap();
+    assert!(matches!(structref.as_slice(), [Value::GcRef { .. }]));
+    let arrayref = execute_export(&module, &store, "arrayref", &[]).unwrap();
+    assert!(matches!(arrayref.as_slice(), [Value::GcRef { .. }]));
+}
