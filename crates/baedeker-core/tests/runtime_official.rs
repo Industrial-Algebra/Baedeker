@@ -18,7 +18,8 @@ use std::rc::Rc;
 use baedeker_core::binary::module::Module;
 use baedeker_core::lower::RegModule;
 use baedeker_core::runtime::{
-    HostFunction, Imports, RuntimeError, RuntimeErrorKind, Store, Value, execute_export, link_func,
+    HostFunction, Imports, RefPattern, RuntimeError, RuntimeErrorKind, Store, Value,
+    execute_export, link_func,
 };
 use baedeker_core::types::{
     FuncType, GlobalType, MemType, Mutability, NumType, TableType, ValType,
@@ -156,6 +157,34 @@ fn instantiate(
 
     // State imports: resolve eagerly against spectest + linked instances.
     let mut imports = Imports::new();
+    // Register every provider module's type section and GC heap: concrete
+    // reference types in imported signatures are then matched structurally
+    // (rolled closed forms) instead of by raw local index, and GC references
+    // reaching this instance resolve against the heap that created them.
+    // `Imports::with_module_types` is last-wins per module name, so collect
+    // the distinct names first.
+    let mut provider_names: BTreeMap<&str, ()> = BTreeMap::new();
+    for declared in &module.imported_funcs {
+        provider_names.insert(declared.module.as_str(), ());
+    }
+    for declared in &module.imported_memories {
+        provider_names.insert(declared.module.as_str(), ());
+    }
+    for declared in &module.imported_globals {
+        provider_names.insert(declared.module.as_str(), ());
+    }
+    for declared in &module.imported_tables {
+        provider_names.insert(declared.module.as_str(), ());
+    }
+    for declared in &module.imported_tags {
+        provider_names.insert(declared.module.as_str(), ());
+    }
+    for name in provider_names.keys().copied() {
+        if let Some(source) = registry.get(Some(name)) {
+            imports = imports.with_module_types(name, &source.module);
+            imports = imports.provider_heap(source.store.borrow().gc_heap());
+        }
+    }
     for declared in &module.imported_memories {
         imports = if declared.module == "spectest" {
             imports.memory("spectest", &declared.name, spectest_memory(&declared.name)?)
@@ -222,6 +251,7 @@ fn instantiate(
             binding.ty.clone(),
             binding.expanded_params.clone(),
             binding.rec.clone(),
+            binding.closed.clone(),
         );
     }
 
@@ -259,27 +289,40 @@ fn instantiate(
                     )
                 })?;
             // Type-check the linked function against the import declaration
-            // (spec: mismatched signatures are a link error).
-            let source_ty = &source
+            // (spec: a mismatched type is a link error). `eval.ml:1187` runs
+            // `Match.match_externtype [] xt' xt` with `xt'` the PROVIDER's
+            // type and `xt` the import DECLARATION; for functions
+            // `valid/match.ml:175-186` delegates to `match_deftype`, i.e. the
+            // two type ENTRIES must be canonically identical (rolled closed
+            // forms — rec-group shape and position included) or the provided
+            // one must declare a supertype chain reaching the declared one.
+            // Raw local-index comparison would reject structurally equal
+            // types; a params/results comparison would accept different
+            // rec-group shapes.
+            let Some(source_idx) = source
                 .module
                 .funcs
                 .iter()
                 .find(|func| func.idx == func_idx)
-                .map(|func| &source.module.types[func.type_idx.0 as usize]);
-            match source_ty {
-                Some(source_ty) if **source_ty == declared.ty => {}
-                Some(source_ty) => {
-                    return Err(format!(
-                        "link: type mismatch on {:?}.{:?}: source {source_ty:?} vs import {:?}",
-                        declared.module, declared.name, declared.ty
-                    ));
-                }
-                None => {
-                    return Err(format!(
-                        "link: function {func_idx:?} not found in {:?}",
-                        declared.module
-                    ));
-                }
+                .map(|func| func.type_idx)
+            else {
+                return Err(format!(
+                    "link: function {func_idx:?} not found in {:?}",
+                    declared.module
+                ));
+            };
+            if !baedeker_core::types::defined_type_matches(
+                &source.module.type_defs,
+                &source.module.rec_groups,
+                source_idx,
+                &module.type_defs,
+                &module.rec_groups,
+                declared.type_idx,
+            ) {
+                return Err(format!(
+                    "link: type mismatch on {:?}.{:?}: source type {:?} vs import type {:?}",
+                    declared.module, declared.name, source_idx, declared.type_idx
+                ));
             }
             link_func(
                 source.module.clone(),
@@ -692,8 +735,12 @@ fn invoke_args(args: &[WastArg<'_>]) -> Vec<Value> {
                 } => Value::ExternRef(None),
                 _ => Value::FuncRef(None),
             },
-            WastArg::Core(WastArgCore::RefExtern(value))
-            | WastArg::Core(WastArgCore::RefHost(value)) => Value::ExternRef(Some(*value)),
+            // `ref.extern N` builds `ExternRef(HostRef N)`; `ref.host N`
+            // builds the any-side `HostRef N` (`script.ml:80`: its type is
+            // `AnyHT`). Keeping the zones distinct is what lets an anyref
+            // parameter accept a host reference.
+            WastArg::Core(WastArgCore::RefExtern(value)) => Value::ExternRef(Some(*value)),
+            WastArg::Core(WastArgCore::RefHost(value)) => Value::HostAny(Some(*value)),
             other => panic!("unsupported invoke argument: {other:?}"),
         })
         .collect()
@@ -781,7 +828,7 @@ fn assert_return(
                 return;
             };
             let actual = cell.get();
-            if expected.len() == 1 && result_matches(&actual, &expected[0]) {
+            if expected.len() == 1 && result_matches(&actual, &expected[0], Some(&store)) {
                 return;
             }
             stats.failures.push(format!(
@@ -809,11 +856,17 @@ fn assert_return(
     };
     match result {
         Ok(actual) => {
+            // Reference-pattern matching needs the instance's store (GC object
+            // kinds live in the heap, not in the value).
+            let store = registry
+                .get(invoke.module.map(|id| id.name()))
+                .map(|instance| instance.store.borrow());
+            let store = store.as_deref();
             if actual.len() != expected.len()
                 || !actual
                     .iter()
                     .zip(expected.iter())
-                    .all(|(actual, expected)| result_matches(actual, expected))
+                    .all(|(actual, expected)| result_matches(actual, expected, store))
             {
                 stats.failures.push(format!(
                     "{}: assert_return mismatch on {:?}: actual {actual:?}, expected {expected:?}",
@@ -923,12 +976,20 @@ fn assert_exhaustion(
 }
 
 /// Whether an actual runtime value satisfies an expected WAST result,
-/// including NaN patterns and v128 lane patterns.
-fn result_matches(actual: &Value, expected: &WastRet<'_>) -> bool {
+/// including NaN patterns, v128 lane patterns, and reference patterns
+/// (`script/runner.ml:464-483` `assert_ref_pat`).
+fn result_matches(actual: &Value, expected: &WastRet<'_>, store: Option<&Store>) -> bool {
     match expected {
-        WastRet::Core(WastRetCore::I32(value)) => *actual == Value::I32(*value),
-        WastRet::Core(WastRetCore::I64(value)) => *actual == Value::I64(*value),
-        WastRet::Core(WastRetCore::F32(pattern)) => match (actual, pattern) {
+        WastRet::Core(core) => ret_core_matches(actual, core, store),
+        _ => false,
+    }
+}
+
+fn ret_core_matches(actual: &Value, expected: &WastRetCore<'_>, store: Option<&Store>) -> bool {
+    match expected {
+        WastRetCore::I32(value) => *actual == Value::I32(*value),
+        WastRetCore::I64(value) => *actual == Value::I64(*value),
+        WastRetCore::F32(pattern) => match (actual, pattern) {
             (Value::F32(actual), wast::core::NanPattern::Value(expected)) => {
                 actual.to_bits() == expected.bits
             }
@@ -938,7 +999,7 @@ fn result_matches(actual: &Value, expected: &WastRet<'_>) -> bool {
             (Value::F32(actual), wast::core::NanPattern::ArithmeticNan) => actual.is_nan(),
             _ => false,
         },
-        WastRet::Core(WastRetCore::F64(pattern)) => match (actual, pattern) {
+        WastRetCore::F64(pattern) => match (actual, pattern) {
             (Value::F64(actual), wast::core::NanPattern::Value(expected)) => {
                 actual.to_bits() == expected.bits
             }
@@ -948,36 +1009,65 @@ fn result_matches(actual: &Value, expected: &WastRet<'_>) -> bool {
             (Value::F64(actual), wast::core::NanPattern::ArithmeticNan) => actual.is_nan(),
             _ => false,
         },
-        WastRet::Core(WastRetCore::RefNull(_)) => {
-            matches!(actual, Value::FuncRef(None) | Value::ExternRef(None))
+        // Reference patterns: the pinned `assert_ref_pat` rows live in the
+        // runtime so embedders and tests share one relation.
+        WastRetCore::RefNull(_) => {
+            baedeker_core::runtime::ref_matches_pattern(actual, RefPattern::Null, store)
         }
-        WastRet::Core(WastRetCore::RefExtern(Some(expected))) => {
-            *actual == Value::ExternRef(Some(*expected))
+        WastRetCore::RefExtern(Some(expected)) => baedeker_core::runtime::ref_matches_pattern(
+            actual,
+            RefPattern::Extern(Some(*expected)),
+            store,
+        ),
+        // Bare `(ref.extern)`: the `RefTypePat ExternHT, _` row matches every
+        // reference value, nulls included (runner.ml:475).
+        WastRetCore::RefExtern(None) => {
+            baedeker_core::runtime::ref_matches_pattern(actual, RefPattern::Extern(None), store)
         }
-        WastRet::Core(WastRetCore::RefExtern(None)) => actual == &Value::ExternRef(None),
-        // `(ref.func)` with no index: any non-null funcref.
-        WastRet::Core(WastRetCore::RefFunc(None)) => matches!(actual, Value::FuncRef(Some(_))),
-        WastRet::Core(WastRetCore::RefFunc(Some(expected))) => {
-            let expected_idx = match expected {
-                wast::token::Index::Num(idx, _) => Some(*idx),
-                wast::token::Index::Id(_) => None,
-            };
-            match (actual, expected_idx) {
-                (Value::FuncRef(Some((_, actual_idx))), Some(expected_idx)) => {
-                    actual_idx == &expected_idx
-                }
-                (Value::FuncRef(Some(_)), None) => true,
-                _ => false,
+        // `(ref.func)` / `(ref.func $f)`.
+        WastRetCore::RefFunc(None) => {
+            baedeker_core::runtime::ref_matches_pattern(actual, RefPattern::FuncAny, store)
+        }
+        WastRetCore::RefFunc(Some(index)) => match index {
+            wast::token::Index::Num(idx, _) => baedeker_core::runtime::ref_matches_pattern(
+                actual,
+                RefPattern::FuncIndex(*idx),
+                store,
+            ),
+            wast::token::Index::Id(_) => {
+                baedeker_core::runtime::ref_matches_pattern(actual, RefPattern::FuncAny, store)
             }
+        },
+        // `(ref.host n)`: eq_ref identity on the any-side host handle only
+        // (`script.ml:93` equates `HostRef` with `HostRef`).
+        WastRetCore::RefHost(expected) => {
+            baedeker_core::runtime::ref_matches_pattern(actual, RefPattern::Host(*expected), store)
         }
-        WastRet::Core(WastRetCore::RefHost(_)) => false,
-        WastRet::Core(WastRetCore::V128(pattern)) => {
+        WastRetCore::RefAny => {
+            baedeker_core::runtime::ref_matches_pattern(actual, RefPattern::Any, store)
+        }
+        WastRetCore::RefEq => {
+            baedeker_core::runtime::ref_matches_pattern(actual, RefPattern::Eq, store)
+        }
+        WastRetCore::RefStruct => {
+            baedeker_core::runtime::ref_matches_pattern(actual, RefPattern::Struct, store)
+        }
+        WastRetCore::RefArray => {
+            baedeker_core::runtime::ref_matches_pattern(actual, RefPattern::Array, store)
+        }
+        WastRetCore::RefI31 | WastRetCore::RefI31Shared => {
+            baedeker_core::runtime::ref_matches_pattern(actual, RefPattern::I31, store)
+        }
+        // `EitherResult`: any alternative may match.
+        WastRetCore::Either(cases) => cases
+            .iter()
+            .any(|case| ret_core_matches(actual, case, store)),
+        WastRetCore::V128(pattern) => {
             let Value::V128(actual) = actual else {
                 return false;
             };
             v128_pattern_matches(actual, pattern)
         }
-        _ => false,
     }
 }
 

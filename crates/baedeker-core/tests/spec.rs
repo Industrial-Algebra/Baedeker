@@ -116,6 +116,20 @@ fn validation_kind_name(kind: &ValidationErrorKind) -> &'static str {
         ValidationErrorKind::MemorySizeOutOfRange => "MemorySizeOutOfRange",
         ValidationErrorKind::MemoryMinExceedsMax => "MemoryMinExceedsMax",
         ValidationErrorKind::TableTypeMismatch => "TableTypeMismatch",
+        ValidationErrorKind::ForwardUseOfTypeInSubType { .. } => "ForwardUseOfTypeInSubType",
+        ValidationErrorKind::FinalSupertype { .. } => "FinalSupertype",
+        ValidationErrorKind::SubtypeComptypeMismatch { .. } => "SubtypeComptypeMismatch",
+        ValidationErrorKind::UnknownStruct { .. } => "UnknownStruct",
+        ValidationErrorKind::UnknownArray { .. } => "UnknownArray",
+        ValidationErrorKind::UnknownField { .. } => "UnknownField",
+        ValidationErrorKind::ImmutableField { .. } => "ImmutableField",
+        ValidationErrorKind::ImmutableArray { .. } => "ImmutableArray",
+        ValidationErrorKind::PackedFieldMismatch { .. } => "PackedFieldMismatch",
+        ValidationErrorKind::NonDefaultable { .. } => "NonDefaultable",
+        ValidationErrorKind::ElemFieldTypeMismatch { .. } => "ElemFieldTypeMismatch",
+        ValidationErrorKind::ArrayNotNumOrVec { .. } => "ArrayNotNumOrVec",
+        ValidationErrorKind::ArrayStorageMismatch { .. } => "ArrayStorageMismatch",
+        ValidationErrorKind::ResourceLimitExceeded { .. } => "ResourceLimitExceeded",
     }
 }
 
@@ -137,6 +151,7 @@ fn decode_kind_name(kind: &DecodeErrorKind) -> &'static str {
         DecodeErrorKind::UnknownExportDesc { .. } => "UnknownExportDesc",
         DecodeErrorKind::InvalidTagAttribute { .. } => "InvalidTagAttribute",
         DecodeErrorKind::InvalidMutability { .. } => "InvalidMutability",
+        DecodeErrorKind::MalformedCastFlags { .. } => "MalformedCastFlags",
         DecodeErrorKind::InvalidUtf8 => "InvalidUtf8",
         DecodeErrorKind::FunctionCodeLengthMismatch { .. } => "FunctionCodeLengthMismatch",
         DecodeErrorKind::UnknownOpcode { .. } => "UnknownOpcode",

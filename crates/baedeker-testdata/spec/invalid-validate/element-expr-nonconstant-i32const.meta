@@ -1,2 +1,6 @@
-kind=NonConstantElementExpr
+# GC U4: `i32.const` is const-eligible in an element expression (`is_const`
+# has no per-context constant restriction; GC `struct.new` operands need it),
+# so the pinned rejection is the segment TYPE mismatch, not "constant
+# expression required". The fixture name is kept for history.
+kind=ElementExprTypeMismatch
 offset=20

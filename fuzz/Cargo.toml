@@ -19,6 +19,10 @@ optional = true
 
 [features]
 default = ["wasm-smith"]
+# R1 (GC slice): wasm-smith emits GC type sections plus a conservative
+# struct/array/i31 instruction subset. Off by default so the existing
+# non-GC campaign shape is unchanged.
+gc-smith = ["wasm-smith"]
 
 # Standalone workspace — intentionally not a member of the root workspace
 # (fuzz builds use a separate nightly toolchain and sanitizer flags).
@@ -42,6 +46,7 @@ path = "fuzz_targets/smith_module.rs"
 test = false
 doc = false
 required-features = ["wasm-smith"]
+
 
 [[bin]]
 name = "trap_edges"

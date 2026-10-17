@@ -46,6 +46,13 @@ pub struct ControlFrame {
     pub end_types: Vec<ValType>,
     pub local_inits: Vec<bool>,
     pub has_else: bool,
+    /// The reachability of the ENCLOSING frame at the moment this frame was
+    /// pushed. Stack-polymorphic typing is per frame (`push_ctrl` records the
+    /// stack height and marks the new block reachable): a block entered in
+    /// unreachable code is validated as a reachable block whose operand floor
+    /// sits at the enclosing frame's height, and the enclosing frame's
+    /// unreachable state is restored when the block ends.
+    pub entry_unreachable: bool,
 }
 
 /// Operand stack state.
@@ -83,6 +90,13 @@ impl TypeStack {
         self.values.pop()
     }
 
+    /// Reserve capacity for `additional` more operands. Returns `false` when
+    /// the allocator refuses, so callers can surface a clean resource error
+    /// instead of aborting on infallible growth.
+    pub fn try_reserve(&mut self, additional: usize) -> bool {
+        self.values.try_reserve(additional).is_ok()
+    }
+
     pub fn as_slice(&self) -> &[OperandType] {
         &self.values
     }
@@ -109,8 +123,12 @@ impl ValidationState {
                 stack_floor: 0,
                 start_types: Vec::new(),
                 end_types: result_types,
-                local_inits: local_inits.clone(),
+                // The function frame's local-init snapshot is never restored
+                // (`finish_frame` rejects the function frame), so it stays
+                // empty and `local_inits` is moved, not copied.
+                local_inits: Vec::new(),
                 has_else: false,
+                entry_unreachable: false,
             }],
             locals,
             local_inits,
@@ -130,19 +148,35 @@ impl ValidationState {
             .expect("validation state must always contain a function frame")
     }
 
+    /// Push a new control frame, reserving every module-scaled structure
+    /// fallibly (the operand stack, the frame's local-init snapshot, and the
+    /// control stack). Returns `false` when the allocator refuses, so callers
+    /// surface a clean resource error instead of aborting.
     pub fn push_frame(
         &mut self,
         kind: ControlKind,
         block_type: BlockType,
         start_types: Vec<ValType>,
         end_types: Vec<ValType>,
-    ) {
+    ) -> bool {
+        if !self.operands.try_reserve(start_types.len()) {
+            return false;
+        }
         let outer_height = self.operands.len();
         for ty in &start_types {
             self.operands.push(*ty);
         }
         let stack_floor = self.operands.len();
 
+        let mut local_inits = Vec::new();
+        if local_inits.try_reserve(self.local_inits.len()).is_err() {
+            return false;
+        }
+        local_inits.extend_from_slice(&self.local_inits);
+
+        if self.controls.try_reserve(1).is_err() {
+            return false;
+        }
         self.controls.push(ControlFrame {
             kind,
             block_type,
@@ -150,9 +184,15 @@ impl ValidationState {
             stack_floor,
             start_types,
             end_types,
-            local_inits: self.local_inits.clone(),
+            local_inits,
             has_else: false,
+            entry_unreachable: self.reachability == Reachability::Unreachable,
         });
+        // `push_ctrl` marks the new block reachable: the block's own body is
+        // type-checked from its declared parameter types, not from the
+        // enclosing frame's polymorphic stack.
+        self.reachability = Reachability::Reachable;
+        true
     }
 
     pub fn pop_frame(&mut self) -> Option<ControlFrame> {

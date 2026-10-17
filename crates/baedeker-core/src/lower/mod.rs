@@ -18,7 +18,7 @@ use crate::error::{ByteOffset, DecodeContext, DecodeErrorKind};
 use crate::types::{
     BlockType, CodeBody, DataMode, ElemIdx, ElementInit, ElementMode, ExportDesc, FuncIdx,
     FuncType, GlobalIdx, HeapType, ImportDesc, LabelIdx, LocalDecl, LocalIdx, MemArg, MemIdx,
-    MemType, Mutability, NumType, RefType, TableIdx, TableType, TagIdx, TypeIdx, ValType,
+    MemType, Mutability, NumType, RefType, SubType, TableIdx, TableType, TagIdx, TypeIdx, ValType,
 };
 use crate::validate;
 use crate::validate::error::{ValidationError, ValidationErrorKind};
@@ -67,6 +67,11 @@ pub struct RegModule {
     /// All function types in the module's type section, for structural
     /// `call_indirect` type checks.
     pub types: Vec<FuncType>,
+    /// The module's full type section: kind-preserving (struct/array/func)
+    /// definitions used for cross-module structural comparison of concrete
+    /// reference types at link time. `types` is the function-only view of
+    /// this section.
+    pub type_defs: Vec<SubType>,
     /// All data segments in index order; mode decides instantiation behavior.
     pub data: Vec<RegDataSegment>,
     /// Number of imported memories (runtime access is not yet supported).
@@ -112,13 +117,18 @@ pub enum RegElementMode {
 }
 
 /// One element value in a segment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum RegElemValue {
     FuncRef(FuncIdx),
     /// A `global.get` of a funcref global, resolved at instantiation.
     GlobalGet(GlobalIdx),
     Null,
+    /// Any other const expression permitted by `is_const` (GC allocation
+    /// forms, conversions, multi-instruction expressions). Evaluated against
+    /// the heap at instantiation, with the same allocation discipline as a
+    /// global initializer.
+    Expr(Vec<RegConstInstr>),
 }
 
 /// A defined global in lowered register IR.
@@ -178,6 +188,50 @@ pub enum RegConstInstr {
     /// so the evaluator constructs the correctly-typed null (externref,
     /// exnref, typed refs).
     RefNullOf(RefType),
+    /// `ref.null ht` with a GC abstract heap type (`any`, `eq`, `i31`,
+    /// `struct`, `array`, `none`, `nofunc`, `noextern`, `noexn`). The
+    /// evaluator constructs the correctly-typed null reference.
+    RefNullGC(HeapType),
+    /// `ref.i31`: box the `i32` on the stack into a 31-bit immediate.
+    RefI31,
+    /// `struct.new $x` (`default = false`) or `struct.new_default $x`
+    /// (`default = true`). The explicit form pops one value per field; the
+    /// default form pops nothing and fills every field with its default.
+    /// Both forms are const-eligible (`valid.ml:1029-1040` wildcards the
+    /// `initop`).
+    StructNew {
+        type_idx: TypeIdx,
+        default: bool,
+    },
+    /// `array.new $x` (`default = false`) or `array.new_default $x`
+    /// (`default = true`). Both forms pop the length; the explicit form also
+    /// pops the fill value. Both are const-eligible (pin wildcard).
+    ArrayNew {
+        type_idx: TypeIdx,
+        default: bool,
+    },
+    /// `array.new_fixed $x $n`: pops `count` element values, first operand
+    /// lowest index.
+    ArrayNewFixed {
+        type_idx: TypeIdx,
+        count: u32,
+    },
+    /// `any.convert_extern` / `extern.convert_any`: an immediate value-level
+    /// re-tag, never an allocation.
+    ExternConvert {
+        direction: ExternConvert,
+    },
+}
+
+/// Direction of the extern/any conversion const forms (`externtype`-level
+/// re-tags, `eval.ml:929-939`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum ExternConvert {
+    /// `extern.convert_any`: any-side reference → extern-side reference.
+    AnyToExtern,
+    /// `any.convert_extern`: extern-side reference → any-side reference.
+    ExternToAny,
 }
 
 /// A function import declaration in lowered register IR.
@@ -187,6 +241,13 @@ pub struct RegImport {
     pub module: String,
     pub name: String,
     pub ty: FuncType,
+    /// The type index the import was declared with. Import matching compares
+    /// the provider's function DEftype against this declaration's deftype
+    /// (`match_externtype` → `match_deftype`), so canonical identity of the
+    /// whole type entry (rec-group shape, finality, supertypes) participates —
+    /// a params/results-only comparison would conflate `(rec (type (func))
+    /// (type (struct)))` with `(rec (type (struct)) (type (func)))`.
+    pub type_idx: TypeIdx,
 }
 
 /// A memory import declaration in lowered register IR.
@@ -224,12 +285,18 @@ pub struct ImportedTag {
     pub name: String,
     /// The tag's function type (params; results are empty by validation).
     pub ty: FuncType,
+    /// The type index the import was declared with. Retained so link-time
+    /// comparison can recompute the tag's OWN referenced function type's
+    /// complete closed form (finality + supertypes + comptype) from the
+    /// serialized type section exactly as the parameter fix does — a
+    /// property the params-only `FuncType` cannot express.
+    pub type_idx: TypeIdx,
     /// Rec-group provenance of the tag's type: the group's member types
     /// (structural signature) and the tag type's position in the group.
     /// `None` for bare (non-rec) types. Two tag types are link-compatible
     /// only when both are bare, or both come from structurally identical
     /// groups at the same position (iso-recursive equality, flattened).
-    pub rec: Option<(Vec<FuncType>, u32)>,
+    pub rec: Option<(Vec<SubType>, u32)>,
 }
 
 /// A function export in lowered register IR.
@@ -781,6 +848,176 @@ pub enum RegOp {
         dst: Reg,
         value: Reg,
     },
+    /// `struct.new $x`: allocate a struct from `fields` (declaration order).
+    StructNew {
+        dst: Reg,
+        type_idx: TypeIdx,
+        fields: Vec<Reg>,
+    },
+    /// `struct.new_default $x`: allocate a struct with default field values.
+    StructNewDefault {
+        dst: Reg,
+        type_idx: TypeIdx,
+    },
+    /// `struct.get{,s,u} $x $i`.
+    StructGet {
+        dst: Reg,
+        type_idx: TypeIdx,
+        field: u32,
+        ext: GcExt,
+        object: Reg,
+    },
+    /// `struct.set $x $i`.
+    StructSet {
+        type_idx: TypeIdx,
+        field: u32,
+        object: Reg,
+        value: Reg,
+    },
+    /// `array.new $x`: `len` copies of `value`.
+    ArrayNew {
+        dst: Reg,
+        type_idx: TypeIdx,
+        len: Reg,
+        value: Reg,
+    },
+    /// `array.new_default $x`.
+    ArrayNewDefault {
+        dst: Reg,
+        type_idx: TypeIdx,
+        len: Reg,
+    },
+    /// `array.new_fixed $x $n`.
+    ArrayNewFixed {
+        dst: Reg,
+        type_idx: TypeIdx,
+        values: Vec<Reg>,
+    },
+    /// `array.new_data $x $y`.
+    ArrayNewData {
+        dst: Reg,
+        type_idx: TypeIdx,
+        data: crate::types::DataIdx,
+        src: Reg,
+        len: Reg,
+    },
+    /// `array.new_elem $x $y`.
+    ArrayNewElem {
+        dst: Reg,
+        type_idx: TypeIdx,
+        elem: ElemIdx,
+        src: Reg,
+        len: Reg,
+    },
+    /// `array.get{,s,u} $x`.
+    ArrayGet {
+        dst: Reg,
+        type_idx: TypeIdx,
+        array: Reg,
+        index: Reg,
+        ext: GcExt,
+    },
+    /// `array.set $x`.
+    ArraySet {
+        type_idx: TypeIdx,
+        array: Reg,
+        index: Reg,
+        value: Reg,
+    },
+    /// `array.len`.
+    ArrayLen {
+        dst: Reg,
+        array: Reg,
+    },
+    /// `array.fill $x`.
+    ArrayFill {
+        type_idx: TypeIdx,
+        array: Reg,
+        index: Reg,
+        value: Reg,
+        len: Reg,
+    },
+    /// `array.copy $x $y`.
+    ArrayCopy {
+        dst_type: TypeIdx,
+        src_type: TypeIdx,
+        dst: Reg,
+        dst_off: Reg,
+        src: Reg,
+        src_off: Reg,
+        len: Reg,
+    },
+    /// `array.init_data $x $y`.
+    ArrayInitData {
+        type_idx: TypeIdx,
+        data: crate::types::DataIdx,
+        array: Reg,
+        dst_off: Reg,
+        src_off: Reg,
+        len: Reg,
+    },
+    /// `array.init_elem $x $y`.
+    ArrayInitElem {
+        type_idx: TypeIdx,
+        elem: ElemIdx,
+        array: Reg,
+        dst_off: Reg,
+        src_off: Reg,
+        len: Reg,
+    },
+    /// `ref.i31`: box an i32 into a 31-bit immediate.
+    RefI31 {
+        dst: Reg,
+        value: Reg,
+    },
+    /// `i31.get_s`/`i31.get_u`.
+    I31Get {
+        dst: Reg,
+        value: Reg,
+        signed: bool,
+    },
+    /// `ref.test (ref null? ht)`: dst = 1 when `value` matches the target.
+    RefTest {
+        dst: Reg,
+        value: Reg,
+        nullable: bool,
+        ht: HeapType,
+    },
+    /// `ref.cast (ref null? ht)`: dst = `value` when it matches, else trap.
+    RefCast {
+        dst: Reg,
+        value: Reg,
+        nullable: bool,
+        ht: HeapType,
+    },
+    /// `ref.eq`: dst = 1 when the two eq references are equal.
+    RefEq {
+        dst: Reg,
+        lhs: Reg,
+        rhs: Reg,
+    },
+    /// `any.convert_extern`: re-tag an extern reference as an any reference.
+    AnyConvertExtern {
+        dst: Reg,
+        value: Reg,
+    },
+    /// `extern.convert_any`: re-tag an any reference as an extern reference.
+    ExternConvertAny {
+        dst: Reg,
+        value: Reg,
+    },
+}
+
+/// The packed-field extension marker carried in lowered GC `get` ops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum GcExt {
+    /// Unpacked read (`struct.get` / `array.get`).
+    None,
+    /// Sign-extended packed read.
+    S,
+    /// Zero-extended packed read.
+    U,
 }
 
 /// SIMD lane shapes.
@@ -1759,8 +1996,24 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
     for (defined_idx, (type_idx, code)) in module.functions().iter().zip(module.codes()).enumerate()
     {
         let func_idx = FuncIdx(imported_func_count + defined_idx as u32);
-        let ty = &module.types()[type_idx.0 as usize];
-        funcs.push(lower_function(func_idx, *type_idx, ty, code, &tables)?);
+        let ty = module.func_type(*type_idx).ok_or(LowerError {
+            offset: ByteOffset(0),
+            function: None,
+            kind: LowerErrorKind::InvalidType {
+                type_idx: type_idx.0,
+            },
+        })?;
+        let reg_func = lower_function(func_idx, *type_idx, ty, code, &tables)?;
+        if funcs.try_reserve(1).is_err() {
+            return Err(LowerError {
+                offset: ByteOffset(0),
+                function: None,
+                kind: LowerErrorKind::Validation(ValidationErrorKind::ResourceLimitExceeded {
+                    what: "lowered functions",
+                }),
+            });
+        }
+        funcs.push(reg_func);
     }
 
     let imported_memory_count = module
@@ -1814,10 +2067,11 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
         .imports()
         .iter()
         .filter_map(|import| match import.desc {
-            ImportDesc::Func(type_idx) => Some(RegImport {
+            ImportDesc::Func(type_idx) => module.func_type(type_idx).map(|ty| RegImport {
                 module: import.module.clone(),
                 name: import.name.clone(),
-                ty: module.types()[type_idx.0 as usize].clone(),
+                ty: ty.clone(),
+                type_idx,
             }),
             _ => None,
         })
@@ -1866,10 +2120,11 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
         .imports()
         .iter()
         .filter_map(|import| match import.desc {
-            ImportDesc::Tag(type_idx) => Some(ImportedTag {
+            ImportDesc::Tag(type_idx) => module.func_type(type_idx).map(|ty| ImportedTag {
                 module: import.module.clone(),
                 name: import.name.clone(),
-                ty: module.types()[type_idx.0 as usize].clone(),
+                ty: ty.clone(),
+                type_idx,
                 rec: rec_provenance(module, type_idx),
             }),
             _ => None,
@@ -1879,7 +2134,8 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
     let start = module.start();
 
     let tables = module.tables().to_vec();
-    let types = module.types().to_vec();
+    let type_defs = reg_type_table(module)?;
+    let types = func_type_view(&type_defs);
 
     let mut elements = Vec::with_capacity(module.elements().len());
     for segment in module.elements() {
@@ -1938,6 +2194,7 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
         tables,
         elements,
         types,
+        type_defs,
         data,
         imported_memory_count,
         imported_global_count,
@@ -1964,23 +2221,27 @@ fn lower_element_expr(expr: &crate::types::ElementExpr<'_>) -> Result<RegElemVal
     match instrs.as_slice() {
         [first, last] if matches!(last.instr, Instr::End) => match first.instr {
             Instr::RefFunc(func) => Ok(RegElemValue::FuncRef(func)),
-            Instr::RefNull(_) => Ok(RegElemValue::Null),
+            Instr::RefNull(RefType::FuncRef) => Ok(RegElemValue::Null),
             Instr::GlobalGet(global) => Ok(RegElemValue::GlobalGet(global)),
-            ref other => Err(LowerError {
-                offset: first.offset,
-                function: None,
-                kind: LowerErrorKind::UnsupportedInstr {
-                    op: instr_name(other),
-                },
-            }),
+            _ => {
+                // Any other const-eligible expression (GC allocation forms,
+                // non-funcref nulls, conversions) is evaluated at
+                // instantiation against the heap.
+                Ok(RegElemValue::Expr(lower_const_expr(
+                    expr.expr,
+                    expr.offset,
+                )?))
+            }
         },
-        _ => Err(LowerError {
-            offset: ByteOffset(expr.offset),
-            function: None,
-            kind: LowerErrorKind::UnsupportedInstr {
-                op: "multi-instruction element expression",
-            },
-        }),
+        _ => {
+            // Multi-instruction const expressions (extended-const
+            // arithmetic, nested GC construction) are evaluated at
+            // instantiation against the heap.
+            Ok(RegElemValue::Expr(lower_const_expr(
+                expr.expr,
+                expr.offset,
+            )?))
+        }
     }
 }
 
@@ -2009,14 +2270,43 @@ pub(crate) fn lower_const_expr(
             Instr::F64Const(value) => RegConstInstr::F64Const(value.to_bits()),
             Instr::V128Const(bytes) => RegConstInstr::V128Const(bytes),
             Instr::GlobalGet(global) => RegConstInstr::GlobalGet(global),
-            Instr::RefNull(ref_type) => {
-                if matches!(ref_type, RefType::FuncRef) {
-                    RegConstInstr::RefNull
-                } else {
-                    RegConstInstr::RefNullOf(ref_type)
-                }
-            }
+            Instr::RefNull(ref_type) => match ref_type {
+                RefType::FuncRef => RegConstInstr::RefNull,
+                RefType::ExternRef => RegConstInstr::RefNullOf(ref_type),
+                RefType::Typed { heap, .. } => match heap {
+                    HeapType::Func | HeapType::Extern | HeapType::Exn | HeapType::Type(_) => {
+                        RegConstInstr::RefNullOf(ref_type)
+                    }
+                    gc => RegConstInstr::RefNullGC(gc),
+                },
+            },
             Instr::RefFunc(func) => RegConstInstr::RefFunc(func),
+            Instr::RefI31 => RegConstInstr::RefI31,
+            Instr::StructNew(type_idx) => RegConstInstr::StructNew {
+                type_idx,
+                default: false,
+            },
+            Instr::StructNewDefault(type_idx) => RegConstInstr::StructNew {
+                type_idx,
+                default: true,
+            },
+            Instr::ArrayNew(type_idx) => RegConstInstr::ArrayNew {
+                type_idx,
+                default: false,
+            },
+            Instr::ArrayNewDefault(type_idx) => RegConstInstr::ArrayNew {
+                type_idx,
+                default: true,
+            },
+            Instr::ArrayNewFixed { type_idx, count } => {
+                RegConstInstr::ArrayNewFixed { type_idx, count }
+            }
+            Instr::AnyConvertExtern => RegConstInstr::ExternConvert {
+                direction: ExternConvert::ExternToAny,
+            },
+            Instr::ExternConvertAny => RegConstInstr::ExternConvert {
+                direction: ExternConvert::AnyToExtern,
+            },
             Instr::I32Add => RegConstInstr::I32Add,
             Instr::I32Sub => RegConstInstr::I32Sub,
             Instr::I32Mul => RegConstInstr::I32Mul,
@@ -2044,14 +2334,53 @@ pub(crate) fn lower_const_expr(
 fn func_type_table<'a, 'm>(module: &'a Module<'m>) -> Vec<&'a FuncType> {
     let mut table = Vec::new();
     for import in module.imports() {
-        if let ImportDesc::Func(type_idx) = import.desc {
-            table.push(&module.types()[type_idx.0 as usize]);
+        if let ImportDesc::Func(type_idx) = import.desc
+            && let Some(func) = module.func_type(type_idx)
+        {
+            table.push(func);
         }
     }
     for type_idx in module.functions() {
-        table.push(&module.types()[type_idx.0 as usize]);
+        if let Some(func) = module.func_type(*type_idx) {
+            table.push(func);
+        }
     }
     table
+}
+
+/// The module's full, kind-preserving type section. Used as the source of
+/// truth for cross-module structural comparison of concrete reference
+/// types; `func_type_view` derives the function-only view from it. The outer
+/// vector is reserved fallibly (it scales with the type-section length);
+/// per-element `SubType` cloning is bounded by the type's own arity.
+fn reg_type_table(module: &Module<'_>) -> Result<Vec<SubType>, LowerError> {
+    let types = module.types();
+    let mut out = Vec::new();
+    out.try_reserve(types.len()).map_err(|_| LowerError {
+        offset: ByteOffset(0),
+        function: None,
+        kind: LowerErrorKind::Validation(ValidationErrorKind::ResourceLimitExceeded {
+            what: "register type table",
+        }),
+    })?;
+    out.extend_from_slice(types);
+    Ok(out)
+}
+
+/// Function types in type-index order, for the register IR's structural
+/// `call_indirect` checks. Non-function entries are placeholders: validation
+/// ensures every `call_indirect`/`ref.func` type index points at a function
+/// type, so the placeholder is never observed for a valid module.
+fn func_type_view(type_defs: &[SubType]) -> Vec<FuncType> {
+    type_defs
+        .iter()
+        .map(|sub| {
+            sub.as_func().cloned().unwrap_or(FuncType {
+                params: Vec::new(),
+                results: Vec::new(),
+            })
+        })
+        .collect()
 }
 
 /// Resolve the value type of every global in the index space (imported
@@ -2079,14 +2408,14 @@ fn global_type_table(module: &Module<'_>) -> Vec<ValType> {
 /// Rec-group provenance of a type index, for tag link compatibility:
 /// `Some((member types, position))` when the index falls inside a `rec`
 /// group entry, `None` for bare types.
-fn rec_provenance(module: &Module<'_>, type_idx: TypeIdx) -> Option<(Vec<FuncType>, u32)> {
+fn rec_provenance(module: &Module<'_>, type_idx: TypeIdx) -> Option<(Vec<SubType>, u32)> {
     let idx = type_idx.0;
     let &(start, len) = module
         .rec_groups
         .iter()
         .find(|&&(start, len)| idx >= start && idx < start + len)?;
     let types = module.types();
-    let members = types[start as usize..(start + len) as usize].to_vec();
+    let members: Vec<SubType> = types[start as usize..(start + len) as usize].to_vec();
     Some((members, idx - start))
 }
 
@@ -2121,12 +2450,12 @@ fn lower_function(
             },
         })?;
 
-    let locals = local_types(ty, code.locals.as_slice());
-    let mut builder = FuncBuilder::new(func_idx, type_idx, ty, locals, tables);
+    let locals = local_types(func_idx, code.body_offset, ty, code.locals.as_slice())?;
+    let mut builder = FuncBuilder::new(func_idx, type_idx, ty, locals, tables)?;
 
     for decoded in instrs {
         if builder.lower_instr(decoded)? {
-            return Ok(builder.finish());
+            return builder.finish();
         }
     }
 
@@ -2137,19 +2466,56 @@ fn lower_function(
     })
 }
 
-fn local_types(ty: &FuncType, locals: &[LocalDecl]) -> Vec<ValType> {
+fn local_types(
+    func_idx: FuncIdx,
+    offset: usize,
+    ty: &FuncType,
+    locals: &[LocalDecl],
+) -> Result<Vec<ValType>, LowerError> {
     let local_count = locals
         .iter()
         .map(|local| local.count as usize)
         .sum::<usize>();
-    let mut types = Vec::with_capacity(ty.params.len() + local_count);
-    types.extend_from_slice(ty.params.as_slice());
+    let mut types = fallible_copy_slice(
+        func_idx,
+        ByteOffset(offset),
+        "function parameter types",
+        &ty.params,
+    )?;
+    if types.try_reserve(local_count).is_err() {
+        return Err(LowerError {
+            offset: ByteOffset(offset),
+            function: Some(func_idx),
+            kind: LowerErrorKind::Validation(ValidationErrorKind::ResourceLimitExceeded {
+                what: "function locals",
+            }),
+        });
+    }
     for local in locals {
         for _ in 0..local.count {
             types.push(local.val_type);
         }
     }
-    types
+    Ok(types)
+}
+
+/// Fallibly copy `src` into a fresh `Vec` (try_reserve-then-fill), anchored at
+/// `func_idx`. Mirrors [`FuncBuilder::fallible_copy`] for the pre-builder
+/// function-setup path.
+fn fallible_copy_slice<T: Clone>(
+    func_idx: FuncIdx,
+    offset: ByteOffset,
+    what: &'static str,
+    src: &[T],
+) -> Result<Vec<T>, LowerError> {
+    let mut out = Vec::new();
+    out.try_reserve(src.len()).map_err(|_| LowerError {
+        offset,
+        function: Some(func_idx),
+        kind: LowerErrorKind::Validation(ValidationErrorKind::ResourceLimitExceeded { what }),
+    })?;
+    out.extend_from_slice(src);
+    Ok(out)
 }
 
 struct FuncBuilder<'b> {
@@ -2162,6 +2528,10 @@ struct FuncBuilder<'b> {
     reg_types: Vec<ValType>,
     blocks: Vec<RegBlock>,
     current_instrs: Vec<RegInstr>,
+    /// Offset of the instruction currently being lowered, used to anchor
+    /// resource-limit errors raised by bookkeeping helpers that lack an
+    /// offset parameter.
+    cur_offset: ByteOffset,
     /// Shared module-level tables used while lowering function bodies.
     tables: &'b ModuleTables<'b>,
     /// Stack of active block/loop/if frames. Each entry records the label of
@@ -2279,20 +2649,40 @@ struct LabelFrame {
 /// already proven precise ref types (nullability, concrete type indices,
 /// subtyping). Here we only need to keep function references and external
 /// references from crossing kinds.
-fn ref_compatible(found: ValType, expected: ValType) -> bool {
-    fn kind(ty: &crate::types::RefType) -> u8 {
+fn ref_compatible(types: &[crate::types::SubType], found: ValType, expected: ValType) -> bool {
+    fn kind(types: &[crate::types::SubType], ty: &crate::types::RefType) -> u8 {
         match ty {
             crate::types::RefType::FuncRef => 0,
             crate::types::RefType::ExternRef => 1,
             crate::types::RefType::Typed { heap, .. } => match heap {
-                crate::types::HeapType::Func | crate::types::HeapType::Type(_) => 0,
+                crate::types::HeapType::Func => 0,
                 crate::types::HeapType::Extern => 1,
                 crate::types::HeapType::Exn => 2,
+                crate::types::HeapType::NoFunc => 0,
+                crate::types::HeapType::NoExtern => 1,
+                crate::types::HeapType::NoExn => 2,
+                crate::types::HeapType::Type(idx) => {
+                    // A concrete type's hierarchy side comes from the type
+                    // section: struct/array are any-side, functions func-side.
+                    match types.get(idx.0 as usize).map(|sub| &sub.comp) {
+                        Some(crate::types::CompType::Struct(_))
+                        | Some(crate::types::CompType::Array(_)) => 3,
+                        _ => 0,
+                    }
+                }
+                crate::types::HeapType::Any
+                | crate::types::HeapType::None
+                | crate::types::HeapType::Eq
+                | crate::types::HeapType::I31
+                | crate::types::HeapType::Struct
+                | crate::types::HeapType::Array => 3,
             },
         }
     }
     match (found, expected) {
-        (ValType::Ref(found), ValType::Ref(expected)) => kind(&found) == kind(&expected),
+        (ValType::Ref(found), ValType::Ref(expected)) => {
+            kind(types, &found) == kind(types, &expected)
+        }
         _ => false,
     }
 }
@@ -2305,7 +2695,7 @@ fn ref_compatible(found: ValType, expected: ValType) -> bool {
 struct ModuleTables<'a> {
     func_types: &'a [&'a FuncType],
     global_types: &'a [ValType],
-    types: &'a [FuncType],
+    types: &'a [crate::types::SubType],
     table_elem_types: &'a [crate::types::RefType],
     /// Address index type (i64 vs i32) of every memory, imported first.
     memory_addr_types: &'a [NumType],
@@ -2314,6 +2704,13 @@ struct ModuleTables<'a> {
     /// Type index of every tag in the index space (imported first), so
     /// `throw`/`try_table` lowering can type tag payloads.
     tag_types: &'a [TypeIdx],
+}
+
+impl ModuleTables<'_> {
+    /// The function signature at `idx`, if that type index is a func type.
+    fn func_type(&self, idx: usize) -> Option<&FuncType> {
+        self.types.get(idx).and_then(crate::types::SubType::as_func)
+    }
 }
 
 /// The numeric type used to address a memory/table from its declared limits.
@@ -2332,6 +2729,38 @@ fn min_num_type(lhs: NumType, rhs: NumType) -> NumType {
         NumType::I64
     } else {
         NumType::I32
+    }
+}
+
+/// The non-null concrete reference type `(ref $idx)`.
+fn gc_ref_type(type_idx: TypeIdx) -> ValType {
+    ValType::Ref(crate::types::RefType::concrete(false, type_idx))
+}
+
+/// The nullable concrete reference type `(ref null $idx)`.
+fn gc_ref_type_nullable(type_idx: TypeIdx) -> ValType {
+    ValType::Ref(crate::types::RefType::concrete(true, type_idx))
+}
+
+/// `diff_reftype` (`valid/valid.ml:234`).
+fn lower_diff_reftype(
+    src: crate::types::RefType,
+    tgt: crate::types::RefType,
+) -> crate::types::RefType {
+    if tgt.is_nullable() {
+        src.as_non_null()
+    } else {
+        src
+    }
+}
+
+/// The unpacked value type of a storage type (packed i8/i16 → i32).
+fn gc_unpacked(storage: crate::types::StorageType) -> ValType {
+    match storage {
+        crate::types::StorageType::Val(val) => val,
+        crate::types::StorageType::I8 | crate::types::StorageType::I16 => {
+            ValType::Num(NumType::I32)
+        }
     }
 }
 
@@ -2356,44 +2785,82 @@ impl<'b> FuncBuilder<'b> {
         ty: &FuncType,
         locals: Vec<ValType>,
         tables: &'b ModuleTables<'b>,
-    ) -> Self {
+    ) -> Result<Self, LowerError> {
         // The function body itself is label 0, targeting a block that will
         // receive function-end returns (created on demand).
-        Self {
+        let params = fallible_copy_slice(
+            func_idx,
+            ByteOffset(0),
+            "function parameter types",
+            &ty.params,
+        )?;
+        let results = fallible_copy_slice(
+            func_idx,
+            ByteOffset(0),
+            "function result types",
+            &ty.results,
+        )?;
+        let frame_results = fallible_copy_slice(
+            func_idx,
+            ByteOffset(0),
+            "function frame result types",
+            &ty.results,
+        )?;
+        let mut label_stack = Vec::new();
+        if label_stack.try_reserve(1).is_err() {
+            return Err(LowerError {
+                offset: ByteOffset(0),
+                function: Some(func_idx),
+                kind: LowerErrorKind::Validation(ValidationErrorKind::ResourceLimitExceeded {
+                    what: "function label stack",
+                }),
+            });
+        }
+        label_stack.push(LabelFrame {
+            label: LabelIdx(0),
+            kind: FrameKind::Block,
+            result_types: frame_results,
+            param_types: Vec::new(),
+            param_regs: Vec::new(),
+            height: 0,
+            unreachable: false,
+        });
+        Ok(Self {
             func_idx,
             type_idx,
-            params: ty.params.clone(),
-            results: ty.results.clone(),
+            params,
+            results,
             locals,
             stack: Vec::new(),
             reg_types: Vec::new(),
             blocks: Vec::new(),
             current_instrs: Vec::new(),
-            label_stack: alloc::vec![LabelFrame {
-                label: LabelIdx(0),
-                kind: FrameKind::Block,
-                result_types: ty.results.clone(),
-                param_types: Vec::new(),
-                param_regs: Vec::new(),
-                height: 0,
-                unreachable: false,
-            }],
+            cur_offset: ByteOffset(0),
+            label_stack,
             pending_branches: Vec::new(),
             pending_trampolines: Vec::new(),
             regions: Vec::new(),
             pending_catches: Vec::new(),
             tables,
-        }
+        })
     }
 
-    fn finish_block_with_label(&mut self, label: LabelIdx, term: RegTerm) {
+    fn finish_block_with_label(
+        &mut self,
+        label: LabelIdx,
+        term: RegTerm,
+    ) -> Result<(), LowerError> {
         let instrs = core::mem::take(&mut self.current_instrs);
+        if self.blocks.try_reserve(1).is_err() {
+            return Err(self.resource_error(self.cur_offset, "control blocks"));
+        }
         self.blocks.push(RegBlock::new(label, instrs, term));
+        Ok(())
     }
 
-    fn finish_block(&mut self, term: RegTerm) {
+    fn finish_block(&mut self, term: RegTerm) -> Result<(), LowerError> {
         let label = LabelIdx(self.blocks.len() as u32);
-        self.finish_block_with_label(label, term);
+        self.finish_block_with_label(label, term)
     }
 
     /// Finish a conditional reference branch (`br_on_null` /
@@ -2407,7 +2874,7 @@ impl<'b> FuncBuilder<'b> {
         values: Vec<Reg>,
         value_reg: Reg,
         kind: RefBranchKind,
-    ) {
+    ) -> Result<(), LowerError> {
         let make_term = |target_block: u32, values: Vec<Reg>| match kind {
             RefBranchKind::OnNull => RegTerm::BrIfNull {
                 value: value_reg,
@@ -2426,26 +2893,27 @@ impl<'b> FuncBuilder<'b> {
                 block: br_block_idx,
                 slot: BranchSlot::Single,
                 param_regs: loop_target.param_regs,
-                values: values.clone(),
+                values: self.fallible_copy(offset, "branch values", &values)?,
                 header: loop_target.header,
                 offset,
             });
-            self.finish_block(make_term(0, values));
+            self.finish_block(make_term(0, values))?;
         } else {
             self.pending_branches.push(PendingBranch {
                 block: br_block_idx,
                 frame_pos,
-                values: values.clone(),
+                values: self.fallible_copy(offset, "branch values", &values)?,
                 slot: BranchSlot::Single,
             });
-            self.finish_block(make_term(0, values));
+            self.finish_block(make_term(0, values))?;
         }
+        Ok(())
     }
 
-    fn finish(mut self) -> RegFunc {
+    fn finish(mut self) -> Result<RegFunc, LowerError> {
         // If there are pending instructions without a terminator, add Fallthrough
         if !self.current_instrs.is_empty() || self.blocks.is_empty() {
-            self.finish_block(RegTerm::Fallthrough);
+            self.finish_block(RegTerm::Fallthrough)?;
         }
         // Create back-edge trampolines for conditional branches to loops
         // with parameters: each runs the parameter copies, then branches
@@ -2453,19 +2921,24 @@ impl<'b> FuncBuilder<'b> {
         // block list so no fallthrough can reach them.
         for req in core::mem::take(&mut self.pending_trampolines) {
             let trampoline_idx = self.blocks.len() as u32;
-            let instrs = req
-                .param_regs
-                .iter()
-                .zip(req.values.iter())
-                .filter(|(dst, src)| dst != src)
-                .map(|(dst, src)| RegInstr {
-                    offset: req.offset,
-                    op: RegOp::Copy {
-                        dst: *dst,
-                        src: *src,
-                    },
-                })
-                .collect();
+            let mut instrs: Vec<RegInstr> = Vec::new();
+            instrs
+                .try_reserve(req.param_regs.len())
+                .map_err(|_| self.resource_error(self.cur_offset, "loop trampoline copies"))?;
+            for (dst, src) in req.param_regs.iter().zip(req.values.iter()) {
+                if dst != src {
+                    instrs.push(RegInstr {
+                        offset: req.offset,
+                        op: RegOp::Copy {
+                            dst: *dst,
+                            src: *src,
+                        },
+                    });
+                }
+            }
+            if self.blocks.try_reserve(1).is_err() {
+                return Err(self.resource_error(self.cur_offset, "loop trampoline blocks"));
+            }
             self.blocks.push(RegBlock::new(
                 LabelIdx(trampoline_idx),
                 instrs,
@@ -2520,7 +2993,7 @@ impl<'b> FuncBuilder<'b> {
                 }
             }
         }
-        RegFunc {
+        Ok(RegFunc {
             idx: self.func_idx,
             type_idx: self.type_idx,
             params: self.params,
@@ -2529,11 +3002,12 @@ impl<'b> FuncBuilder<'b> {
             reg_types: self.reg_types,
             blocks: self.blocks,
             regions: self.regions,
-        }
+        })
     }
     /// Lower one decoded instruction. Returns `true` when the function body is complete.
     fn lower_instr(&mut self, decoded: DecodedInstr) -> Result<bool, LowerError> {
         let offset = decoded.offset;
+        self.cur_offset = offset;
         match decoded.instr {
             Instr::LocalGet(local) => {
                 let ty = self.locals[local.0 as usize];
@@ -2649,7 +3123,7 @@ impl<'b> FuncBuilder<'b> {
                 self.emit(offset, RegOp::F64Const { dst, value });
             }
             Instr::Unreachable => {
-                self.finish_block(RegTerm::Trap);
+                self.finish_block(RegTerm::Trap)?;
                 self.set_unreachable();
             }
             Instr::Nop => {}
@@ -2661,7 +3135,7 @@ impl<'b> FuncBuilder<'b> {
                     values.push(found.reg);
                 }
                 values.reverse();
-                self.finish_block(RegTerm::Throw { tag, values });
+                self.finish_block(RegTerm::Throw { tag, values })?;
                 self.set_unreachable();
             }
             Instr::ThrowRef => {
@@ -2670,15 +3144,15 @@ impl<'b> FuncBuilder<'b> {
                     "throw_ref",
                     ValType::Ref(RefType::from_parts(true, HeapType::Exn)),
                 )?;
-                self.finish_block(RegTerm::ThrowRef { exn: found.reg });
+                self.finish_block(RegTerm::ThrowRef { exn: found.reg })?;
                 self.set_unreachable();
             }
             Instr::Block(block_type) => {
-                self.finish_block(RegTerm::Fallthrough);
+                self.finish_block(RegTerm::Fallthrough)?;
                 self.enter_frame(offset, "block", FrameKind::Block, block_type)?;
             }
             Instr::Loop(block_type) => {
-                self.finish_block(RegTerm::Fallthrough);
+                self.finish_block(RegTerm::Fallthrough)?;
                 // The loop body starts a fresh block; branches to the loop
                 // label jump back to it (back-edge), so its index is known
                 // immediately and needs no back-patching.
@@ -2694,7 +3168,7 @@ impl<'b> FuncBuilder<'b> {
                     // Back-patched at `else` (else-body start) or at `end`
                     // (no else: the continuation).
                     else_block: 0,
-                });
+                })?;
                 self.enter_frame(
                     offset,
                     "if",
@@ -2708,7 +3182,7 @@ impl<'b> FuncBuilder<'b> {
             Instr::TryTable(try_table) => {
                 // The body is a fresh block region: its first block is the
                 // next one to be created (after the tip block is finished).
-                self.finish_block(RegTerm::Fallthrough);
+                self.finish_block(RegTerm::Fallthrough)?;
                 let first_block = self.blocks.len() as u32;
                 let region_idx = self.regions.len();
                 self.regions.push(ProtectedRegion {
@@ -2724,7 +3198,7 @@ impl<'b> FuncBuilder<'b> {
                     // A loop label's branch convention delivers into the
                     // loop's parameter registers and targets its header,
                     // both known now (the loop frame is already on the stack).
-                    let clause = match self.branch_types_at(frame_pos).1 {
+                    let clause = match self.branch_types_at_fallible(offset, frame_pos)?.1 {
                         Some(loop_target) => RegCatch {
                             tag: catch.tag,
                             target_block: loop_target.header,
@@ -2787,13 +3261,13 @@ impl<'b> FuncBuilder<'b> {
                 self.pending_branches.push(PendingBranch {
                     block: br_block_idx,
                     frame_pos,
-                    values: values.clone(),
+                    values: self.fallible_copy(offset, "branch values", &values)?,
                     slot: BranchSlot::Single,
                 });
                 self.finish_block(RegTerm::Br {
                     target_block: 0,
                     values,
-                });
+                })?;
                 // The else-body starts at the next block.
                 let else_start = self.blocks.len() as u32;
                 if let RegTerm::IfFork { else_block, .. } = &mut self.blocks[cond_block].term {
@@ -2826,7 +3300,7 @@ impl<'b> FuncBuilder<'b> {
                     // the function frame (`br 0`) to a continuation block
                     // that returns — delivering their values into the
                     // return registers via copies, like any other frame.
-                    self.finish_block(RegTerm::Fallthrough);
+                    self.finish_block(RegTerm::Fallthrough)?;
                     let continuation_idx = self.blocks.len() as u32;
                     for pending in core::mem::take(&mut self.pending_branches) {
                         match &mut self.blocks[pending.block].term {
@@ -2865,41 +3339,66 @@ impl<'b> FuncBuilder<'b> {
                     }
                     // Catch clauses targeting the function frame land on the
                     // return continuation with the function's result regs.
-                    let mut remaining_catches = Vec::with_capacity(self.pending_catches.len());
-                    for pending in core::mem::take(&mut self.pending_catches) {
-                        if pending.frame_pos != 0 {
-                            remaining_catches.push(pending);
-                            continue;
+                    // Process the matching clauses in place and then compact
+                    // the vector in place: a replacement `Vec` sized by
+                    // `pending_catches.len()` was an infallible,
+                    // module-scaled allocation that could abort on allocator
+                    // refusal.
+                    let func_idx = self.func_idx;
+                    {
+                        let regions = &mut self.regions;
+                        for pending in &self.pending_catches {
+                            if pending.frame_pos != 0 {
+                                continue;
+                            }
+                            debug_assert_eq!(
+                                pending.value_types.len(),
+                                values.len(),
+                                "catch landing arity must match the function result registers"
+                            );
+                            let dst_regs = fallible_copy_slice(
+                                func_idx,
+                                offset,
+                                "catch landing registers",
+                                &values,
+                            )?;
+                            let clause =
+                                &mut regions[pending.region_idx].catches[pending.clause_idx];
+                            clause.target_block = continuation_idx;
+                            clause.dst_regs = dst_regs;
                         }
-                        debug_assert_eq!(
-                            pending.value_types.len(),
-                            values.len(),
-                            "catch landing arity must match the function result registers"
-                        );
-                        let clause =
-                            &mut self.regions[pending.region_idx].catches[pending.clause_idx];
-                        clause.target_block = continuation_idx;
-                        clause.dst_regs = values.clone();
                     }
-                    self.pending_catches = remaining_catches;
-                    self.finish_block(RegTerm::Return { values });
+                    self.pending_catches
+                        .retain(|pending| pending.frame_pos != 0);
+                    self.finish_block(RegTerm::Return { values })?;
                     return Ok(true);
                 }
                 // Pop results matching this control frame's expected types.
                 // The frame must still be on the stack while they are
                 // popped: pops are frame-aware (entry height and
-                // polymorphic-stack state).
-                let result_types = self
-                    .label_stack
-                    .last()
-                    .ok_or(LowerError {
+                // polymorphic-stack state). Move the frame's result types out
+                // (no ownership copy — the previous `result_types.clone()`
+                // scaled with result arity and terminated on allocator
+                // refusal); the frame is popped immediately below, so nothing
+                // else reads them.
+                if self.label_stack.last().is_none() {
+                    return Err(LowerError {
                         offset,
                         function: Some(self.func_idx),
                         kind: LowerErrorKind::MissingFunctionEnd,
-                    })?
-                    .result_types
-                    .clone();
-                let mut values = Vec::with_capacity(result_types.len());
+                    });
+                }
+                let result_types = core::mem::take(
+                    &mut self
+                        .label_stack
+                        .last_mut()
+                        .expect("frame presence checked above")
+                        .result_types,
+                );
+                let mut values: Vec<Reg> = Vec::new();
+                values
+                    .try_reserve(result_types.len())
+                    .map_err(|_| self.resource_error(offset, "block result registers"))?;
                 for &expected in result_types.iter().rev() {
                     let found = self.pop_expect(offset, "end", expected)?;
                     values.push(found.reg);
@@ -2912,11 +3411,14 @@ impl<'b> FuncBuilder<'b> {
                 // Reset the operand stack to the frame entry height, then push
                 // the block's result values back onto the outer stack.
                 self.stack.truncate(frame.height);
-                for (&reg, &ty) in values.iter().zip(frame.result_types.iter()) {
+                if self.stack.try_reserve(result_types.len()).is_err() {
+                    return Err(self.resource_error(offset, "block result operands"));
+                }
+                for (&reg, &ty) in values.iter().zip(result_types.iter()) {
                     self.stack.push(RegValue { reg, ty });
                 }
                 // Finish the body block.
-                self.finish_block(RegTerm::Fallthrough);
+                self.finish_block(RegTerm::Fallthrough)?;
                 // The continuation block will be at self.blocks.len().
                 // For an `if` without `else` that takes parameters, the
                 // IfFork's else edge is the identity: deliver the params into
@@ -2960,56 +3462,63 @@ impl<'b> FuncBuilder<'b> {
                 // copies delivering each branch's values into the registers
                 // the continuation expects.
                 let continuation_idx = self.blocks.len() as u32;
-                let mut remaining = Vec::with_capacity(self.pending_branches.len());
-                for pending in core::mem::take(&mut self.pending_branches) {
-                    if pending.frame_pos != frame_pos {
-                        remaining.push(pending);
-                        continue;
-                    }
-                    let term = &mut self.blocks[pending.block].term;
-                    match pending.slot {
-                        BranchSlot::Single => match term {
-                            RegTerm::Br { target_block, .. }
-                            | RegTerm::BrIf { target_block, .. }
-                            | RegTerm::BrIfNull { target_block, .. }
-                            | RegTerm::BrIfNonNull { target_block, .. } => {
-                                *target_block = continuation_idx;
-                            }
-                            other => unreachable!(
-                                "pending branch block has non-branch terminator: {other:?}"
-                            ),
-                        },
-                        BranchSlot::Table(slot) => match term {
-                            RegTerm::BrTable {
-                                targets, default, ..
-                            } => {
-                                if slot < targets.len() {
-                                    targets[slot] = continuation_idx;
-                                } else {
-                                    *default = continuation_idx;
+                // Process the branches targeting this frame in place and then
+                // compact the vector in place, dropping the processed
+                // branches. A replacement `Vec` sized by
+                // `pending_branches.len()` was an infallible, module-scaled
+                // allocation that could abort on allocator refusal.
+                {
+                    let blocks = &mut self.blocks;
+                    for pending in &self.pending_branches {
+                        if pending.frame_pos != frame_pos {
+                            continue;
+                        }
+                        let term = &mut blocks[pending.block].term;
+                        match pending.slot {
+                            BranchSlot::Single => match term {
+                                RegTerm::Br { target_block, .. }
+                                | RegTerm::BrIf { target_block, .. }
+                                | RegTerm::BrIfNull { target_block, .. }
+                                | RegTerm::BrIfNonNull { target_block, .. } => {
+                                    *target_block = continuation_idx;
                                 }
+                                other => unreachable!(
+                                    "pending branch block has non-branch terminator: {other:?}"
+                                ),
+                            },
+                            BranchSlot::Table(slot) => match term {
+                                RegTerm::BrTable {
+                                    targets, default, ..
+                                } => {
+                                    if slot < targets.len() {
+                                        targets[slot] = continuation_idx;
+                                    } else {
+                                        *default = continuation_idx;
+                                    }
+                                }
+                                other => unreachable!(
+                                    "pending branch block has non-branch terminator: {other:?}"
+                                ),
+                            },
+                        }
+                        // Copies from every targeted frame write disjoint
+                        // register sets from the same sources, so appending
+                        // per-frame copies to one block is sound.
+                        for (dst, src) in values.iter().zip(pending.values.iter()) {
+                            if dst != src {
+                                blocks[pending.block].instrs.push(RegInstr {
+                                    offset,
+                                    op: RegOp::Copy {
+                                        dst: *dst,
+                                        src: *src,
+                                    },
+                                });
                             }
-                            other => unreachable!(
-                                "pending branch block has non-branch terminator: {other:?}"
-                            ),
-                        },
-                    }
-                    // Copies from every targeted frame write disjoint
-                    // register sets from the same sources, so appending
-                    // per-frame copies to one block is sound.
-                    for (dst, src) in values.iter().zip(pending.values.iter()) {
-                        if dst != src {
-                            self.blocks[pending.block].instrs.push(RegInstr {
-                                offset,
-                                op: RegOp::Copy {
-                                    dst: *dst,
-                                    src: *src,
-                                },
-                            });
                         }
                     }
                 }
-                self.pending_branches = remaining;
+                self.pending_branches
+                    .retain(|pending| pending.frame_pos != frame_pos);
                 // A `try_table` frame's region ends at the continuation
                 // (exclusive): its body's blocks are exactly those from
                 // `first_block` up to the continuation.
@@ -3019,22 +3528,35 @@ impl<'b> FuncBuilder<'b> {
                 // Back-patch catch clauses targeting this frame: the landing
                 // writes directly into the continuation's result registers
                 // (there is no branching block, so no copies are emitted).
-                let mut remaining_catches = Vec::with_capacity(self.pending_catches.len());
-                for pending in core::mem::take(&mut self.pending_catches) {
-                    if pending.frame_pos != frame_pos {
-                        remaining_catches.push(pending);
-                        continue;
+                // Process the catch clauses targeting this frame in place and
+                // then compact the vector in place: a replacement `Vec` sized
+                // by `pending_catches.len()` was an infallible, module-scaled
+                // allocation that could abort on allocator refusal.
+                let func_idx = self.func_idx;
+                {
+                    let regions = &mut self.regions;
+                    for pending in &self.pending_catches {
+                        if pending.frame_pos != frame_pos {
+                            continue;
+                        }
+                        debug_assert_eq!(
+                            pending.value_types.len(),
+                            values.len(),
+                            "catch landing arity must match the target frame's registers"
+                        );
+                        let dst_regs = fallible_copy_slice(
+                            func_idx,
+                            offset,
+                            "catch landing registers",
+                            &values,
+                        )?;
+                        let clause = &mut regions[pending.region_idx].catches[pending.clause_idx];
+                        clause.target_block = continuation_idx;
+                        clause.dst_regs = dst_regs;
                     }
-                    debug_assert_eq!(
-                        pending.value_types.len(),
-                        values.len(),
-                        "catch landing arity must match the target frame's registers"
-                    );
-                    let clause = &mut self.regions[pending.region_idx].catches[pending.clause_idx];
-                    clause.target_block = continuation_idx;
-                    clause.dst_regs = values.clone();
                 }
-                self.pending_catches = remaining_catches;
+                self.pending_catches
+                    .retain(|pending| pending.frame_pos != frame_pos);
                 // For an `if` without `else`, patch the IfFork's else edge to
                 // the identity trampoline (when params exist) and retarget
                 // the then-body's end to branch over it to the continuation.
@@ -3058,14 +3580,15 @@ impl<'b> FuncBuilder<'b> {
                 }
                 // Start a new continuation block (content will be filled by
                 // subsequent instructions).
-                self.finish_block(RegTerm::Fallthrough);
+                self.finish_block(RegTerm::Fallthrough)?;
             }
             Instr::Br(label) => {
                 let frame_pos = self.label_position(offset, label)?;
                 // Branches to a loop label jump to the header carrying the
                 // loop's parameters; all other branches jump to the frame's
                 // continuation carrying its results.
-                let (branch_types, loop_header) = self.branch_types_at(frame_pos);
+                let (branch_types, loop_header) =
+                    self.branch_types_at_fallible(offset, frame_pos)?;
                 let mut values = Vec::with_capacity(branch_types.len());
                 for &expected in branch_types.iter().rev() {
                     let found = self.pop_expect(offset, "br", expected)?;
@@ -3079,26 +3602,27 @@ impl<'b> FuncBuilder<'b> {
                     self.finish_block(RegTerm::Br {
                         target_block: loop_target.header,
                         values,
-                    });
+                    })?;
                 } else {
                     let br_block_idx = self.blocks.len();
                     self.pending_branches.push(PendingBranch {
                         block: br_block_idx,
                         frame_pos,
-                        values: values.clone(),
+                        values: self.fallible_copy(offset, "branch values", &values)?,
                         slot: BranchSlot::Single,
                     });
                     self.finish_block(RegTerm::Br {
                         target_block: 0,
                         values,
-                    });
+                    })?;
                 }
                 self.set_unreachable();
             }
             Instr::BrIf(label) => {
                 let cond = self.pop_expect(offset, "br_if", ValType::Num(NumType::I32))?;
                 let frame_pos = self.label_position(offset, label)?;
-                let (branch_types, loop_header) = self.branch_types_at(frame_pos);
+                let (branch_types, loop_header) =
+                    self.branch_types_at_fallible(offset, frame_pos)?;
                 let mut values = Vec::with_capacity(branch_types.len());
                 for &expected in branch_types.iter().rev() {
                     let found = self.pop_expect(offset, "br_if", expected)?;
@@ -3118,7 +3642,7 @@ impl<'b> FuncBuilder<'b> {
                         block: br_block_idx,
                         slot: BranchSlot::Single,
                         param_regs: loop_target.param_regs,
-                        values: values.clone(),
+                        values: self.fallible_copy(offset, "branch values", &values)?,
                         header: loop_target.header,
                         offset,
                     });
@@ -3126,20 +3650,20 @@ impl<'b> FuncBuilder<'b> {
                         cond: cond.reg,
                         target_block: 0,
                         values,
-                    });
+                    })?;
                 } else {
                     let br_block_idx = self.blocks.len();
                     self.pending_branches.push(PendingBranch {
                         block: br_block_idx,
                         frame_pos,
-                        values: values.clone(),
+                        values: self.fallible_copy(offset, "branch values", &values)?,
                         slot: BranchSlot::Single,
                     });
                     self.finish_block(RegTerm::BrIf {
                         cond: cond.reg,
                         target_block: 0,
                         values,
-                    });
+                    })?;
                 }
             }
             Instr::BrTable { targets, default } => {
@@ -3147,7 +3671,7 @@ impl<'b> FuncBuilder<'b> {
                 // All targets must agree on branch arity and types (the
                 // validator guarantees this); pop using the default target.
                 let default_pos = self.label_position(offset, default)?;
-                let (branch_types, _) = self.branch_types_at(default_pos);
+                let (branch_types, _) = self.branch_types_at_fallible(offset, default_pos)?;
                 let mut values = Vec::with_capacity(branch_types.len());
                 for &expected in branch_types.iter().rev() {
                     let found = self.pop_expect(offset, "br_table", expected)?;
@@ -3161,7 +3685,7 @@ impl<'b> FuncBuilder<'b> {
                 let mut target_blocks = Vec::with_capacity(targets.len() + 1);
                 for (slot, target) in targets.iter().chain(core::iter::once(&default)).enumerate() {
                     let frame_pos = self.label_position(offset, *target)?;
-                    let (_, loop_header) = self.branch_types_at(frame_pos);
+                    let (_, loop_header) = self.branch_types_at_fallible(offset, frame_pos)?;
                     match loop_header {
                         Some(loop_target) => {
                             target_blocks.push(0);
@@ -3169,7 +3693,7 @@ impl<'b> FuncBuilder<'b> {
                                 block: br_block_idx,
                                 slot: BranchSlot::Table(slot),
                                 param_regs: loop_target.param_regs,
-                                values: values.clone(),
+                                values: self.fallible_copy(offset, "branch values", &values)?,
                                 header: loop_target.header,
                                 offset,
                             });
@@ -3179,7 +3703,7 @@ impl<'b> FuncBuilder<'b> {
                             self.pending_branches.push(PendingBranch {
                                 block: br_block_idx,
                                 frame_pos,
-                                values: values.clone(),
+                                values: self.fallible_copy(offset, "branch values", &values)?,
                                 slot: BranchSlot::Table(slot),
                             });
                         }
@@ -3191,13 +3715,14 @@ impl<'b> FuncBuilder<'b> {
                     targets: target_blocks,
                     default: default_block,
                     values,
-                });
+                })?;
                 self.set_unreachable();
             }
             Instr::BrOnNull(label) => {
                 let value = self.pop_any(offset, "br_on_null")?;
                 let frame_pos = self.label_position(offset, label)?;
-                let (branch_types, loop_header) = self.branch_types_at(frame_pos);
+                let (branch_types, loop_header) =
+                    self.branch_types_at_fallible(offset, frame_pos)?;
                 let mut values = Vec::with_capacity(branch_types.len());
                 for &expected in branch_types.iter().rev() {
                     let found = self.pop_expect(offset, "br_on_null", expected)?;
@@ -3217,12 +3742,13 @@ impl<'b> FuncBuilder<'b> {
                     values,
                     value.reg,
                     RefBranchKind::OnNull,
-                );
+                )?;
             }
             Instr::BrOnNonNull(label) => {
                 let value = self.pop_any(offset, "br_on_non_null")?;
                 let frame_pos = self.label_position(offset, label)?;
-                let (branch_types, loop_header) = self.branch_types_at(frame_pos);
+                let (branch_types, loop_header) =
+                    self.branch_types_at_fallible(offset, frame_pos)?;
                 // The label's last value is the forwarded non-null ref; only
                 // the leading types come from the stack.
                 let leading_types = match branch_types.split_last() {
@@ -3248,11 +3774,11 @@ impl<'b> FuncBuilder<'b> {
                     values,
                     value.reg,
                     RefBranchKind::OnNonNull,
-                );
+                )?;
             }
             Instr::Return => {
                 let values = self.pop_results(offset)?;
-                self.finish_block(RegTerm::Return { values });
+                self.finish_block(RegTerm::Return { values })?;
                 // Code after `return` is unreachable, but lowering continues:
                 // instructions up to the function's final `end` must still be
                 // processed (under polymorphic stack discipline).
@@ -3272,14 +3798,14 @@ impl<'b> FuncBuilder<'b> {
                     args.push(found.reg);
                 }
                 args.reverse();
-                self.finish_block(RegTerm::TailCall { func, args });
+                self.finish_block(RegTerm::TailCall { func, args })?;
                 self.set_unreachable();
             }
             Instr::ReturnCallIndirect {
                 type_idx,
                 table_idx,
             } => {
-                let Some(ty) = self.tables.types.get(type_idx.0 as usize) else {
+                let Some(ty) = self.tables.func_type(type_idx.0 as usize) else {
                     return Err(LowerError {
                         offset,
                         function: Some(self.func_idx),
@@ -3304,11 +3830,11 @@ impl<'b> FuncBuilder<'b> {
                     table: table_idx,
                     index: index.reg,
                     args,
-                });
+                })?;
                 self.set_unreachable();
             }
             Instr::ReturnCallRef(type_idx) => {
-                let Some(ty) = self.tables.types.get(type_idx.0 as usize) else {
+                let Some(ty) = self.tables.func_type(type_idx.0 as usize) else {
                     return Err(LowerError {
                         offset,
                         function: Some(self.func_idx),
@@ -3329,11 +3855,11 @@ impl<'b> FuncBuilder<'b> {
                     type_idx,
                     func: func.reg,
                     args,
-                });
+                })?;
                 self.set_unreachable();
             }
             Instr::CallRef(type_idx) => {
-                let Some(ty) = self.tables.types.get(type_idx.0 as usize) else {
+                let Some(ty) = self.tables.func_type(type_idx.0 as usize) else {
                     return Err(LowerError {
                         offset,
                         function: Some(self.func_idx),
@@ -3489,7 +4015,7 @@ impl<'b> FuncBuilder<'b> {
                 type_idx,
                 table_idx,
             } => {
-                let Some(ty) = self.tables.types.get(type_idx.0 as usize) else {
+                let Some(ty) = self.tables.func_type(type_idx.0 as usize) else {
                     return Err(LowerError {
                         offset,
                         function: Some(self.func_idx),
@@ -3685,6 +4211,420 @@ impl<'b> FuncBuilder<'b> {
                 self.emit(
                     offset,
                     RegOp::RefAsNonNull {
+                        dst,
+                        value: value.reg,
+                    },
+                );
+            }
+            Instr::StructNew(type_idx) => {
+                let field_types = self.gc_struct_field_types(offset, type_idx)?;
+                let mut fields = Vec::with_capacity(field_types.len());
+                for &field_ty in field_types.iter().rev() {
+                    fields.push(self.pop_expect(offset, "struct.new", field_ty)?.reg);
+                }
+                fields.reverse();
+                let ty = gc_ref_type(type_idx);
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(
+                    offset,
+                    RegOp::StructNew {
+                        dst,
+                        type_idx,
+                        fields,
+                    },
+                );
+            }
+            Instr::StructNewDefault(type_idx) => {
+                let _ = self.gc_struct_field_types(offset, type_idx)?;
+                let ty = gc_ref_type(type_idx);
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(offset, RegOp::StructNewDefault { dst, type_idx });
+            }
+            Instr::StructGet { type_idx, field } => {
+                self.lower_gc_field_get(offset, type_idx, field, GcExt::None)?;
+            }
+            Instr::StructGetS { type_idx, field } => {
+                self.lower_gc_field_get(offset, type_idx, field, GcExt::S)?;
+            }
+            Instr::StructGetU { type_idx, field } => {
+                self.lower_gc_field_get(offset, type_idx, field, GcExt::U)?;
+            }
+            Instr::StructSet { type_idx, field } => {
+                let field_ty = self.gc_struct_field(offset, type_idx, field)?;
+                let value = self.pop_expect(offset, "struct.set", field_ty)?;
+                let object =
+                    self.pop_expect(offset, "struct.set", gc_ref_type_nullable(type_idx))?;
+                self.emit(
+                    offset,
+                    RegOp::StructSet {
+                        type_idx,
+                        field,
+                        object: object.reg,
+                        value: value.reg,
+                    },
+                );
+            }
+            Instr::ArrayNew(type_idx) => {
+                let field_ty = self.gc_array_field(offset, type_idx)?;
+                let len = self.pop_expect(offset, "array.new", ValType::Num(NumType::I32))?;
+                let value = self.pop_expect(offset, "array.new", field_ty)?;
+                let ty = gc_ref_type(type_idx);
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(
+                    offset,
+                    RegOp::ArrayNew {
+                        dst,
+                        type_idx,
+                        len: len.reg,
+                        value: value.reg,
+                    },
+                );
+            }
+            Instr::ArrayNewDefault(type_idx) => {
+                let _ = self.gc_array_field(offset, type_idx)?;
+                let len =
+                    self.pop_expect(offset, "array.new_default", ValType::Num(NumType::I32))?;
+                let ty = gc_ref_type(type_idx);
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(
+                    offset,
+                    RegOp::ArrayNewDefault {
+                        dst,
+                        type_idx,
+                        len: len.reg,
+                    },
+                );
+            }
+            Instr::ArrayNewFixed { type_idx, count } => {
+                let field_ty = self.gc_array_field(offset, type_idx)?;
+                // Mirror the validator's polymorphic-stack rule: in an
+                // unreachable frame at the frame boundary, `count` operands
+                // are conceptually present without existing. Do NOT
+                // materialize `count` registers (count is a u32 LEB, up to
+                // u32::MAX) — a huge count in dead code must lower without
+                // allocating. The emitted term never executes because the
+                // surrounding code is unreachable.
+                let mut values = Vec::new();
+                for _ in 0..count {
+                    if self.at_frame_boundary() && self.current_frame_unreachable() {
+                        break;
+                    }
+                    values.push(self.pop_expect(offset, "array.new_fixed", field_ty)?.reg);
+                }
+                values.reverse();
+                let ty = gc_ref_type(type_idx);
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(
+                    offset,
+                    RegOp::ArrayNewFixed {
+                        dst,
+                        type_idx,
+                        values,
+                    },
+                );
+            }
+            Instr::ArrayNewData { type_idx, data } => {
+                let _ = self.gc_array_field(offset, type_idx)?;
+                let len = self.pop_expect(offset, "array.new_data", ValType::Num(NumType::I32))?;
+                let src = self.pop_expect(offset, "array.new_data", ValType::Num(NumType::I32))?;
+                let ty = gc_ref_type(type_idx);
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(
+                    offset,
+                    RegOp::ArrayNewData {
+                        dst,
+                        type_idx,
+                        data,
+                        src: src.reg,
+                        len: len.reg,
+                    },
+                );
+            }
+            Instr::ArrayNewElem { type_idx, elem } => {
+                let _ = self.gc_array_field(offset, type_idx)?;
+                let len = self.pop_expect(offset, "array.new_elem", ValType::Num(NumType::I32))?;
+                let src = self.pop_expect(offset, "array.new_elem", ValType::Num(NumType::I32))?;
+                let ty = gc_ref_type(type_idx);
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(
+                    offset,
+                    RegOp::ArrayNewElem {
+                        dst,
+                        type_idx,
+                        elem,
+                        src: src.reg,
+                        len: len.reg,
+                    },
+                );
+            }
+            Instr::ArrayGet(type_idx) => {
+                self.lower_gc_array_get(offset, type_idx, GcExt::None)?;
+            }
+            Instr::ArrayGetS(type_idx) => {
+                self.lower_gc_array_get(offset, type_idx, GcExt::S)?;
+            }
+            Instr::ArrayGetU(type_idx) => {
+                self.lower_gc_array_get(offset, type_idx, GcExt::U)?;
+            }
+            Instr::ArraySet(type_idx) => {
+                let field_ty = self.gc_array_field(offset, type_idx)?;
+                let value = self.pop_expect(offset, "array.set", field_ty)?;
+                let index = self.pop_expect(offset, "array.set", ValType::Num(NumType::I32))?;
+                let array = self.pop_expect(offset, "array.set", gc_ref_type_nullable(type_idx))?;
+                self.emit(
+                    offset,
+                    RegOp::ArraySet {
+                        type_idx,
+                        array: array.reg,
+                        index: index.reg,
+                        value: value.reg,
+                    },
+                );
+            }
+            Instr::ArrayLen => {
+                let array = self.pop_any(offset, "array.len")?;
+                let ty = ValType::Num(NumType::I32);
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(
+                    offset,
+                    RegOp::ArrayLen {
+                        dst,
+                        array: array.reg,
+                    },
+                );
+            }
+            Instr::ArrayFill(type_idx) => {
+                let field_ty = self.gc_array_field(offset, type_idx)?;
+                let len = self.pop_expect(offset, "array.fill", ValType::Num(NumType::I32))?;
+                let value = self.pop_expect(offset, "array.fill", field_ty)?;
+                let index = self.pop_expect(offset, "array.fill", ValType::Num(NumType::I32))?;
+                let array =
+                    self.pop_expect(offset, "array.fill", gc_ref_type_nullable(type_idx))?;
+                self.emit(
+                    offset,
+                    RegOp::ArrayFill {
+                        type_idx,
+                        array: array.reg,
+                        index: index.reg,
+                        value: value.reg,
+                        len: len.reg,
+                    },
+                );
+            }
+            Instr::ArrayCopy { dst, src } => {
+                // dst_type and src_type must share storage; the validator
+                // proved it. Lowering only needs the reference types.
+                let dst_field = self.gc_array_field(offset, dst)?;
+                let _ = self.gc_array_field(offset, src)?;
+                let len = self.pop_expect(offset, "array.copy", ValType::Num(NumType::I32))?;
+                let src_off = self.pop_expect(offset, "array.copy", ValType::Num(NumType::I32))?;
+                let src_ref = self.pop_expect(offset, "array.copy", gc_ref_type_nullable(src))?;
+                let dst_off = self.pop_expect(offset, "array.copy", ValType::Num(NumType::I32))?;
+                let dst_ref = self.pop_expect(offset, "array.copy", gc_ref_type_nullable(dst))?;
+                let _ = dst_field;
+                self.emit(
+                    offset,
+                    RegOp::ArrayCopy {
+                        dst_type: dst,
+                        src_type: src,
+                        dst: dst_ref.reg,
+                        dst_off: dst_off.reg,
+                        src: src_ref.reg,
+                        src_off: src_off.reg,
+                        len: len.reg,
+                    },
+                );
+            }
+            Instr::ArrayInitData { type_idx, data } => {
+                let _ = self.gc_array_field(offset, type_idx)?;
+                let len = self.pop_expect(offset, "array.init_data", ValType::Num(NumType::I32))?;
+                let src_off =
+                    self.pop_expect(offset, "array.init_data", ValType::Num(NumType::I32))?;
+                let dst_off =
+                    self.pop_expect(offset, "array.init_data", ValType::Num(NumType::I32))?;
+                let array =
+                    self.pop_expect(offset, "array.init_data", gc_ref_type_nullable(type_idx))?;
+                self.emit(
+                    offset,
+                    RegOp::ArrayInitData {
+                        type_idx,
+                        data,
+                        array: array.reg,
+                        dst_off: dst_off.reg,
+                        src_off: src_off.reg,
+                        len: len.reg,
+                    },
+                );
+            }
+            Instr::ArrayInitElem { type_idx, elem } => {
+                let _ = self.gc_array_field(offset, type_idx)?;
+                let len = self.pop_expect(offset, "array.init_elem", ValType::Num(NumType::I32))?;
+                let src_off =
+                    self.pop_expect(offset, "array.init_elem", ValType::Num(NumType::I32))?;
+                let dst_off =
+                    self.pop_expect(offset, "array.init_elem", ValType::Num(NumType::I32))?;
+                let array =
+                    self.pop_expect(offset, "array.init_elem", gc_ref_type_nullable(type_idx))?;
+                self.emit(
+                    offset,
+                    RegOp::ArrayInitElem {
+                        type_idx,
+                        elem,
+                        array: array.reg,
+                        dst_off: dst_off.reg,
+                        src_off: src_off.reg,
+                        len: len.reg,
+                    },
+                );
+            }
+            Instr::RefI31 => {
+                let value = self.pop_expect(offset, "ref.i31", ValType::Num(NumType::I32))?;
+                let ty = ValType::Ref(crate::types::RefType::from_parts(false, HeapType::I31));
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(
+                    offset,
+                    RegOp::RefI31 {
+                        dst,
+                        value: value.reg,
+                    },
+                );
+            }
+            Instr::I31GetS => {
+                let value = self.pop_expect(
+                    offset,
+                    "i31.get_s",
+                    ValType::Ref(crate::types::RefType::from_parts(true, HeapType::I31)),
+                )?;
+                let ty = ValType::Num(NumType::I32);
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(
+                    offset,
+                    RegOp::I31Get {
+                        dst,
+                        value: value.reg,
+                        signed: true,
+                    },
+                );
+            }
+            Instr::I31GetU => {
+                let value = self.pop_expect(
+                    offset,
+                    "i31.get_u",
+                    ValType::Ref(crate::types::RefType::from_parts(true, HeapType::I31)),
+                )?;
+                let ty = ValType::Num(NumType::I32);
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(
+                    offset,
+                    RegOp::I31Get {
+                        dst,
+                        value: value.reg,
+                        signed: false,
+                    },
+                );
+            }
+            Instr::RefTest { nullable, ht } => {
+                let operand = self.ref_operand_type(ht);
+                let value = self.pop_expect(offset, "ref.test", operand)?;
+                let ty = ValType::Num(NumType::I32);
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(
+                    offset,
+                    RegOp::RefTest {
+                        dst,
+                        value: value.reg,
+                        nullable,
+                        ht,
+                    },
+                );
+            }
+            Instr::RefCast { nullable, ht } => {
+                let operand = self.ref_operand_type(ht);
+                let value = self.pop_expect(offset, "ref.cast", operand)?;
+                let ty = ValType::Ref(crate::types::RefType::from_parts(nullable, ht));
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(
+                    offset,
+                    RegOp::RefCast {
+                        dst,
+                        value: value.reg,
+                        nullable,
+                        ht,
+                    },
+                );
+            }
+            Instr::RefEq => {
+                let eq = ValType::Ref(crate::types::RefType::from_parts(true, HeapType::Eq));
+                let rhs = self.pop_expect(offset, "ref.eq", eq)?;
+                let lhs = self.pop_expect(offset, "ref.eq", eq)?;
+                let ty = ValType::Num(NumType::I32);
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(
+                    offset,
+                    RegOp::RefEq {
+                        dst,
+                        lhs: lhs.reg,
+                        rhs: rhs.reg,
+                    },
+                );
+            }
+            Instr::BrOnCast {
+                fail,
+                src,
+                tgt,
+                label,
+            } => {
+                self.lower_br_on_cast(offset, fail, src, tgt, label)?;
+            }
+            Instr::AnyConvertExtern => {
+                let operand =
+                    ValType::Ref(crate::types::RefType::from_parts(true, HeapType::Extern));
+                let value = self.pop_expect(offset, "any.convert_extern", operand)?;
+                let nullable = match value.ty {
+                    ValType::Ref(ref_type) => ref_type.is_nullable(),
+                    _ => true,
+                };
+                let ty = ValType::Ref(crate::types::RefType::from_parts(nullable, HeapType::Any));
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(
+                    offset,
+                    RegOp::AnyConvertExtern {
+                        dst,
+                        value: value.reg,
+                    },
+                );
+            }
+            Instr::ExternConvertAny => {
+                let operand = ValType::Ref(crate::types::RefType::from_parts(true, HeapType::Any));
+                let value = self.pop_expect(offset, "extern.convert_any", operand)?;
+                let nullable = match value.ty {
+                    ValType::Ref(ref_type) => ref_type.is_nullable(),
+                    _ => true,
+                };
+                let ty = ValType::Ref(crate::types::RefType::from_parts(
+                    nullable,
+                    HeapType::Extern,
+                ));
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(
+                    offset,
+                    RegOp::ExternConvertAny {
                         dst,
                         value: value.reg,
                     },
@@ -4355,6 +5295,135 @@ impl<'b> FuncBuilder<'b> {
         self.current_instrs.push(RegInstr { offset, op });
     }
 
+    /// Resolve a struct type's unpacked field value types in declaration
+    /// order. Lowering runs on validated modules, so a miss is a defensive
+    /// `InvalidType` (matching the validator's `UnknownStruct`).
+    fn gc_struct_field_types(
+        &self,
+        offset: ByteOffset,
+        type_idx: TypeIdx,
+    ) -> Result<Vec<ValType>, LowerError> {
+        match self
+            .tables
+            .types
+            .get(type_idx.0 as usize)
+            .map(|sub| &sub.comp)
+        {
+            Some(crate::types::CompType::Struct(fields)) => Ok(fields
+                .iter()
+                .map(|field| gc_unpacked(field.storage))
+                .collect()),
+            _ => Err(LowerError {
+                offset,
+                function: Some(self.func_idx),
+                kind: LowerErrorKind::InvalidType {
+                    type_idx: type_idx.0,
+                },
+            }),
+        }
+    }
+
+    fn gc_struct_field(
+        &self,
+        offset: ByteOffset,
+        type_idx: TypeIdx,
+        field: u32,
+    ) -> Result<ValType, LowerError> {
+        match self
+            .tables
+            .types
+            .get(type_idx.0 as usize)
+            .map(|sub| &sub.comp)
+        {
+            Some(crate::types::CompType::Struct(fields)) => fields
+                .get(field as usize)
+                .map(|field| gc_unpacked(field.storage))
+                .ok_or(LowerError {
+                    offset,
+                    function: Some(self.func_idx),
+                    kind: LowerErrorKind::InvalidType {
+                        type_idx: type_idx.0,
+                    },
+                }),
+            _ => Err(LowerError {
+                offset,
+                function: Some(self.func_idx),
+                kind: LowerErrorKind::InvalidType {
+                    type_idx: type_idx.0,
+                },
+            }),
+        }
+    }
+
+    fn gc_array_field(&self, offset: ByteOffset, type_idx: TypeIdx) -> Result<ValType, LowerError> {
+        match self
+            .tables
+            .types
+            .get(type_idx.0 as usize)
+            .map(|sub| &sub.comp)
+        {
+            Some(crate::types::CompType::Array(field)) => Ok(gc_unpacked(field.storage)),
+            _ => Err(LowerError {
+                offset,
+                function: Some(self.func_idx),
+                kind: LowerErrorKind::InvalidType {
+                    type_idx: type_idx.0,
+                },
+            }),
+        }
+    }
+
+    fn lower_gc_field_get(
+        &mut self,
+        offset: ByteOffset,
+        type_idx: TypeIdx,
+        field: u32,
+        ext: GcExt,
+    ) -> Result<(), LowerError> {
+        let field_ty = self.gc_struct_field(offset, type_idx, field)?;
+        let object = self.pop_expect(offset, "struct.get", gc_ref_type_nullable(type_idx))?;
+        let ty = field_ty;
+        let dst = self.alloc_reg(ty);
+        self.stack.push(RegValue { reg: dst, ty });
+        self.emit(
+            offset,
+            RegOp::StructGet {
+                dst,
+                type_idx,
+                field,
+                ext,
+                object: object.reg,
+            },
+        );
+        let _ = object;
+        Ok(())
+    }
+
+    fn lower_gc_array_get(
+        &mut self,
+        offset: ByteOffset,
+        type_idx: TypeIdx,
+        ext: GcExt,
+    ) -> Result<(), LowerError> {
+        let field_ty = self.gc_array_field(offset, type_idx)?;
+        let index = self.pop_expect(offset, "array.get", ValType::Num(NumType::I32))?;
+        let array = self.pop_expect(offset, "array.get", gc_ref_type_nullable(type_idx))?;
+        let ty = field_ty;
+        let dst = self.alloc_reg(ty);
+        self.stack.push(RegValue { reg: dst, ty });
+        self.emit(
+            offset,
+            RegOp::ArrayGet {
+                dst,
+                type_idx,
+                array: array.reg,
+                index: index.reg,
+                ext,
+            },
+        );
+        Ok(())
+    }
+
     fn pop_any(&mut self, offset: ByteOffset, op: &'static str) -> Result<RegValue, LowerError> {
         if self.at_frame_boundary() {
             if self.current_frame_unreachable() {
@@ -4375,6 +5444,186 @@ impl<'b> FuncBuilder<'b> {
             });
         }
         Ok(self.stack.pop().expect("stack height checked"))
+    }
+
+    /// The operand type a `ref.test`/`ref.cast` reads: `(ref null top(ht))`.
+    fn ref_operand_type(&self, ht: HeapType) -> ValType {
+        ValType::Ref(crate::types::RefType::from_parts(
+            true,
+            self.top_of_heaptype(ht),
+        ))
+    }
+
+    /// `top_of_heaptype` (`valid/match.ml:25`).
+    fn top_of_heaptype(&self, ht: HeapType) -> HeapType {
+        use HeapType::*;
+        match ht {
+            Any | None | Eq | Struct | Array | I31 => Any,
+            Func | NoFunc => Func,
+            Exn | NoExn => Exn,
+            Extern | NoExtern => Extern,
+            Type(idx) => match self.tables.types.get(idx.0 as usize).map(|sub| &sub.comp) {
+                Some(crate::types::CompType::Func(_)) => Func,
+                _ => Any,
+            },
+        }
+    }
+
+    /// Lower `br_on_cast`/`br_on_cast_fail` to a `ref.test` plus a
+    /// conditional branch. The reference stays live on the operand stack on
+    /// both the taken and fall-through paths (`exec/eval.ml:246-256`).
+    fn lower_br_on_cast(
+        &mut self,
+        offset: ByteOffset,
+        fail: bool,
+        src: crate::types::RefType,
+        tgt: crate::types::RefType,
+        label: LabelIdx,
+    ) -> Result<(), LowerError> {
+        let value = self.pop_expect(offset, "br_on_cast", ValType::Ref(src))?;
+        let frame_pos = self.label_position(offset, label)?;
+        let (branch_types, loop_header) = self.branch_types_at_fallible(offset, frame_pos)?;
+        let Some((_, leading)) = branch_types.split_last() else {
+            return Err(LowerError {
+                offset,
+                function: Some(self.func_idx),
+                kind: LowerErrorKind::InvalidLabel { label: label.0 },
+            });
+        };
+        let leading = self.fallible_copy(offset, "br_on_cast leading types", leading)?;
+        let mut values: Vec<Reg> = Vec::new();
+        values
+            .try_reserve(branch_types.len())
+            .map_err(|_| self.resource_error(offset, "br_on_cast branch values"))?;
+        for &expected in leading.iter().rev() {
+            let found = self.pop_expect(offset, "br_on_cast", expected)?;
+            values.push(found.reg);
+        }
+        values.reverse();
+        // Fall-through keeps the leading values and the reference, retyped.
+        for (&reg, &ty) in values.iter().zip(leading.iter()) {
+            self.stack.push(RegValue { reg, ty });
+        }
+        let fall = if fail {
+            tgt
+        } else {
+            lower_diff_reftype(src, tgt)
+        };
+        self.stack.push(RegValue {
+            reg: value.reg,
+            ty: ValType::Ref(fall),
+        });
+
+        let test_ty = ValType::Num(NumType::I32);
+        let test_reg = self.alloc_reg(test_ty);
+        self.emit(
+            offset,
+            RegOp::RefTest {
+                dst: test_reg,
+                value: value.reg,
+                nullable: tgt.is_nullable(),
+                ht: tgt.heap_type(),
+            },
+        );
+        let cond = if fail {
+            let inverted = self.alloc_reg(test_ty);
+            self.emit(
+                offset,
+                RegOp::Unary {
+                    op: UnaryOp::I32Eqz,
+                    dst: inverted,
+                    value: test_reg,
+                },
+            );
+            inverted
+        } else {
+            test_reg
+        };
+        // The taken path forwards the reference as the label's last value.
+        values.push(value.reg);
+        let br_block_idx = self.blocks.len();
+        if let Some(loop_target) = loop_header {
+            let forwarded = self.fallible_copy(offset, "br_on_cast trampoline values", &values)?;
+            self.pending_trampolines
+                .try_reserve(1)
+                .map_err(|_| self.resource_error(offset, "br_on_cast trampolines"))?;
+            self.pending_trampolines.push(TrampolineReq {
+                block: br_block_idx,
+                slot: BranchSlot::Single,
+                param_regs: loop_target.param_regs,
+                values: forwarded,
+                header: loop_target.header,
+                offset,
+            });
+        } else {
+            let forwarded = self.fallible_copy(offset, "br_on_cast pending values", &values)?;
+            self.pending_branches
+                .try_reserve(1)
+                .map_err(|_| self.resource_error(offset, "br_on_cast pending branches"))?;
+            self.pending_branches.push(PendingBranch {
+                block: br_block_idx,
+                frame_pos,
+                values: forwarded,
+                slot: BranchSlot::Single,
+            });
+        }
+        self.finish_block(RegTerm::BrIf {
+            cond,
+            target_block: 0,
+            values,
+        })?;
+        Ok(())
+    }
+
+    /// A clean lowering resource-limit error (a refused bookkeeping
+    /// reservation), mirroring the runtime's `ResourceLimitExceeded`.
+    fn resource_error(&self, offset: ByteOffset, what: &'static str) -> LowerError {
+        LowerError {
+            offset,
+            function: Some(self.func_idx),
+            kind: LowerErrorKind::Validation(ValidationErrorKind::ResourceLimitExceeded { what }),
+        }
+    }
+
+    /// Fallibly clone `src` into a fresh `Vec` (try_reserve-then-fill).
+    fn fallible_copy<T: Clone>(
+        &self,
+        offset: ByteOffset,
+        what: &'static str,
+        src: &[T],
+    ) -> Result<Vec<T>, LowerError> {
+        fallible_copy_slice(self.func_idx, offset, what, src)
+    }
+
+    /// Fallible [`FuncBuilder::branch_types_at`] used by `br_on_cast`: every
+    /// label/loop bookkeeping clone is try-reserved before it is filled.
+    fn branch_types_at_fallible(
+        &self,
+        offset: ByteOffset,
+        frame_pos: usize,
+    ) -> Result<(Vec<ValType>, Option<LoopTarget>), LowerError> {
+        let frame = &self.label_stack[frame_pos];
+        match frame.kind {
+            FrameKind::Loop { header_block } => Ok((
+                self.fallible_copy(
+                    offset,
+                    "br_on_cast loop parameter types",
+                    &frame.param_types,
+                )?,
+                Some(LoopTarget {
+                    header: header_block,
+                    param_regs: self.fallible_copy(
+                        offset,
+                        "br_on_cast loop parameter registers",
+                        &frame.param_regs,
+                    )?,
+                }),
+            )),
+            _ => Ok((
+                self.fallible_copy(offset, "br_on_cast label types", &frame.result_types)?,
+                None,
+            )),
+        }
     }
 
     /// Whether the operand stack is exactly at the current frame's entry
@@ -4452,7 +5701,7 @@ impl<'b> FuncBuilder<'b> {
             BlockType::Empty => Ok((Vec::new(), Vec::new())),
             BlockType::Val(ty) => Ok((Vec::new(), alloc::vec![ty])),
             BlockType::TypeIdx(idx) => {
-                let ty = self.tables.types.get(idx as usize).ok_or(LowerError {
+                let ty = self.tables.func_type(idx as usize).ok_or(LowerError {
                     offset,
                     function: Some(self.func_idx),
                     kind: LowerErrorKind::InvalidType { type_idx: idx },
@@ -4475,8 +5724,7 @@ impl<'b> FuncBuilder<'b> {
             })?;
         let ty = self
             .tables
-            .types
-            .get(type_idx.0 as usize)
+            .func_type(type_idx.0 as usize)
             .ok_or(LowerError {
                 offset,
                 function: Some(self.func_idx),
@@ -4520,22 +5768,6 @@ impl<'b> FuncBuilder<'b> {
             if dst != src {
                 self.emit(offset, RegOp::Copy { dst, src });
             }
-        }
-    }
-
-    /// The value types a branch to the frame at `frame_pos` must carry, and
-    /// the loop target details when the frame is a loop.
-    fn branch_types_at(&self, frame_pos: usize) -> (Vec<ValType>, Option<LoopTarget>) {
-        let frame = &self.label_stack[frame_pos];
-        match frame.kind {
-            FrameKind::Loop { header_block } => (
-                frame.param_types.clone(),
-                Some(LoopTarget {
-                    header: header_block,
-                    param_regs: frame.param_regs.clone(),
-                }),
-            ),
-            _ => (frame.result_types.clone(), None),
         }
     }
 
@@ -5213,7 +6445,7 @@ impl<'b> FuncBuilder<'b> {
         // types were proven by the validator, and the undef registers
         // lowering synthesizes cannot represent bottom.
         if found.ty != expected
-            && !ref_compatible(found.ty, expected)
+            && !ref_compatible(self.tables.types, found.ty, expected)
             && !self.current_frame_unreachable()
         {
             return Err(LowerError {
@@ -5231,8 +6463,11 @@ impl<'b> FuncBuilder<'b> {
     }
 
     fn pop_results(&mut self, offset: ByteOffset) -> Result<Vec<Reg>, LowerError> {
-        let results = self.results.clone();
-        let mut values = Vec::with_capacity(results.len());
+        let results = self.fallible_copy(offset, "function result types", &self.results)?;
+        let mut values: Vec<Reg> = Vec::new();
+        values
+            .try_reserve(results.len())
+            .map_err(|_| self.resource_error(offset, "function result registers"))?;
         for &expected in results.iter().rev() {
             let found = self.pop_expect(offset, "function end", expected)?;
             values.push(found.reg);

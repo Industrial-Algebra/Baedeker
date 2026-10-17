@@ -193,6 +193,7 @@ mod tests {
             tables: Vec::new(),
             elements: Vec::new(),
             types: Vec::new(),
+            type_defs: Vec::new(),
             data: Vec::new(),
             imported_memory_count: 0,
             imported_global_count: 0,

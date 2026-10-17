@@ -24,7 +24,7 @@ pub const AOT_MAGIC: [u8; 7] = *b"BDKAOT1";
 const ENVELOPE_LEN: usize = AOT_MAGIC.len() + 4;
 
 /// Current artifact format version. Bump on any IR layout change.
-pub const AOT_FORMAT_VERSION: u32 = 6;
+pub const AOT_FORMAT_VERSION: u32 = 11;
 
 /// Errors deserializing an AOT artifact.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,8 +141,22 @@ mod tests {
         // Stale-format artifacts must be rejected, never reinterpreted:
         // v1 predates the v128 const-expr RegConstInstr renumbering; v2
         // the EH regions/tag fields; v3 imported_tags; v4 rec-group
-        // provenance; v5 the u64/is64 limits and memarg offsets. The
-        // ladder covers every predecessor of the current version.
+        // provenance; v5 the u64/is64 limits and memarg offsets; v6 the
+        // kind-preserving RegModule.type_defs section + kind-aware
+        // ImportedTag.rec (GC type grammar, U1); v7 the ImportedTag
+        // own-type closed-identity recomputation groundwork (superseded
+        // same-unit); v8 the ImportedTag.type_idx field used to
+        // recompute the tag's own referenced function type's closed
+        // form at link time (GC U1); v9 the GC heap instruction terms
+        // (struct/array/i31 RegOps + GcExt) and the GcRef/I31 Value
+        // shapes (GC U2); v10 the cast/conversion instruction terms
+        // (`RefTest`/`RefCast`/`RefEq`/`AnyConvertExtern`/
+        // `ExternConvertAny` RegOps) and the HostAny/ExternGc re-tag
+        // Value shapes (GC U3); v11 the const-expression surface (GC U4):
+        // `RegConstInstr`'s GC forms (`RefNullGC`, `RefI31`, `StructNew`,
+        // `ArrayNew`, `ArrayNewFixed`, `ExternConvert`) and the
+        // `RegElemValue::Expr` general element initializer.
+        // The ladder covers every predecessor of the current version.
         for stale in 1..AOT_FORMAT_VERSION {
             let mut old_artifact = artifact.clone();
             old_artifact[AOT_MAGIC.len()..AOT_MAGIC.len() + 4]
