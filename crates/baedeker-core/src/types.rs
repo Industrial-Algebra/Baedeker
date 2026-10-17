@@ -607,6 +607,72 @@ impl TypeCanon {
     }
 }
 
+/// A canonical token for a value type within one module's type section.
+///
+/// Two value types are canonically equal (`match_deftype`'s substitution
+/// equality) exactly when their tokens are equal: concrete references use the
+/// type's canonical class id, abstract heap types their own tag, and
+/// nullability is part of the token.
+fn canon_val_token(canon: &TypeCanon, val: ValType) -> u64 {
+    fn heap_token(canon: &TypeCanon, heap: HeapType) -> u64 {
+        match heap {
+            HeapType::Type(idx) => canon
+                .canonical_id(idx)
+                .map(|id| 0x1000_0000 + u64::from(id))
+                .unwrap_or(u64::MAX),
+            // Abstract heap types are field-less variants; a stable tag per
+            // variant keeps the token space collision-free.
+            other => {
+                use HeapType::*;
+                0x0100_0000
+                    + match other {
+                        Func => 1,
+                        Extern => 2,
+                        Exn => 3,
+                        Any => 4,
+                        None => 5,
+                        Eq => 6,
+                        I31 => 7,
+                        Struct => 8,
+                        Array => 9,
+                        NoFunc => 10,
+                        NoExtern => 11,
+                        NoExn => 12,
+                        Type(_) => unreachable!("concrete heap types use canonical ids"),
+                    }
+            }
+        }
+    }
+    match val {
+        ValType::Num(num) => 0x0100_0000 + num as u64,
+        ValType::Vec(_) => 0x0200_0000,
+        ValType::Ref(ref_type) => {
+            let nullability = if ref_type.is_nullable() { 1 << 32 } else { 0 };
+            0x0300_0000 | nullability | heap_token(canon, ref_type.heap_type())
+        }
+    }
+}
+
+/// A canonical token for a function type within one module's type section.
+/// Token equality is exactly the `match_deftype` equivalence of the two
+/// function types (`valid/match.ml:145-150`: rolled closed forms compared
+/// after substitution), which is the relation `call_indirect`/`call_ref` and
+/// host-function registration need — *not* the covariant/contravariant
+/// import-matching relation.
+pub fn canonical_func_token(canon: &TypeCanon, ty: &FuncType) -> Vec<u64> {
+    let mut out = Vec::with_capacity(ty.params.len() + ty.results.len() + 2);
+    out.push(ty.params.len() as u64);
+    for param in &ty.params {
+        out.push(canon_val_token(canon, *param));
+    }
+    out.push(u64::MAX);
+    out.push(ty.results.len() as u64);
+    for result in &ty.results {
+        out.push(canon_val_token(canon, *result));
+    }
+    out
+}
+
 /// The kind of a concrete (defined) composite type, independent of any
 /// module's index space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -897,6 +963,42 @@ pub fn defined_types_equivalent(
     }
 }
 
+/// `match_deftype` across two type sections (`valid/match.ml:145-150`): the
+/// PROVIDED type entry must be canonically identical to the declared one
+/// (`dt1 == dt2`, i.e. equal rolled closed forms — iso-recursive groups
+/// included, so group shape and position participate), or the provided entry
+/// must declare a supertype chain reaching the declared one.
+///
+/// This is the relation import/export matching uses for functions
+/// (`match_externtype` calls `match_deftype` on the two type entries), and the
+/// relation `call_indirect`/`call_ref` use at run time. It is **not** the
+/// covariant/contravariant `match_comptype` relation, which belongs to
+/// subtype declarations.
+pub fn defined_type_matches(
+    provided_types: &[SubType],
+    provided_recs: &[(u32, u32)],
+    provided: TypeIdx,
+    declared_types: &[SubType],
+    declared_recs: &[(u32, u32)],
+    declared: TypeIdx,
+) -> bool {
+    match (
+        ClosedDefinedType::of(provided_types, provided_recs, provided),
+        ClosedDefinedType::of(declared_types, declared_recs, declared),
+    ) {
+        (Some(provided), Some(declared)) => {
+            provided == declared || provided.is_subtype_of(&declared)
+        }
+        _ => false,
+    }
+}
+
+/// A canonical token for a value type within one module's type section.
+///
+/// Two value types are canonically equal (`match_deftype`'s substitution
+/// equality) exactly when their tokens are equal: concrete references use the
+/// type's canonical class id, abstract heap types their own tag, and
+/// nullability is part of the token.
 fn canon_ref_token(idx: u32, start: u32, len: u32, canonical: &[u32]) -> u32 {
     if idx >= start && idx < start + len {
         // In-group: relative rec reference.

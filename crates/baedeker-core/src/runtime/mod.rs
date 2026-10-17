@@ -449,11 +449,16 @@ fn execute_funcref(
     // cross-instance target must be checked structurally against the
     // caller's declared type, whatever the remote module's own type
     // numbering is.
-    let expected = module.types.get(type_idx.0 as usize).ok_or(RuntimeError {
-        kind: RuntimeErrorKind::UnknownType {
-            type_idx: type_idx.0,
-        },
-    })?;
+    if module.types.get(type_idx.0 as usize).is_none() {
+        return Err(RuntimeError {
+            kind: RuntimeErrorKind::UnknownType {
+                type_idx: type_idx.0,
+            },
+        });
+    }
+    // The caller's type section, for structural cross-module comparison.
+    let caller_type_defs = &module.type_defs;
+    let caller_rec_groups = &module.rec_groups;
     if instance_id != store.instance_id() {
         // Cross-instance funcref: resolve through the link group and execute
         // against the owning instance (structural type check against the
@@ -474,32 +479,38 @@ fn execute_funcref(
             };
             (module.clone(), store.clone())
         };
-        let actual = if func_idx < module.imported_func_count {
-            &module
+        // The target's own type entry, in ITS module's index space.
+        let actual_idx = if func_idx < module.imported_func_count {
+            module
                 .imported_funcs
                 .get(func_idx as usize)
                 .ok_or(RuntimeError {
                     kind: RuntimeErrorKind::UnknownFunction { func: func_idx },
                 })?
-                .ty
+                .type_idx
         } else {
-            let callee = module
+            module
                 .funcs
                 .iter()
                 .find(|func| func.idx.0 == func_idx)
                 .ok_or(RuntimeError {
                     kind: RuntimeErrorKind::UnknownFunction { func: func_idx },
-                })?;
-            module
-                .types
-                .get(callee.type_idx.0 as usize)
-                .ok_or(RuntimeError {
-                    kind: RuntimeErrorKind::UnknownType {
-                        type_idx: callee.type_idx.0,
-                    },
                 })?
+                .type_idx
         };
-        if expected != actual {
+        // `match_deftype`: the target's type entry must be canonically the
+        // caller's declared one — cross-module closed-form identity, not a
+        // raw local-index comparison, so structurally identical types at
+        // different indices (iso-recursive groups included) match while
+        // different rec-group shapes do not.
+        if !crate::types::defined_type_matches(
+            &module.type_defs,
+            &module.rec_groups,
+            actual_idx,
+            caller_type_defs,
+            caller_rec_groups,
+            *type_idx,
+        ) {
             return Err(trap(RuntimeTrap::IndirectCallTypeMismatch));
         }
         let target_store = target_store.borrow();
@@ -526,14 +537,21 @@ fn execute_funcref(
     // one — for imported targets, the import declaration's type; for
     // defined targets, the function's type entry.
     if func_idx < module.imported_func_count {
-        let import_ty = &module
+        let import_idx = module
             .imported_funcs
             .get(func_idx as usize)
             .ok_or(RuntimeError {
                 kind: RuntimeErrorKind::UnknownFunction { func: func_idx },
             })?
-            .ty;
-        if expected != import_ty {
+            .type_idx;
+        if !crate::types::defined_type_matches(
+            &module.type_defs,
+            &module.rec_groups,
+            import_idx,
+            &module.type_defs,
+            &module.rec_groups,
+            *type_idx,
+        ) {
             return Err(trap(RuntimeTrap::IndirectCallTypeMismatch));
         }
         // Indirect call targeting an imported function: host dispatch.
@@ -546,15 +564,14 @@ fn execute_funcref(
         .ok_or(RuntimeError {
             kind: RuntimeErrorKind::UnknownFunction { func: func_idx },
         })?;
-    let actual = module
-        .types
-        .get(callee.type_idx.0 as usize)
-        .ok_or(RuntimeError {
-            kind: RuntimeErrorKind::UnknownType {
-                type_idx: callee.type_idx.0,
-            },
-        })?;
-    if expected != actual {
+    if !crate::types::defined_type_matches(
+        &module.type_defs,
+        &module.rec_groups,
+        callee.type_idx,
+        &module.type_defs,
+        &module.rec_groups,
+        *type_idx,
+    ) {
         return Err(trap(RuntimeTrap::IndirectCallTypeMismatch));
     }
     execute_func_in(Some(module), Some(store), callee, call_args, depth + 1)
@@ -647,20 +664,29 @@ fn resolve_tail_funcref<'a>(
         return Ok(TailTarget::Ready(results));
     }
     // Same instance: structural type check first (mirrors `execute_funcref`).
-    let expected = module.types.get(type_idx.0 as usize).ok_or(RuntimeError {
-        kind: RuntimeErrorKind::UnknownType {
-            type_idx: type_idx.0,
-        },
-    })?;
+    if module.types.get(type_idx.0 as usize).is_none() {
+        return Err(RuntimeError {
+            kind: RuntimeErrorKind::UnknownType {
+                type_idx: type_idx.0,
+            },
+        });
+    }
     if func_idx < module.imported_func_count {
-        let import_ty = &module
+        let import_idx = module
             .imported_funcs
             .get(func_idx as usize)
             .ok_or(RuntimeError {
                 kind: RuntimeErrorKind::UnknownFunction { func: func_idx },
             })?
-            .ty;
-        if expected != import_ty {
+            .type_idx;
+        if !crate::types::defined_type_matches(
+            &module.type_defs,
+            &module.rec_groups,
+            import_idx,
+            &module.type_defs,
+            &module.rec_groups,
+            *type_idx,
+        ) {
             return Err(trap(RuntimeTrap::IndirectCallTypeMismatch));
         }
         return Ok(TailTarget::Ready(store.call_host(func_idx, call_args)?));
@@ -672,15 +698,14 @@ fn resolve_tail_funcref<'a>(
         .ok_or(RuntimeError {
             kind: RuntimeErrorKind::UnknownFunction { func: func_idx },
         })?;
-    let actual = module
-        .types
-        .get(callee.type_idx.0 as usize)
-        .ok_or(RuntimeError {
-            kind: RuntimeErrorKind::UnknownType {
-                type_idx: callee.type_idx.0,
-            },
-        })?;
-    if expected != actual {
+    if !crate::types::defined_type_matches(
+        &module.type_defs,
+        &module.rec_groups,
+        callee.type_idx,
+        &module.type_defs,
+        &module.rec_groups,
+        *type_idx,
+    ) {
         return Err(trap(RuntimeTrap::IndirectCallTypeMismatch));
     }
     Ok(TailTarget::Defined(callee))
@@ -1845,39 +1870,11 @@ fn execute_reg_op(
         }
         RegOp::AnyConvertExtern { dst, value } => {
             let value = get_reg(registers, *value)?;
-            let converted = match value {
-                Value::ExternRef(payload) => Value::HostAny(payload),
-                Value::ExternGc(Some(ExternPayload::Gc(heap, id))) => Value::GcRef { heap, id },
-                Value::ExternGc(Some(ExternPayload::I31(payload))) => Value::I31(payload),
-                other if is_null_ref(&other) => Value::FuncRef(None),
-                other => {
-                    return Err(RuntimeError {
-                        kind: RuntimeErrorKind::TypeMismatch {
-                            expected: ValType::Ref(RefType::ExternRef),
-                            found: other.val_type(),
-                        },
-                    });
-                }
-            };
-            set_reg(registers, *dst, converted)?;
+            set_reg(registers, *dst, any_convert_extern(value)?)?;
         }
         RegOp::ExternConvertAny { dst, value } => {
             let value = get_reg(registers, *value)?;
-            let converted = match value {
-                Value::HostAny(payload) => Value::ExternRef(payload),
-                Value::GcRef { heap, id } => Value::ExternGc(Some(ExternPayload::Gc(heap, id))),
-                Value::I31(payload) => Value::ExternGc(Some(ExternPayload::I31(payload))),
-                other if is_null_ref(&other) => Value::ExternRef(None),
-                other => {
-                    return Err(RuntimeError {
-                        kind: RuntimeErrorKind::TypeMismatch {
-                            expected: ValType::Ref(RefType::from_parts(true, HeapType::Any)),
-                            found: other.val_type(),
-                        },
-                    });
-                }
-            };
-            set_reg(registers, *dst, converted)?;
+            set_reg(registers, *dst, extern_convert_any(value)?)?;
         }
         RegOp::Load {
             op,
@@ -2922,6 +2919,88 @@ fn value_satisfies(
     }
 }
 
+/// A reference RESULT pattern, mirroring the reference interpreter's
+/// `script/runner.ml:464-483` `assert_ref_pat` rows. The runner maps the wast
+/// result syntax onto these cases; the semantics live here so every embedder
+/// (and the tests) exercises the same relation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefPattern {
+    /// `NullPat _`: only a null reference matches.
+    Null,
+    /// `RefPat (ExternRef (HostRef n))`: host-handle identity in the extern
+    /// zone. `None` is the bare `(ref.extern)` pattern: ANY non-null extern
+    /// reference.
+    Extern(Option<u32>),
+    /// `RefPat (HostRef n)`: host-handle identity (eq_ref on the handle).
+    /// The same host value may appear internalized (`any.convert_extern`) or
+    /// in the extern zone, so either zone matches.
+    Host(u32),
+    /// `(ref.func)` with no index: any non-null funcref.
+    FuncAny,
+    /// `(ref.func $f)`: a specific module-local function index.
+    FuncIndex(u32),
+    /// `RefTypePat AnyHT`: every non-null reference EXCEPT a funcref
+    /// (`runner.ml:467-469`); nulls also match the `AnyHT, _` row.
+    Any,
+    /// `RefTypePat EqHT`: i31/struct/array only.
+    Eq,
+    /// `RefTypePat StructHT`.
+    Struct,
+    /// `RefTypePat ArrayHT`.
+    Array,
+    /// `RefTypePat I31HT`.
+    I31,
+}
+
+/// Whether a runtime reference value satisfies a [`RefPattern`], following
+/// the pinned `assert_ref_pat` rows. GC object kinds are resolved through the
+/// store's (or a registered foreign) heap.
+pub fn ref_matches_pattern(value: &Value, pattern: RefPattern, store: Option<&Store>) -> bool {
+    match pattern {
+        RefPattern::Null => is_null_ref(value),
+        RefPattern::Extern(Some(handle)) => *value == Value::ExternRef(Some(handle)),
+        RefPattern::Extern(None) => {
+            matches!(value, Value::ExternRef(Some(_)) | Value::ExternGc(Some(_)))
+        }
+        RefPattern::Host(handle) => matches!(
+            value,
+            Value::HostAny(Some(found)) | Value::ExternRef(Some(found)) if *found == handle
+        ),
+        RefPattern::FuncAny => matches!(value, Value::FuncRef(Some(_))),
+        RefPattern::FuncIndex(idx) => {
+            matches!(value, Value::FuncRef(Some((_, found))) if *found == idx)
+        }
+        RefPattern::Any => !matches!(value, Value::FuncRef(Some(_))),
+        RefPattern::Eq => matches!(value, Value::I31(_) | Value::GcRef { .. }),
+        RefPattern::Struct => gc_ref_is_kind(store, value, true),
+        RefPattern::Array => gc_ref_is_kind(store, value, false),
+        RefPattern::I31 => matches!(value, Value::I31(_)),
+    }
+}
+
+/// Whether a `GcRef` object is a struct (`want_struct`) or an array, resolved
+/// against its owning (possibly foreign) heap.
+fn gc_ref_is_kind(store: Option<&Store>, value: &Value, want_struct: bool) -> bool {
+    let Value::GcRef { heap, id } = value else {
+        return false;
+    };
+    let Some(store) = store else {
+        return false;
+    };
+    store
+        .with_heap(*heap, |heap| {
+            let Some(type_id) = heap.object_type_id(*id) else {
+                return false;
+            };
+            match heap.type_kind(type_id) {
+                Some(GcTypeKind::Struct(_)) => want_struct,
+                Some(GcTypeKind::Array(_)) => !want_struct,
+                None => false,
+            }
+        })
+        .unwrap_or(false)
+}
+
 /// Whether a null reference value is a legal null of the expected heap
 /// family. Non-null bottoms constrain nothing further.
 fn null_satisfies_heap(heap: crate::types::HeapType, value: &Value) -> bool {
@@ -2987,7 +3066,7 @@ fn concrete_value_matches(
         return matches!(value, Value::FuncRef(_));
     };
     match module.type_defs.get(idx.0 as usize).map(|sub| &sub.comp) {
-        Some(CompType::Func(_)) => matches!(value, Value::FuncRef(_)),
+        Some(CompType::Func(_)) => concrete_func_value_matches(module, store, idx, value),
         Some(CompType::Struct(_)) | Some(CompType::Array(_)) => {
             let Value::GcRef { heap, id } = value else {
                 return false;
@@ -3020,6 +3099,65 @@ fn concrete_value_matches(
         }
         None => false,
     }
+}
+
+/// Whether a runtime value satisfies a CONCRETE function type `(ref $ft)`.
+///
+/// The reference's actual function type is resolved in its DEFINING module
+/// (the link group supplies it for a foreign instance) and compared
+/// structurally against the expected type: parameter types contravariantly,
+/// result types covariantly, concrete reference types by rolled closed form
+/// or declared-supertype chain (`valid/match.ml:135-141`). A funcref whose
+/// signature does not match is rejected — the former "any `FuncRef` fits any
+/// concrete function type" laxness admitted observably wrong calls.
+/// Abstract [`HeapType::Func`] stays permissive (lattice-correct): every
+/// funcref is a `funcref`.
+fn concrete_func_value_matches(
+    module: &RegModule,
+    store: Option<&Store>,
+    idx: TypeIdx,
+    value: &Value,
+) -> bool {
+    let Value::FuncRef(Some((instance_id, func_idx))) = value else {
+        return false;
+    };
+    // Resolve the defining module of the function reference.
+    let foreign = match store {
+        Some(store) if store.instance_id() != *instance_id => {
+            match store.group_module(*instance_id) {
+                Some(module) => Some(module),
+                None => return false,
+            }
+        }
+        Some(_) => None,
+        // Storeless execution runs unlinked modules (instance 0); any other
+        // instance id cannot be resolved and is a clean rejection.
+        None if *instance_id == 0 => None,
+        None => return false,
+    };
+    let source: &RegModule = foreign.as_deref().unwrap_or(module);
+
+    // The function's own type entry in its defining module.
+    let source_idx = match source.imported_funcs.get(*func_idx as usize) {
+        Some(import) => import.type_idx,
+        None => match source.funcs.iter().find(|func| func.idx.0 == *func_idx) {
+            Some(func) => func.type_idx,
+            None => return false,
+        },
+    };
+
+    // `match_deftype`: the value's function type must be canonically the
+    // expected one (or declare a supertype chain reaching it). Not a
+    // params/results comparison — a different rec-group shape is a different
+    // type even with an identical signature.
+    crate::types::defined_type_matches(
+        &source.type_defs,
+        &source.rec_groups,
+        source_idx,
+        &module.type_defs,
+        &module.rec_groups,
+        idx,
+    )
 }
 
 /// WASM min: NaN propagates as the canonical NaN; -0 is smaller than +0.
@@ -3283,18 +3421,69 @@ pub(crate) fn ref_null_value(ref_type: &RefType) -> Value {
         | RefType::Typed {
             heap: crate::types::HeapType::Extern,
             ..
+        }
+        | RefType::Typed {
+            heap: crate::types::HeapType::NoExtern,
+            ..
         } => Value::ExternRef(None),
         RefType::Typed {
             heap: crate::types::HeapType::Exn,
             ..
+        }
+        | RefType::Typed {
+            heap: crate::types::HeapType::NoExn,
+            ..
         } => Value::ExnRef(None),
+        // The func side (`func`, `nofunc`, concrete function types) and every
+        // GC-side heap (`any`, `eq`, `i31`, `struct`, `array`, `none`) share
+        // the generic any-side null.
         _ => Value::FuncRef(None),
     }
 }
 
+/// `any.convert_extern` (eval.ml:929-939): re-tag an extern-side reference
+/// into the any hierarchy. An immediate value-level re-tag that never
+/// allocates; a null extern reference becomes the any-side null.
+pub(crate) fn any_convert_extern(value: Value) -> Result<Value, RuntimeError> {
+    Ok(match value {
+        Value::ExternRef(payload) => Value::HostAny(payload),
+        Value::ExternGc(Some(ExternPayload::Gc(heap, id))) => Value::GcRef { heap, id },
+        Value::ExternGc(Some(ExternPayload::I31(payload))) => Value::I31(payload),
+        other if is_null_ref(&other) => Value::FuncRef(None),
+        other => {
+            return Err(RuntimeError {
+                kind: RuntimeErrorKind::TypeMismatch {
+                    expected: ValType::Ref(RefType::ExternRef),
+                    found: other.val_type(),
+                },
+            });
+        }
+    })
+}
+
+/// `extern.convert_any` (eval.ml:929-939): re-tag an any-side reference into
+/// the extern hierarchy, carrying the inner payload so the reverse
+/// conversion is an exact identity. Never allocates.
+pub(crate) fn extern_convert_any(value: Value) -> Result<Value, RuntimeError> {
+    Ok(match value {
+        Value::HostAny(payload) => Value::ExternRef(payload),
+        Value::GcRef { heap, id } => Value::ExternGc(Some(ExternPayload::Gc(heap, id))),
+        Value::I31(payload) => Value::ExternGc(Some(ExternPayload::I31(payload))),
+        other if is_null_ref(&other) => Value::ExternRef(None),
+        other => {
+            return Err(RuntimeError {
+                kind: RuntimeErrorKind::TypeMismatch {
+                    expected: ValType::Ref(RefType::from_parts(true, HeapType::Any)),
+                    found: other.val_type(),
+                },
+            });
+        }
+    })
+}
+
 /// The default value for a storage slot (numeric/vector zero, nullable ref
 /// null). Validation guarantees the field is defaultable.
-fn default_for_storage(storage: StorageType) -> Value {
+pub(crate) fn default_for_storage(storage: StorageType) -> Value {
     match storage {
         StorageType::I8 | StorageType::I16 => Value::I32(0),
         StorageType::Val(val) => default_for_val(val),

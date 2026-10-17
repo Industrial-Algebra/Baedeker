@@ -689,24 +689,128 @@ fn validate_const_instr(
     kind: ConstExprKind,
 ) -> Result<(), ValidationError> {
     match decoded.instr {
-        Instr::I32Const(_) if !matches!(kind, ConstExprKind::ElementExpr) => {
-            stack.push(ValType::Num(crate::types::NumType::I32));
-        }
-        Instr::I64Const(_) if !matches!(kind, ConstExprKind::ElementExpr) => {
-            stack.push(ValType::Num(crate::types::NumType::I64));
-        }
-        Instr::F32Const(_) if !matches!(kind, ConstExprKind::ElementExpr) => {
-            stack.push(ValType::Num(crate::types::NumType::F32));
-        }
-        Instr::F64Const(_) if !matches!(kind, ConstExprKind::ElementExpr) => {
-            stack.push(ValType::Num(crate::types::NumType::F64));
-        }
-        Instr::V128Const(_) if !matches!(kind, ConstExprKind::ElementExpr) => {
-            stack.push(ValType::Vec(crate::types::VecType::V128));
-        }
+        // Constants are const-eligible in EVERY const context; the final
+        // stack-shape/type check enforces the segment's declared type
+        // (`valid.ml:1029-1040` `is_const` has no per-context constant
+        // restriction).
+        Instr::I32Const(_) => stack.push(ValType::Num(crate::types::NumType::I32)),
+        Instr::I64Const(_) => stack.push(ValType::Num(crate::types::NumType::I64)),
+        Instr::F32Const(_) => stack.push(ValType::Num(crate::types::NumType::F32)),
+        Instr::F64Const(_) => stack.push(ValType::Num(crate::types::NumType::F64)),
+        Instr::V128Const(_) => stack.push(ValType::Vec(crate::types::VecType::V128)),
         Instr::RefNull(ref_type) => {
             validate_reftype_type_indices(module, ref_type, None, decoded.offset.0)?;
             stack.push(normalize_valtype(module, ValType::Ref(ref_type)));
+        }
+        Instr::RefI31 => {
+            pop_const_expect(
+                module,
+                stack,
+                ValType::Num(crate::types::NumType::I32),
+                decoded.offset,
+                kind,
+            )?;
+            stack.push(ValType::Ref(RefType::from_parts(false, HeapType::I31)));
+        }
+        Instr::StructNew(type_idx) => {
+            // `struct.new` pops one value per field, last field first.
+            let fields = struct_field_types(module, FuncIdx(0), type_idx, decoded.offset.0)
+                .map_err(without_function)?;
+            for field in fields.iter().rev() {
+                pop_const_expect(
+                    module,
+                    stack,
+                    unpacked_valtype(field.storage),
+                    decoded.offset,
+                    kind,
+                )?;
+            }
+            stack.push(ValType::Ref(RefType::concrete(false, type_idx)));
+        }
+        Instr::StructNewDefault(type_idx) => {
+            let fields = struct_field_types(module, FuncIdx(0), type_idx, decoded.offset.0)
+                .map_err(without_function)?;
+            ensure_defaultable(
+                fields.iter().map(|field| field.storage),
+                type_idx,
+                FuncIdx(0),
+                decoded.offset.0,
+            )
+            .map_err(without_function)?;
+            stack.push(ValType::Ref(RefType::concrete(false, type_idx)));
+        }
+        Instr::ArrayNew(type_idx) => {
+            // Operands are `[value, len]` with `len` on top.
+            let field = array_field_type(module, FuncIdx(0), type_idx, decoded.offset.0)
+                .map_err(without_function)?;
+            pop_const_expect(
+                module,
+                stack,
+                ValType::Num(crate::types::NumType::I32),
+                decoded.offset,
+                kind,
+            )?;
+            pop_const_expect(
+                module,
+                stack,
+                unpacked_valtype(field.storage),
+                decoded.offset,
+                kind,
+            )?;
+            stack.push(ValType::Ref(RefType::concrete(false, type_idx)));
+        }
+        Instr::ArrayNewDefault(type_idx) => {
+            let field = array_field_type(module, FuncIdx(0), type_idx, decoded.offset.0)
+                .map_err(without_function)?;
+            ensure_defaultable(
+                core::iter::once(field.storage),
+                type_idx,
+                FuncIdx(0),
+                decoded.offset.0,
+            )
+            .map_err(without_function)?;
+            pop_const_expect(
+                module,
+                stack,
+                ValType::Num(crate::types::NumType::I32),
+                decoded.offset,
+                kind,
+            )?;
+            stack.push(ValType::Ref(RefType::concrete(false, type_idx)));
+        }
+        Instr::ArrayNewFixed { type_idx, count } => {
+            let field = array_field_type(module, FuncIdx(0), type_idx, decoded.offset.0)
+                .map_err(without_function)?;
+            let expected = unpacked_valtype(field.storage);
+            // Each pop shrinks the stack, so the loop is bounded by the
+            // current stack height even for a huge `count`.
+            for _ in 0..count {
+                pop_const_expect(module, stack, expected, decoded.offset, kind)?;
+            }
+            stack.push(ValType::Ref(RefType::concrete(false, type_idx)));
+        }
+        Instr::AnyConvertExtern => {
+            // `[RefT (nul, ExternHT)] --> [RefT (nul, AnyHT)]`, the result
+            // keeping the operand's nullability (`valid.ml` `peek_ref`).
+            let found = pop_const_operand(
+                module,
+                stack,
+                ValType::Ref(RefType::from_parts(true, HeapType::Extern)),
+                decoded.offset,
+                kind,
+            )?;
+            push_converted_ref(stack, found, HeapType::Any);
+        }
+        Instr::ExternConvertAny => {
+            // `[RefT (nul, AnyHT)] --> [RefT (nul, ExternHT)]`.
+            let found = pop_const_operand(
+                module,
+                stack,
+                ValType::Ref(RefType::from_parts(true, HeapType::Any)),
+                decoded.offset,
+                kind,
+            )?;
+            push_converted_ref(stack, found, HeapType::Extern);
         }
         Instr::RefFunc(idx) => {
             let type_idx = resolve_func_type_idx_for_module(module, idx, decoded.offset.0)?;
@@ -725,9 +829,7 @@ fn validate_const_instr(
             decoded.offset.0,
             global_scope,
         )?),
-        Instr::I32Add | Instr::I32Sub | Instr::I32Mul
-            if matches!(kind, ConstExprKind::GlobalInit | ConstExprKind::I32Offset) =>
-        {
+        Instr::I32Add | Instr::I32Sub | Instr::I32Mul => {
             pop_const_expect(
                 module,
                 stack,
@@ -744,9 +846,7 @@ fn validate_const_instr(
             )?;
             stack.push(ValType::Num(crate::types::NumType::I32));
         }
-        Instr::I64Add | Instr::I64Sub | Instr::I64Mul
-            if matches!(kind, ConstExprKind::GlobalInit | ConstExprKind::I32Offset) =>
-        {
+        Instr::I64Add | Instr::I64Sub | Instr::I64Mul => {
             pop_const_expect(
                 module,
                 stack,
@@ -776,43 +876,65 @@ fn pop_const_expect(
     offset: ByteOffset,
     kind: ConstExprKind,
 ) -> Result<(), ValidationError> {
+    pop_const_operand(module, stack, expected, offset, kind).map(|_| ())
+}
+
+/// Pop one const-context operand of type `expected` (module-aware subtyping),
+/// returning the popped type.
+fn pop_const_operand(
+    module: &Module<'_>,
+    stack: &mut Vec<ValType>,
+    expected: ValType,
+    offset: ByteOffset,
+    kind: ConstExprKind,
+) -> Result<ValType, ValidationError> {
     let Some(found) = stack.pop() else {
-        return Err(match kind {
-            ConstExprKind::ElementExpr => ValidationError {
-                offset,
-                function: None,
-                kind: ValidationErrorKind::ElementExprTypeMismatch {
-                    expected,
-                    found: expected,
-                },
-            },
-            ConstExprKind::GlobalInit | ConstExprKind::I32Offset => ValidationError {
-                offset,
-                function: None,
-                kind: ValidationErrorKind::GlobalInitTypeMismatch {
-                    expected,
-                    found: expected,
-                },
-            },
-        });
+        return Err(const_expr_type_mismatch(kind, offset, expected, expected));
     };
 
     if !valtype_matches(module, found, expected) {
-        return Err(match kind {
-            ConstExprKind::ElementExpr => ValidationError {
-                offset,
-                function: None,
-                kind: ValidationErrorKind::ElementExprTypeMismatch { expected, found },
-            },
-            ConstExprKind::GlobalInit | ConstExprKind::I32Offset => ValidationError {
-                offset,
-                function: None,
-                kind: ValidationErrorKind::GlobalInitTypeMismatch { expected, found },
-            },
-        });
+        return Err(const_expr_type_mismatch(kind, offset, expected, found));
     }
 
-    Ok(())
+    Ok(found)
+}
+
+/// Push the result of an extern/any conversion const instruction: the target
+/// heap type with the operand reference's nullability (`peek_ref` semantics).
+fn push_converted_ref(stack: &mut Vec<ValType>, found: ValType, target: HeapType) {
+    let nullable = match found {
+        ValType::Ref(ref_type) => ref_type.is_nullable(),
+        _ => true,
+    };
+    stack.push(ValType::Ref(RefType::from_parts(nullable, target)));
+}
+
+/// Drop the function attribution from a helper error raised in a const
+/// context (const-expression errors carry `function: None`).
+fn without_function(mut error: ValidationError) -> ValidationError {
+    error.function = None;
+    error
+}
+
+fn const_expr_type_mismatch(
+    kind: ConstExprKind,
+    offset: ByteOffset,
+    expected: ValType,
+    found: ValType,
+) -> ValidationError {
+    let kind = match kind {
+        ConstExprKind::ElementExpr => {
+            ValidationErrorKind::ElementExprTypeMismatch { expected, found }
+        }
+        ConstExprKind::GlobalInit | ConstExprKind::I32Offset => {
+            ValidationErrorKind::GlobalInitTypeMismatch { expected, found }
+        }
+    };
+    ValidationError {
+        offset,
+        function: None,
+        kind,
+    }
 }
 
 fn const_expr_non_constant_error(kind: ConstExprKind, offset: ByteOffset) -> ValidationError {
@@ -9154,7 +9276,12 @@ mod tests {
     }
 
     #[test]
-    fn reject_non_constant_element_expr() {
+    fn reject_numeric_element_expr_by_type() {
+        // `(elem funcref (item (i32.const 0)))`: `i32.const` IS const-eligible
+        // in an element expression (GC U4 — `is_const` has no per-context
+        // constant restriction; `struct.new` operands need it), so the pin's
+        // rejection is the segment TYPE mismatch, not "constant expression
+        // required".
         let bytes = [
             0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x04, 0x04, 0x01, 0x70, 0x00, 0x01,
             0x09, 0x07, 0x01, 0x05, 0x70, 0x01, 0x41, 0x00, 0x0B,
@@ -9163,7 +9290,10 @@ mod tests {
         let err = module.validate().unwrap_err();
         assert!(matches!(
             err.kind,
-            ValidationErrorKind::NonConstantElementExpr
+            ValidationErrorKind::ElementExprTypeMismatch {
+                expected: ValType::Ref(RefType::FuncRef),
+                found: ValType::Num(crate::types::NumType::I32),
+            }
         ));
     }
 

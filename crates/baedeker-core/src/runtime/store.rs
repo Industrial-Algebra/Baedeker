@@ -12,7 +12,9 @@ use crate::lower::{RegConstInstr, RegDataMode, RegElemValue, RegElementMode, Reg
 use crate::runtime::gcheap::{GcHeap, GcSnapshot, GcStats, GcTypeId, GcTypeKind, HeapId};
 use crate::runtime::gpu::{GpuBackend, GpuError, GpuKernelId};
 use crate::runtime::host::HostFunction;
-use crate::runtime::{RuntimeError, RuntimeErrorKind, RuntimeTrap, Value, trap};
+use crate::runtime::{
+    RuntimeError, RuntimeErrorKind, RuntimeTrap, Value, default_for_storage, trap,
+};
 use crate::types::{
     ClosedDefinedType, CompType, FieldType, FuncIdx, FuncType, GlobalType, HeapType, Limits,
     MemType, RefType, StorageType, SubType, TableType, TypeIdx, ValType,
@@ -388,6 +390,35 @@ fn limits_match(provided: &Limits, declared: &Limits) -> bool {
     }
 }
 
+/// Make GC-heap knowledge symmetric across a link group: every member,
+/// including the one just registered, learns every peer's heap. Peers that
+/// are currently borrowed (e.g. executing) are skipped; their next
+/// registration pass catches up.
+fn register_group_heaps_symmetric(group: &alloc::rc::Rc<core::cell::RefCell<LinkGroup>>) {
+    let heaps: Vec<alloc::rc::Rc<core::cell::RefCell<GcHeap>>> = group
+        .borrow()
+        .iter()
+        .filter_map(|(_, (_, store))| store.try_borrow().ok().map(|s| s.gc_heap.clone()))
+        .collect();
+    let members: Vec<alloc::rc::Rc<core::cell::RefCell<Store>>> = group
+        .borrow()
+        .iter()
+        .map(|(_, (_, store))| store.clone())
+        .collect();
+    for member in members {
+        let Ok(mut store) = member.try_borrow_mut() else {
+            continue;
+        };
+        let own_id = store.gc_heap.borrow().heap_id();
+        for heap in &heaps {
+            let id = heap.borrow().heap_id();
+            if id != own_id && !store.foreign_heaps.iter().any(|(known, _)| *known == id) {
+                store.foreign_heaps.push((id, heap.clone()));
+            }
+        }
+    }
+}
+
 fn allocation_failed(what: &'static str) -> RuntimeError {
     RuntimeError {
         kind: RuntimeErrorKind::ResourceLimitExceeded { what },
@@ -457,26 +488,12 @@ fn global_type_matches(provided: &GlobalType, declared: &GlobalType) -> bool {
     }
 }
 
-/// Kind-aware concrete-to-abstract heap match (`match.ml:77-104`): a
-/// concrete struct matches only the struct side of the lattice, an array
-/// the array side, a function `func` — never across kinds.
-fn concrete_heap_matches_kind(types: &[SubType], idx: TypeIdx, expected: HeapType) -> bool {
-    match crate::types::concrete_kind(types, idx) {
-        Some(crate::types::ConcreteKind::Struct) => {
-            matches!(expected, HeapType::Any | HeapType::Eq | HeapType::Struct)
-        }
-        Some(crate::types::ConcreteKind::Array) => {
-            matches!(expected, HeapType::Any | HeapType::Eq | HeapType::Array)
-        }
-        Some(crate::types::ConcreteKind::Func) => matches!(expected, HeapType::Func),
-        None => false,
-    }
-}
-
 /// Module-aware heap matching: concrete-vs-concrete via structural
-/// closed-form identity across the two type sections, concrete-vs-abstract
-/// via the kind-aware lattice, abstract-vs-abstract via the context-free
-/// lattice.
+/// closed-form identity or a declared-supertype chain across the two type
+/// sections, concrete-vs-abstract via the kind-aware lattice,
+/// abstract-vs-abstract via the context-free lattice. Delegates to the
+/// shared [`crate::types::defined_type_matches`] relation so the runner's
+/// link checks and the store agree on one rule.
 fn heaptype_matches_ctx(
     provided_types: &[SubType],
     provided_recs: &[(u32, u32)],
@@ -486,7 +503,7 @@ fn heaptype_matches_ctx(
     declared: HeapType,
 ) -> bool {
     match (provided, declared) {
-        (HeapType::Type(a), HeapType::Type(b)) => crate::types::defined_types_equivalent(
+        (HeapType::Type(a), HeapType::Type(b)) => crate::types::defined_type_matches(
             provided_types,
             provided_recs,
             a,
@@ -494,7 +511,16 @@ fn heaptype_matches_ctx(
             declared_recs,
             b,
         ),
-        (HeapType::Type(a), expected) => concrete_heap_matches_kind(provided_types, a, expected),
+        (HeapType::Type(a), expected) => match crate::types::concrete_kind(provided_types, a) {
+            Some(crate::types::ConcreteKind::Struct) => {
+                matches!(expected, HeapType::Any | HeapType::Eq | HeapType::Struct)
+            }
+            Some(crate::types::ConcreteKind::Array) => {
+                matches!(expected, HeapType::Any | HeapType::Eq | HeapType::Array)
+            }
+            Some(crate::types::ConcreteKind::Func) => matches!(expected, HeapType::Func),
+            None => false,
+        },
         (found, expected) => found.is_subtype_of(expected),
     }
 }
@@ -923,6 +949,12 @@ pub struct Store {
     /// resolved once at instantiation so execution never allocates to build
     /// a `GcTypeKind` or a closed form. `None` for function types.
     gc_type_ids: Vec<Option<GcTypeId>>,
+    /// Canonical type indices for this module's type section, so that two
+    /// `FuncType`s expressed in the SAME index space can be compared by
+    /// canonical identity without re-deriving closed forms (host-function
+    /// registration may see several declarations of one import name whose
+    /// local indices differ but whose types are `match_deftype`-equivalent).
+    func_canon: crate::types::TypeCanon,
 }
 
 impl Store {
@@ -957,6 +989,7 @@ impl Store {
         group
             .borrow_mut()
             .insert(instance_id, (module.clone(), store.clone()));
+        register_group_heaps_symmetric(group);
         match error {
             Some(error) => Err(error),
             None => Ok(store),
@@ -1119,18 +1152,30 @@ impl Store {
             .iter()
             .map(|cell| cell.get())
             .collect();
+        // Resolve GC aggregate metadata once, fallibly, BEFORE any global or
+        // table state exists: heap-allocating const expressions (global
+        // initializers, table init exprs, element segments) must follow the
+        // same allocation discipline as execution — fallible, stats-counted,
+        // and refusing cleanly with no partial instance.
+        let mut gc_heap = GcHeap::new();
+        let gc_type_ids = precompute_gc_type_ids(module, &mut gc_heap)?;
+        let gc_heap = alloc::rc::Rc::new(core::cell::RefCell::new(gc_heap));
+        let gc_heap_id = gc_heap.borrow().heap_id();
+
         let mut globals_plain: Vec<Value> = Vec::with_capacity(module.globals.len());
         let mut globals: Vec<alloc::rc::Rc<core::cell::Cell<Value>>> =
             Vec::with_capacity(module.globals.len());
         let mut global_types = Vec::with_capacity(module.globals.len());
         for global in &module.globals {
-            let value = eval_const(
-                &global.init,
-                &globals_plain,
-                &imported_globals_plain,
-                module.imported_global_count,
+            let value = ConstEnv::init(
+                &gc_heap,
+                gc_heap_id,
+                &gc_type_ids,
                 instance_id,
-            )?;
+                &imported_globals_plain,
+                &globals_plain,
+            )
+            .eval(&global.init)?;
             globals_plain.push(value);
             globals.push(alloc::rc::Rc::new(core::cell::Cell::new(value)));
             global_types.push(crate::types::GlobalType {
@@ -1162,13 +1207,15 @@ impl Store {
                         crate::lower::lower_const_expr(init, 0).map_err(|_error| RuntimeError {
                             kind: RuntimeErrorKind::InvalidConstExpr,
                         })?;
-                    eval_const(
-                        &lowered,
-                        &globals_plain,
-                        &imported_globals_plain,
-                        module.imported_global_count,
+                    ConstEnv::init(
+                        &gc_heap,
+                        gc_heap_id,
+                        &gc_type_ids,
                         instance_id,
-                    )?
+                        &imported_globals_plain,
+                        &globals_plain,
+                    )
+                    .eval(&lowered)?
                 }
                 None => table_null(table.clone()),
             };
@@ -1302,14 +1349,11 @@ impl Store {
             });
         }
 
-        // Resolve GC aggregate metadata once, fallibly, before any instance
-        // state exists: every defined struct/array type is laid out and
-        // interned by its cross-module closed form into this store's heap.
-        // Execution then allocates without ever cloning a layout or closed
-        // form; a refusal here produces no partial instance.
-        let mut gc_heap = GcHeap::new();
-        let gc_type_ids = precompute_gc_type_ids(module, &mut gc_heap)?;
-
+        // Resolve GC aggregate metadata once, fallibly: every defined
+        // struct/array type is laid out and interned by its cross-module
+        // closed form into this store's heap. Execution then allocates
+        // without ever cloning a layout or closed form; a refusal here
+        // produces no partial instance.
         let mut store = Self {
             memories,
             memory_types,
@@ -1341,9 +1385,10 @@ impl Store {
             exceptions,
             tag_types: Vec::new(),
             tag_map,
-            gc_heap: Rc::new(core::cell::RefCell::new(gc_heap)),
+            gc_heap,
             foreign_heaps: register_provider_heaps(&imports.provider_heaps),
             gc_type_ids,
+            func_canon: crate::types::TypeCanon::new(&module.type_defs, &module.rec_groups),
         };
 
         // Register defined-tag types (module-agnostic tag ids).
@@ -1363,39 +1408,57 @@ impl Store {
             if instantiation_error.is_some() {
                 break;
             }
-            let values: Vec<Value> = segment
-                .values
-                .iter()
-                .map(|value| match *value {
-                    RegElemValue::FuncRef(func) => Value::FuncRef(Some((instance_id, func.0))),
-                    RegElemValue::GlobalGet(global) => {
-                        let idx = global.0 as usize;
-                        if idx < store.imported_global_count as usize {
-                            store
-                                .imported_global_values
-                                .get(idx)
-                                .expect("imported globals resolved")
-                                .get()
-                        } else {
-                            store
-                                .globals
-                                .get(idx - store.imported_global_count as usize)
-                                .expect("defined globals initialized")
-                                .get()
+            // Element values: `ref.func`/`global.get`/null are cheap, while
+            // general const expressions (GC allocations) are evaluated
+            // against the store's heap with the same allocation discipline
+            // as execution.
+            let mut values: Vec<Value> = Vec::with_capacity(segment.values.len());
+            let mut value_error: Option<RuntimeError> = None;
+            {
+                let env = ConstEnv::from_store(&store);
+                for value in &segment.values {
+                    match value {
+                        RegElemValue::FuncRef(func) => {
+                            values.push(Value::FuncRef(Some((instance_id, func.0))))
                         }
+                        RegElemValue::GlobalGet(global) => {
+                            let idx = global.0 as usize;
+                            if idx < store.imported_global_count as usize {
+                                values.push(
+                                    store
+                                        .imported_global_values
+                                        .get(idx)
+                                        .expect("imported globals resolved")
+                                        .get(),
+                                );
+                            } else {
+                                values.push(
+                                    store
+                                        .globals
+                                        .get(idx - store.imported_global_count as usize)
+                                        .expect("defined globals initialized")
+                                        .get(),
+                                );
+                            }
+                        }
+                        RegElemValue::Null => values.push(Value::FuncRef(None)),
+                        RegElemValue::Expr(expr) => match env.eval(expr) {
+                            Ok(value) => values.push(value),
+                            Err(error) => {
+                                value_error = Some(error);
+                                break;
+                            }
+                        },
                     }
-                    RegElemValue::Null => Value::FuncRef(None),
-                })
-                .collect();
+                }
+            }
+            if let Some(error) = value_error {
+                instantiation_error = Some(error);
+                break;
+            }
             match &segment.mode {
                 RegElementMode::Active { table, offset } => {
-                    let offset = match eval_const(
-                        offset,
-                        &globals_plain,
-                        &imported_globals_plain,
-                        store.imported_global_count,
-                        store.instance_id,
-                    ) {
+                    let offset = match ConstEnv::from_store(&store).eval(offset) {
                         Ok(offset) => offset,
                         Err(error) => {
                             instantiation_error = Some(error);
@@ -1443,13 +1506,7 @@ impl Store {
             }
             match &segment.mode {
                 RegDataMode::Active { memory, offset } => {
-                    let offset = match eval_const(
-                        offset,
-                        &globals_plain,
-                        &imported_globals_plain,
-                        store.imported_global_count,
-                        store.instance_id,
-                    ) {
+                    let offset = match ConstEnv::from_store(&store).eval(offset) {
                         Ok(offset) => offset,
                         Err(error) => {
                             instantiation_error = Some(error);
@@ -1821,11 +1878,18 @@ impl Store {
     /// foreign heap (deduplicated). Members added later are not retrograded;
     /// callers that link a provider after this store should also register its
     /// heap through [`Imports::provider_heap`].
+    /// Register every group member's GC heap on every other member.
+    ///
+    /// A member instantiated earlier cannot know the heaps of peers created
+    /// later, yet GC references cross instance boundaries in BOTH directions
+    /// (a consumer-built struct passed to an imported function, or a
+    /// provider-built struct stored in a shared table). Re-registration is
+    /// idempotent and by heap identity.
     fn register_group_heaps(&mut self, group: &alloc::rc::Rc<core::cell::RefCell<LinkGroup>>) {
         let heaps: Vec<alloc::rc::Rc<core::cell::RefCell<GcHeap>>> = group
             .borrow()
             .iter()
-            .map(|(_, (_, store))| store.borrow().gc_heap.clone())
+            .filter_map(|(_, (_, store))| store.try_borrow().ok().map(|s| s.gc_heap.clone()))
             .collect();
         for heap in heaps {
             let id = heap.borrow().heap_id();
@@ -1892,13 +1956,19 @@ impl Store {
         // gets its own slot — fill them all, type-checking each.
         let shared_ty = func.ty().clone();
         let shared = alloc::rc::Rc::new(core::cell::RefCell::new(func));
+        // Host and declaration types live in the same index space, so
+        // `match_deftype` canonical identity is the right comparison: a
+        // module may import one `(module, name)` more than once with
+        // `FuncType`s whose local indices differ but whose canonical types are
+        // equal (`type-equivalence.wast`).
+        let shared_token = crate::types::canonical_func_token(&self.func_canon, &shared_ty);
         let mut filled = 0;
         for pos in 0..self.imported_funcs.len() {
             let import = &self.imported_funcs[pos];
             if import.module != module || import.name != name {
                 continue;
             }
-            if shared_ty != import.ty {
+            if shared_token != crate::types::canonical_func_token(&self.func_canon, &import.ty) {
                 return Err(RuntimeError {
                     kind: RuntimeErrorKind::ImportTypeMismatch {
                         module: module.into(),
@@ -1918,6 +1988,14 @@ impl Store {
             });
         }
         Ok(())
+    }
+
+    /// The lowered module of an instance registered in this store's link
+    /// group. `None` when unlinked or when the instance is unknown.
+    pub fn group_module(&self, instance_id: u32) -> Option<alloc::rc::Rc<RegModule>> {
+        let group = self.link_group.as_ref()?;
+        let group = group.borrow();
+        group.get(&instance_id).map(|(module, _)| module.clone())
     }
 
     /// This instance's id within its link group (0 when unlinked).
@@ -2129,79 +2207,274 @@ fn runtime_gpu_error(error: GpuError) -> RuntimeError {
     }
 }
 
-/// Evaluate a lowered const expression against the globals initialized so
-/// far. Used for global initializers and data segment offsets.
-fn eval_const(
-    expr: &[RegConstInstr],
-    globals: &[Value],
-    imported_globals: &[Value],
-    imported_global_count: u32,
-    instance_id: u32,
-) -> Result<Value, RuntimeError> {
-    let mut stack: Vec<Value> = Vec::new();
-    for instr in expr {
-        match *instr {
-            RegConstInstr::I32Const(value) => stack.push(Value::I32(value)),
-            RegConstInstr::I64Const(value) => stack.push(Value::I64(value)),
-            RegConstInstr::F32Const(bits) => stack.push(Value::F32(f32::from_bits(bits))),
-            RegConstInstr::F64Const(bits) => stack.push(Value::F64(f64::from_bits(bits))),
-            RegConstInstr::V128Const(bytes) => stack.push(Value::V128(bytes)),
-            RegConstInstr::RefNull => stack.push(Value::FuncRef(None)),
-            RegConstInstr::RefNullOf(ref_type) => {
-                stack.push(crate::runtime::ref_null_value(&ref_type))
-            }
-            RegConstInstr::RefFunc(func) => {
-                stack.push(Value::FuncRef(Some((instance_id, func.0))));
-            }
-            RegConstInstr::GlobalGet(global) => {
-                let idx = global.0 as usize;
-                let value = if idx < imported_global_count as usize {
-                    imported_globals.get(idx).copied().ok_or(RuntimeError {
-                        kind: RuntimeErrorKind::UnknownGlobal { global: global.0 },
-                    })?
+/// Reads the global index space (`imported ++ defined`) for a const
+/// expression. Before the `Store` exists (global initializers), only the
+/// values initialized so far are visible; afterwards the store's cells are
+/// read directly.
+enum ConstGlobals<'a> {
+    Init {
+        imported: &'a [Value],
+        defined: &'a [Value],
+    },
+    Store {
+        imported: &'a [alloc::rc::Rc<core::cell::Cell<Value>>],
+        defined: &'a [alloc::rc::Rc<core::cell::Cell<Value>>],
+    },
+}
+
+impl ConstGlobals<'_> {
+    fn get(&self, idx: u32) -> Option<Value> {
+        match self {
+            Self::Init { imported, defined } => {
+                let idx = idx as usize;
+                if idx < imported.len() {
+                    imported.get(idx).copied()
                 } else {
-                    globals
-                        .get(idx - imported_global_count as usize)
-                        .copied()
-                        .ok_or(RuntimeError {
-                            kind: RuntimeErrorKind::UnknownGlobal { global: global.0 },
-                        })?
-                };
-                stack.push(value);
+                    defined.get(idx - imported.len()).copied()
+                }
             }
-            RegConstInstr::I32Add => {
-                let (lhs, rhs) = pop_i32_pair(&mut stack)?;
-                stack.push(Value::I32(lhs.wrapping_add(rhs)));
-            }
-            RegConstInstr::I32Sub => {
-                let (lhs, rhs) = pop_i32_pair(&mut stack)?;
-                stack.push(Value::I32(lhs.wrapping_sub(rhs)));
-            }
-            RegConstInstr::I32Mul => {
-                let (lhs, rhs) = pop_i32_pair(&mut stack)?;
-                stack.push(Value::I32(lhs.wrapping_mul(rhs)));
-            }
-            RegConstInstr::I64Add => {
-                let (lhs, rhs) = pop_i64_pair(&mut stack)?;
-                stack.push(Value::I64(lhs.wrapping_add(rhs)));
-            }
-            RegConstInstr::I64Sub => {
-                let (lhs, rhs) = pop_i64_pair(&mut stack)?;
-                stack.push(Value::I64(lhs.wrapping_sub(rhs)));
-            }
-            RegConstInstr::I64Mul => {
-                let (lhs, rhs) = pop_i64_pair(&mut stack)?;
-                stack.push(Value::I64(lhs.wrapping_mul(rhs)));
+            Self::Store { imported, defined } => {
+                let idx = idx as usize;
+                if idx < imported.len() {
+                    imported.get(idx).map(|cell| cell.get())
+                } else {
+                    defined.get(idx - imported.len()).map(|cell| cell.get())
+                }
             }
         }
     }
+}
 
-    if stack.len() != 1 {
-        return Err(RuntimeError {
-            kind: RuntimeErrorKind::InvalidConstExpr,
-        });
+/// The environment a const expression is evaluated in: the module's heap
+/// (so heap-allocating forms use the instantiation-time type cache and the
+/// never-free heap's fallible allocation discipline), the globals available
+/// at this point, and the instance identity `ref.func` values carry.
+struct ConstEnv<'a> {
+    heap: &'a alloc::rc::Rc<core::cell::RefCell<GcHeap>>,
+    heap_id: HeapId,
+    gc_type_ids: &'a [Option<GcTypeId>],
+    instance_id: u32,
+    globals: ConstGlobals<'a>,
+}
+
+impl<'a> ConstEnv<'a> {
+    /// The pre-store environment used while initializing defined globals.
+    fn init(
+        heap: &'a alloc::rc::Rc<core::cell::RefCell<GcHeap>>,
+        heap_id: HeapId,
+        gc_type_ids: &'a [Option<GcTypeId>],
+        instance_id: u32,
+        imported_globals: &'a [Value],
+        defined_globals: &'a [Value],
+    ) -> Self {
+        Self {
+            heap,
+            heap_id,
+            gc_type_ids,
+            instance_id,
+            globals: ConstGlobals::Init {
+                imported: imported_globals,
+                defined: defined_globals,
+            },
+        }
     }
-    Ok(stack[0])
+
+    /// The post-instantiation environment: reads the store's own globals.
+    fn from_store(store: &'a Store) -> Self {
+        Self {
+            heap: &store.gc_heap,
+            heap_id: store.gc_heap.borrow().heap_id(),
+            gc_type_ids: &store.gc_type_ids,
+            instance_id: store.instance_id,
+            globals: ConstGlobals::Store {
+                imported: &store.imported_global_values,
+                defined: &store.globals,
+            },
+        }
+    }
+
+    fn type_id(&self, type_idx: TypeIdx) -> Result<GcTypeId, RuntimeError> {
+        self.gc_type_ids
+            .get(type_idx.0 as usize)
+            .and_then(|slot| *slot)
+            .ok_or(RuntimeError {
+                kind: RuntimeErrorKind::UnknownType {
+                    type_idx: type_idx.0,
+                },
+            })
+    }
+
+    /// Evaluate a lowered const expression to exactly one value. Heap forms
+    /// allocate through the store's heap (fallible, stats-counted); a refusal
+    /// or a malformed expression is a clean error with nothing published.
+    fn eval(&self, expr: &[RegConstInstr]) -> Result<Value, RuntimeError> {
+        let mut stack: Vec<Value> = Vec::new();
+        for instr in expr {
+            match *instr {
+                RegConstInstr::I32Const(value) => stack.push(Value::I32(value)),
+                RegConstInstr::I64Const(value) => stack.push(Value::I64(value)),
+                RegConstInstr::F32Const(bits) => stack.push(Value::F32(f32::from_bits(bits))),
+                RegConstInstr::F64Const(bits) => stack.push(Value::F64(f64::from_bits(bits))),
+                RegConstInstr::V128Const(bytes) => stack.push(Value::V128(bytes)),
+                RegConstInstr::RefNull => stack.push(Value::FuncRef(None)),
+                RegConstInstr::RefNullOf(ref_type) => {
+                    stack.push(crate::runtime::ref_null_value(&ref_type))
+                }
+                RegConstInstr::RefNullGC(heap) => stack.push(crate::runtime::ref_null_value(
+                    &RefType::from_parts(true, heap),
+                )),
+                RegConstInstr::RefFunc(func) => {
+                    stack.push(Value::FuncRef(Some((self.instance_id, func.0))));
+                }
+                RegConstInstr::GlobalGet(global) => {
+                    let value = self.globals.get(global.0).ok_or(RuntimeError {
+                        kind: RuntimeErrorKind::UnknownGlobal { global: global.0 },
+                    })?;
+                    stack.push(value);
+                }
+                RegConstInstr::I32Add => {
+                    let (lhs, rhs) = pop_i32_pair(&mut stack)?;
+                    stack.push(Value::I32(lhs.wrapping_add(rhs)));
+                }
+                RegConstInstr::I32Sub => {
+                    let (lhs, rhs) = pop_i32_pair(&mut stack)?;
+                    stack.push(Value::I32(lhs.wrapping_sub(rhs)));
+                }
+                RegConstInstr::I32Mul => {
+                    let (lhs, rhs) = pop_i32_pair(&mut stack)?;
+                    stack.push(Value::I32(lhs.wrapping_mul(rhs)));
+                }
+                RegConstInstr::I64Add => {
+                    let (lhs, rhs) = pop_i64_pair(&mut stack)?;
+                    stack.push(Value::I64(lhs.wrapping_add(rhs)));
+                }
+                RegConstInstr::I64Sub => {
+                    let (lhs, rhs) = pop_i64_pair(&mut stack)?;
+                    stack.push(Value::I64(lhs.wrapping_sub(rhs)));
+                }
+                RegConstInstr::I64Mul => {
+                    let (lhs, rhs) = pop_i64_pair(&mut stack)?;
+                    stack.push(Value::I64(lhs.wrapping_mul(rhs)));
+                }
+                RegConstInstr::RefI31 => {
+                    let Some(Value::I32(value)) = stack.pop() else {
+                        return Err(invalid_const_expr());
+                    };
+                    stack.push(Value::I31((value as u32 & 0x7FFF_FFFF) as i32));
+                }
+                RegConstInstr::StructNew { type_idx, default } => {
+                    let type_id = self.type_id(type_idx)?;
+                    let mut fields: Vec<Value> = Vec::new();
+                    let storages: Vec<StorageType> = {
+                        let heap = self.heap.borrow();
+                        match heap.type_kind(type_id) {
+                            Some(GcTypeKind::Struct(field_types)) => {
+                                field_types.iter().map(|field| field.storage).collect()
+                            }
+                            _ => return Err(invalid_const_expr()),
+                        }
+                    };
+                    fields
+                        .try_reserve(storages.len())
+                        .map_err(|_| gc_const_allocation_failed())?;
+                    if default {
+                        for storage in &storages {
+                            fields.push(default_for_storage(*storage));
+                        }
+                    } else {
+                        // Operands arrive last-field-first.
+                        let mut popped = Vec::new();
+                        popped
+                            .try_reserve(storages.len())
+                            .map_err(|_| gc_const_allocation_failed())?;
+                        for _ in 0..storages.len() {
+                            popped.push(stack.pop().ok_or_else(invalid_const_expr)?);
+                        }
+                        fields.extend(popped.into_iter().rev());
+                    }
+                    let id = self.heap.borrow_mut().alloc_struct_typed(type_id, fields)?;
+                    stack.push(Value::GcRef {
+                        heap: self.heap_id,
+                        id,
+                    });
+                }
+                RegConstInstr::ArrayNew { type_idx, default } => {
+                    let type_id = self.type_id(type_idx)?;
+                    let storage = {
+                        let heap = self.heap.borrow();
+                        match heap.type_kind(type_id) {
+                            Some(GcTypeKind::Array(field)) => field.storage,
+                            _ => return Err(invalid_const_expr()),
+                        }
+                    };
+                    let Some(Value::I32(len)) = stack.pop() else {
+                        return Err(invalid_const_expr());
+                    };
+                    let fill = if default {
+                        default_for_storage(storage)
+                    } else {
+                        stack.pop().ok_or_else(invalid_const_expr)?
+                    };
+                    let id = self
+                        .heap
+                        .borrow_mut()
+                        .alloc_array_typed(type_id, len as u32, fill)?;
+                    stack.push(Value::GcRef {
+                        heap: self.heap_id,
+                        id,
+                    });
+                }
+                RegConstInstr::ArrayNewFixed { type_idx, count } => {
+                    let type_id = self.type_id(type_idx)?;
+                    let mut elems: Vec<Value> = Vec::new();
+                    elems
+                        .try_reserve(count as usize)
+                        .map_err(|_| gc_const_allocation_failed())?;
+                    // Operands arrive last-element-first.
+                    for _ in 0..count {
+                        elems.push(stack.pop().ok_or_else(invalid_const_expr)?);
+                    }
+                    elems.reverse();
+                    let id = self.heap.borrow_mut().alloc_fixed_typed(type_id, elems)?;
+                    stack.push(Value::GcRef {
+                        heap: self.heap_id,
+                        id,
+                    });
+                }
+                RegConstInstr::ExternConvert { direction } => {
+                    let value = stack.pop().ok_or_else(invalid_const_expr)?;
+                    let converted = match direction {
+                        crate::lower::ExternConvert::AnyToExtern => {
+                            crate::runtime::extern_convert_any(value)?
+                        }
+                        crate::lower::ExternConvert::ExternToAny => {
+                            crate::runtime::any_convert_extern(value)?
+                        }
+                    };
+                    stack.push(converted);
+                }
+            }
+        }
+
+        if stack.len() != 1 {
+            return Err(invalid_const_expr());
+        }
+        Ok(stack[0])
+    }
+}
+
+fn invalid_const_expr() -> RuntimeError {
+    RuntimeError {
+        kind: RuntimeErrorKind::InvalidConstExpr,
+    }
+}
+
+fn gc_const_allocation_failed() -> RuntimeError {
+    RuntimeError {
+        kind: RuntimeErrorKind::ResourceLimitExceeded {
+            what: "gc const expression",
+        },
+    }
 }
 
 fn pop_i32_pair(stack: &mut Vec<Value>) -> Result<(i32, i32), RuntimeError> {

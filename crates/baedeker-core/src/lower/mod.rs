@@ -117,13 +117,18 @@ pub enum RegElementMode {
 }
 
 /// One element value in a segment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum RegElemValue {
     FuncRef(FuncIdx),
     /// A `global.get` of a funcref global, resolved at instantiation.
     GlobalGet(GlobalIdx),
     Null,
+    /// Any other const expression permitted by `is_const` (GC allocation
+    /// forms, conversions, multi-instruction expressions). Evaluated against
+    /// the heap at instantiation, with the same allocation discipline as a
+    /// global initializer.
+    Expr(Vec<RegConstInstr>),
 }
 
 /// A defined global in lowered register IR.
@@ -183,6 +188,50 @@ pub enum RegConstInstr {
     /// so the evaluator constructs the correctly-typed null (externref,
     /// exnref, typed refs).
     RefNullOf(RefType),
+    /// `ref.null ht` with a GC abstract heap type (`any`, `eq`, `i31`,
+    /// `struct`, `array`, `none`, `nofunc`, `noextern`, `noexn`). The
+    /// evaluator constructs the correctly-typed null reference.
+    RefNullGC(HeapType),
+    /// `ref.i31`: box the `i32` on the stack into a 31-bit immediate.
+    RefI31,
+    /// `struct.new $x` (`default = false`) or `struct.new_default $x`
+    /// (`default = true`). The explicit form pops one value per field; the
+    /// default form pops nothing and fills every field with its default.
+    /// Both forms are const-eligible (`valid.ml:1029-1040` wildcards the
+    /// `initop`).
+    StructNew {
+        type_idx: TypeIdx,
+        default: bool,
+    },
+    /// `array.new $x` (`default = false`) or `array.new_default $x`
+    /// (`default = true`). Both forms pop the length; the explicit form also
+    /// pops the fill value. Both are const-eligible (pin wildcard).
+    ArrayNew {
+        type_idx: TypeIdx,
+        default: bool,
+    },
+    /// `array.new_fixed $x $n`: pops `count` element values, first operand
+    /// lowest index.
+    ArrayNewFixed {
+        type_idx: TypeIdx,
+        count: u32,
+    },
+    /// `any.convert_extern` / `extern.convert_any`: an immediate value-level
+    /// re-tag, never an allocation.
+    ExternConvert {
+        direction: ExternConvert,
+    },
+}
+
+/// Direction of the extern/any conversion const forms (`externtype`-level
+/// re-tags, `eval.ml:929-939`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum ExternConvert {
+    /// `extern.convert_any`: any-side reference → extern-side reference.
+    AnyToExtern,
+    /// `any.convert_extern`: extern-side reference → any-side reference.
+    ExternToAny,
 }
 
 /// A function import declaration in lowered register IR.
@@ -192,6 +241,13 @@ pub struct RegImport {
     pub module: String,
     pub name: String,
     pub ty: FuncType,
+    /// The type index the import was declared with. Import matching compares
+    /// the provider's function DEftype against this declaration's deftype
+    /// (`match_externtype` → `match_deftype`), so canonical identity of the
+    /// whole type entry (rec-group shape, finality, supertypes) participates —
+    /// a params/results-only comparison would conflate `(rec (type (func))
+    /// (type (struct)))` with `(rec (type (struct)) (type (func)))`.
+    pub type_idx: TypeIdx,
 }
 
 /// A memory import declaration in lowered register IR.
@@ -2015,6 +2071,7 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
                 module: import.module.clone(),
                 name: import.name.clone(),
                 ty: ty.clone(),
+                type_idx,
             }),
             _ => None,
         })
@@ -2164,23 +2221,27 @@ fn lower_element_expr(expr: &crate::types::ElementExpr<'_>) -> Result<RegElemVal
     match instrs.as_slice() {
         [first, last] if matches!(last.instr, Instr::End) => match first.instr {
             Instr::RefFunc(func) => Ok(RegElemValue::FuncRef(func)),
-            Instr::RefNull(_) => Ok(RegElemValue::Null),
+            Instr::RefNull(RefType::FuncRef) => Ok(RegElemValue::Null),
             Instr::GlobalGet(global) => Ok(RegElemValue::GlobalGet(global)),
-            ref other => Err(LowerError {
-                offset: first.offset,
-                function: None,
-                kind: LowerErrorKind::UnsupportedInstr {
-                    op: instr_name(other),
-                },
-            }),
+            _ => {
+                // Any other const-eligible expression (GC allocation forms,
+                // non-funcref nulls, conversions) is evaluated at
+                // instantiation against the heap.
+                Ok(RegElemValue::Expr(lower_const_expr(
+                    expr.expr,
+                    expr.offset,
+                )?))
+            }
         },
-        _ => Err(LowerError {
-            offset: ByteOffset(expr.offset),
-            function: None,
-            kind: LowerErrorKind::UnsupportedInstr {
-                op: "multi-instruction element expression",
-            },
-        }),
+        _ => {
+            // Multi-instruction const expressions (extended-const
+            // arithmetic, nested GC construction) are evaluated at
+            // instantiation against the heap.
+            Ok(RegElemValue::Expr(lower_const_expr(
+                expr.expr,
+                expr.offset,
+            )?))
+        }
     }
 }
 
@@ -2209,14 +2270,43 @@ pub(crate) fn lower_const_expr(
             Instr::F64Const(value) => RegConstInstr::F64Const(value.to_bits()),
             Instr::V128Const(bytes) => RegConstInstr::V128Const(bytes),
             Instr::GlobalGet(global) => RegConstInstr::GlobalGet(global),
-            Instr::RefNull(ref_type) => {
-                if matches!(ref_type, RefType::FuncRef) {
-                    RegConstInstr::RefNull
-                } else {
-                    RegConstInstr::RefNullOf(ref_type)
-                }
-            }
+            Instr::RefNull(ref_type) => match ref_type {
+                RefType::FuncRef => RegConstInstr::RefNull,
+                RefType::ExternRef => RegConstInstr::RefNullOf(ref_type),
+                RefType::Typed { heap, .. } => match heap {
+                    HeapType::Func | HeapType::Extern | HeapType::Exn | HeapType::Type(_) => {
+                        RegConstInstr::RefNullOf(ref_type)
+                    }
+                    gc => RegConstInstr::RefNullGC(gc),
+                },
+            },
             Instr::RefFunc(func) => RegConstInstr::RefFunc(func),
+            Instr::RefI31 => RegConstInstr::RefI31,
+            Instr::StructNew(type_idx) => RegConstInstr::StructNew {
+                type_idx,
+                default: false,
+            },
+            Instr::StructNewDefault(type_idx) => RegConstInstr::StructNew {
+                type_idx,
+                default: true,
+            },
+            Instr::ArrayNew(type_idx) => RegConstInstr::ArrayNew {
+                type_idx,
+                default: false,
+            },
+            Instr::ArrayNewDefault(type_idx) => RegConstInstr::ArrayNew {
+                type_idx,
+                default: true,
+            },
+            Instr::ArrayNewFixed { type_idx, count } => {
+                RegConstInstr::ArrayNewFixed { type_idx, count }
+            }
+            Instr::AnyConvertExtern => RegConstInstr::ExternConvert {
+                direction: ExternConvert::ExternToAny,
+            },
+            Instr::ExternConvertAny => RegConstInstr::ExternConvert {
+                direction: ExternConvert::AnyToExtern,
+            },
             Instr::I32Add => RegConstInstr::I32Add,
             Instr::I32Sub => RegConstInstr::I32Sub,
             Instr::I32Mul => RegConstInstr::I32Mul,
