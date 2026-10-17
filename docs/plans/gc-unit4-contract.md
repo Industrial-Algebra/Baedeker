@@ -27,11 +27,12 @@ let check_const (c : context) (const : const) (t : valtype) =
   check_block c const.it (InstrT ([], [t], [])) const.at
 ```
 
-NOTE: `ArrayNewDefault` is NOT in the pin's is_const list — only
-`ArrayNew` (with an explicit length operand) and `ArrayNewFixed`
-(U2's const-eligibility survey already recorded this asymmetry:
-verify your validation rows against THIS row, not against U2's prose).
-`GlobalGet` requires the immutable kind.
+NOTE (corrected pre-dispatch, pin-verified): `StructNew`/`ArrayNew`
+carry an `initop` (explicit|implicit) — the wildcard patterns match
+BOTH forms, so `struct.new_default`/`array.new_default` ARE
+const-eligible (ast.ml:228,231). An earlier draft of this contract
+asserted the opposite; the pin wins. `GlobalGet` requires the
+immutable kind. `ArrayNewFixed` is separately listed.
 
 ### Result patterns for ref results (script/runner.ml:464-483)
 
@@ -83,8 +84,9 @@ type_equivalence/type_rec_canon).
    + export wiring + validation + linking needed.
 2. `RegConstInstr` (lower/mod.rs:165+) lacks: `ref.null` with GC
    heaptypes (current `RefNull` is funcref-shorthand ONLY), `RefI31`,
-   `StructNew`/`StructNewDefault`, `ArrayNew`/`ArrayNewFixed`
-   (+NOT ArrayNewDefault per is_const), `ExternConvert` both ways.
+   `StructNew`/`StructNewDefault` (both initop forms), `ArrayNew`/
+   `ArrayNewDefault` (both const per is_const — initop wildcard),
+   `ArrayNewFixed`, `ExternConvert` both ways.
    Const-expr VALIDATION must accept exactly the is_const set;
    const-expr EVALUATION (globals/tables/elems init) must execute
    them against the heap with U2's allocation discipline (fallible,
@@ -114,9 +116,10 @@ type_equivalence/type_rec_canon).
   module-level `with_module_types` binding at instantiation (U1 seam:
   `Imports::with_module_types` exists — wire the runner + public API
   through it; link groups register provider heaps per U2).
-- `validate/mod.rs`: const-expr eligibility per is_const (reject
-  ArrayNewDefault and mutable GlobalGet in const contexts with the
-  pin's message shapes); type-import matching (quote the direction!).
+- `validate/mod.rs`: const-expr eligibility per is_const (accept BOTH
+  initop forms; reject mutable GlobalGet and non-const instrs in const
+  contexts with the pin's message shapes); type-import matching (quote
+  the direction!).
 - `lower/mod.rs`: RegConstInstr extension + lowering of GC const
   forms; table/elem/global init plumbing unchanged in shape.
 - `runtime/mod.rs`: const-expr evaluation for inits (heap-allocating
@@ -142,10 +145,11 @@ type_equivalence/type_rec_canon).
   imported binds (direction per pin); re-export chains; heap
   provenance through imported-type-driven allocation.
 - `gc_u4_surface.rs` — globals/tables/elems with GC types: immutable
-  global initialized by struct.new/ref.i31/any.convert_extern(array.new);
+  global initialized by struct.new/struct.new_default/ref.i31/
+  any.convert_extern/array.new/array.new_default/array.new_fixed;
   table (ref $t) with init expr; elem segments with GC const exprs;
-  const REJECTIONS: ArrayNewDefault in const context, mutable
-  GlobalGet, non-const instr — exact pin error text.
+  const REJECTIONS: mutable GlobalGet, non-const instr — exact pin
+  error text (array.new_default in a GLOBAL init is ACCEPTED — pin).
 - `gc_u4_runner.rs` — RefHost result matching (identity, ExternHT-any,
   AnyHT-excludes-func, EqHT kinds, NullPat); a module returning
   `(ref.extern N)` asserted equal.
@@ -160,7 +164,6 @@ type_equivalence/type_rec_canon).
 ## Rule-7 ambiguity report
 
 Report: the import-type matching direction as quoted (sub vs super);
-ArrayNewDefault const asymmetry if our U2 prose differs (pin wins);
 any corpus file the runner STILL cannot express after this unit
 (gap list for U5); FFI token stability choices.
 
