@@ -5756,6 +5756,31 @@ fn pop_control_result_types(
     pop_exact(module, function, state, expected, offset)
 }
 
+/// Check that the operands the current frame has produced are compatible with
+/// `expected` (a block's end types, a label's branch types, or the function's
+/// result types for `return`).
+///
+/// Review r2 P1: this check is FRAME-LOCAL. The operand stack below the
+/// current frame's `outer_height` belongs to enclosing frames; an enclosing
+/// frame's operand is never a candidate for this frame's missing result. The
+/// reviewer's minimized case
+///
+/// ```wat
+/// (module (func
+///   i32.const 1
+///   block (result i64 f32)
+///     unreachable
+///     f32.const 0
+///   end
+///   drop drop drop))
+/// ```
+///
+/// is valid (the block's missing `i64` is polymorphic because the block body
+/// is unreachable) but a whole-stack read matched the enclosing `i32` against
+/// the expected `i64` and reported `ControlResultTypeMismatch`. Operands
+/// missing from an unreachable frame stay polymorphic — compatible with
+/// anything — which is what `found_len` being clipped to the frame-local
+/// length below encodes; the arity requirement applies only while reachable.
 fn ensure_stack_types(
     module: &Module<'_>,
     state: &ValidationState,
@@ -5765,12 +5790,14 @@ fn ensure_stack_types(
         return Ok(());
     }
 
+    let outer_height = state.current_frame().outer_height;
     let operands = state.operands.as_slice();
-    let found_len = core::cmp::min(operands.len(), expected.len());
-    let found = &operands[operands.len().saturating_sub(found_len)..];
+    let actual = operands.get(outer_height..).unwrap_or(&[]);
+    let found_len = core::cmp::min(actual.len(), expected.len());
+    let found = &actual[actual.len().saturating_sub(found_len)..];
     let expected_suffix = &expected[expected.len() - found_len..];
 
-    if (state.reachability == Reachability::Reachable && operands.len() < expected.len())
+    if (state.reachability == Reachability::Reachable && actual.len() < expected.len())
         || !found
             .iter()
             .zip(expected_suffix)

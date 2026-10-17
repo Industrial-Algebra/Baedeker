@@ -31,6 +31,29 @@
 //! pinned algorithm's behaviour, and the campaign now asserts FULL acceptance:
 //! every generated module that decodes validates and lowers. No rejection
 //! ledger is needed because there are no rejections left.
+//!
+//! Review r2 P1: the stack-compatibility helper behind both `end`/`else` result
+//! checks (`pop_control_result_types`) and branch checks (`pop_branch_types`)
+//! read the ENTIRE operand vector. An enclosing frame's operand therefore
+//! matched a result type the current frame had not produced, so partially
+//! satisfied polymorphic results in an unreachable block were rejected:
+//!
+//! ```wat
+//! (module (func
+//!   i32.const 1
+//!   block (result i64 f32)
+//!     unreachable
+//!     f32.const 0
+//!   end
+//!   drop drop drop))
+//! ```
+//!
+//! is valid (the missing `i64` is polymorphic) but reported
+//! `ControlResultTypeMismatch { expected: [I64, F32], found: [I32, F32] }` — the
+//! enclosing `i32` consumed as the block's missing result. `ensure_stack_types`
+//! is now frame-local (operands at or above the current frame's `outer_height`),
+//! matching `ensure_frame_end_types`, and the fresh seeds below are pinned in
+//! the campaign's fixed seed set.
 
 use arbitrary::Unstructured;
 use baedeker_core::binary::module::Module;
@@ -99,7 +122,12 @@ fn seeded_gc_smith_campaign_decodes_validates_and_lowers() {
     let mut decode_failures: Vec<(u64, String)> = Vec::new();
     let mut validation_failures: Vec<(u64, String)> = Vec::new();
 
-    for seed in 0..400u64 {
+    // The fixed seed set: the original 0..400 campaign plus the three fresh
+    // wasm-smith seeds review r2 surfaced. All three are independently VALID
+    // per wasmparser at this pin and used to be rejected by the whole-stack
+    // polymorphic result check (`ControlResultTypeMismatch` with an enclosing
+    // frame's operand in `found`).
+    for seed in (0..400u64).chain([4097, 10158, 10334]) {
         let bytes = seed_bytes(seed, 2048);
         let mut unstructured = Unstructured::new(&bytes);
         let Ok(smith_module) = wasm_smith::Module::new(config(), &mut unstructured) else {
@@ -214,6 +242,86 @@ fn hand_written_gc_surface_lowers() {
 
     module.validate().expect("GC module validates");
     module.lower().expect("GC module lowers");
+}
+
+/// Review r2 P1 root cause, pinned as hand-written regressions: the
+/// stack-compatibility check for a frame's results/branch types is
+/// FRAME-LOCAL. Operands below the current frame's `outer_height` belong to
+/// enclosing frames and are never candidates for this frame's results;
+/// operands the current frame has not produced stay polymorphic while the
+/// frame is unreachable.
+#[test]
+fn polymorphic_result_checks_are_frame_local() {
+    fn validate(source: &str) -> Result<(), String> {
+        let buf = wast::parser::ParseBuffer::new(source).unwrap();
+        let mut wat = wast::parser::parse::<wast::Wat<'_>>(&buf).unwrap();
+        let bytes = wat.encode().unwrap();
+        let module = Module::decode(&bytes).unwrap();
+        module
+            .validate()
+            .map_err(|error| format!("{:?}", error.kind))
+    }
+
+    fn validate_and_lower(source: &str) {
+        let buf = wast::parser::ParseBuffer::new(source).unwrap();
+        let mut wat = wast::parser::parse::<wast::Wat<'_>>(&buf).unwrap();
+        let bytes = wat.encode().unwrap();
+        let module = Module::decode(&bytes).unwrap();
+        module
+            .validate()
+            .unwrap_or_else(|error| panic!("{:?} must validate: {error:?}", error.kind));
+        module.lower().expect("a valid module must lower");
+    }
+
+    // The reviewer's minimized case: the block's missing `i64` is polymorphic
+    // (its body is unreachable) and the enclosing `i32` must not be consumed
+    // as it. Valid in wasmparser at this pin.
+    validate_and_lower(
+        r#"(module (func
+          i32.const 1
+          block (result i64 f32)
+            unreachable
+            f32.const 0
+          end
+          drop drop drop))"#,
+    );
+
+    // The same shape on the BRANCH path (`pop_branch_types` shares the helper):
+    // `br 0` needs `[i64 f32]`, the frame supplied only `f32`, and the missing
+    // `i64` is polymorphic.
+    validate_and_lower(
+        r#"(module (func
+          i32.const 1
+          block (result i64 f32)
+            unreachable
+            f32.const 0
+            br 0
+          end
+          drop drop drop))"#,
+    );
+
+    // Frame locality is not a licence to accept anything: a concrete
+    // frame-local operand of the wrong type is still a mismatch.
+    validate(
+        r#"(module (func
+          i32.const 1
+          block (result i64 f32)
+            unreachable
+            i64.const 0
+          end
+          drop drop drop))"#,
+    )
+    .expect_err("the frame-local operand must match the expected result type");
+    // ...and a still-reachable frame owes every result concretely.
+    validate(
+        r#"(module (func
+          i32.const 1
+          block (result i64 f32)
+            i64.const 0
+          end
+          drop drop drop))"#,
+    )
+    .expect_err("a reachable frame must supply all of its results");
 }
 
 /// Review r1 P2-7 root cause, pinned as a hand-written regression: stack
