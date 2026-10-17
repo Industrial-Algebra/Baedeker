@@ -65,23 +65,33 @@ RESULT patterns return `false` (runtime_official.rs:974) — must become
 real matching (eq_ref identity on host handles; RefTypePat rows per
 runner.ml above).
 
-### Type imports/exports
+### Cross-module type identity (CORRECTED post-implementation — the
+original section asserted a type-import/export entity that DOES NOT
+EXIST at this pin; caught by the implementer, verified by the
+orchestrator at decode.ml:305-313)
 
-Quote at the pin during implementation (do not trust this summary):
-decode.ml import-desc case for byte 0x04 (type import) and the export
-section's type export; valid.ml's import-type matching (declared type
-must match the imported binding — sub-typing direction: QUOTE IT);
-eval/link.ml or instance.ml: exported type binds so importing modules
-see the PROVIDER's closed form (this is what U1's
-`Imports::with_module_types` + `ClosedDefinedType` identity was built
-for; the 22-file R0 set exercises it heavily in
-type_equivalence/type_rec_canon).
+```
+decode.ml:307-313: 0x00 func | 0x01 table | 0x02 mem | 0x03 global
+                    | 0x04 TAG  <- not a type kind
+types.ml:46:        five extern kinds only
+```
+
+Type identity travels through the `typeuse` INSIDE function (and tag)
+import types: `match_externtype` (eval.ml:1187, direction: provided
+must match declared) reduces func-vs-func to `match_deftype`
+(match.ml:145-150): equal rolled closed forms (rec-group shape and
+position included) OR provided's declared-supertype chain reaches
+declared. This is NOT the covariant match_comptype relation. U1's
+`Imports::with_module_types` + U2's provider-heap registration wire
+the seam; a re-export chain is import-then-wrap.
 
 ## Current-state gaps (verified by orchestrator recon — confirm, then close)
 
-1. `ImportDesc` lacks a Type case (importsec.rs:63-91 — 0x00..0x04
-   handled except type); no export-of-type. `ImportDesc::Type(TypeIdx)`
-   + export wiring + validation + linking needed.
+1. (SUPERSEDED by the correction above: no Type import kind exists at
+   this pin. The gap was instead the LINKING seam: imported funcs'
+   declared type entries + canonical identity comparison + runner
+   wiring — implemented as `RegImport.type_idx` + `defined_type_matches`
+   + `with_module_types`/`provider_heap` in the official runner.)
 2. `RegConstInstr` (lower/mod.rs:165+) lacks: `ref.null` with GC
    heaptypes (current `RefNull` is funcref-shorthand ONLY), `RefI31`,
    `StructNew`/`StructNewDefault` (both initop forms), `ArrayNew`/
@@ -111,11 +121,11 @@ type_equivalence/type_rec_canon).
 
 ## Changes
 
-- `types.rs`/`binary/importsec.rs`/`binary/exportsec.rs`/`module.rs`:
-  type import/export entities; validation rows quoted from the pin;
-  module-level `with_module_types` binding at instantiation (U1 seam:
-  `Imports::with_module_types` exists — wire the runner + public API
-  through it; link groups register provider heaps per U2).
+- `types.rs`/`lower/mod.rs`/`runtime/store.rs`: `defined_type_matches`
+  (pin match_deftype), `RegImport.type_idx`, canonical func-type
+  identity for boundary/call checks; runner `with_module_types` +
+  `provider_heap` wiring; link groups register provider heaps per U2
+  (now symmetric — see ambiguity #7).
 - `validate/mod.rs`: const-expr eligibility per is_const (accept BOTH
   initop forms; reject mutable GlobalGet and non-const instrs in const
   contexts with the pin's message shapes); type-import matching (quote
