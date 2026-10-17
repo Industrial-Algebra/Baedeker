@@ -5142,7 +5142,14 @@ fn finish_frame(
     for ty in end_types {
         state.operands.push(ty);
     }
-    state.reachability = Reachability::Reachable;
+    // Restore the ENCLOSING frame's reachability: a block that ends inside
+    // unreachable code leaves its parent unreachable (the parent's operand
+    // floor is then polymorphic again once the block's results are consumed).
+    state.reachability = if frame.entry_unreachable {
+        Reachability::Unreachable
+    } else {
+        Reachability::Reachable
+    };
     Ok(())
 }
 

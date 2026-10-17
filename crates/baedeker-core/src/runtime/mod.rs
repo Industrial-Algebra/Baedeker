@@ -2928,12 +2928,13 @@ pub enum RefPattern {
     /// `NullPat _`: only a null reference matches.
     Null,
     /// `RefPat (ExternRef (HostRef n))`: host-handle identity in the extern
-    /// zone. `None` is the bare `(ref.extern)` pattern: ANY non-null extern
-    /// reference.
+    /// zone. `None` is the bare `(ref.extern)` pattern — the
+    /// `RefTypePat ExternHT, _` row, which matches EVERY reference value,
+    /// including nulls (there is no null exclusion in the pin).
     Extern(Option<u32>),
-    /// `RefPat (HostRef n)`: host-handle identity (eq_ref on the handle).
-    /// The same host value may appear internalized (`any.convert_extern`) or
-    /// in the extern zone, so either zone matches.
+    /// `RefPat (HostRef n)`: host-handle identity on the any-side handle
+    /// (`script.ml:93` equates `HostRef` with `HostRef` only, so an
+    /// externalized handle in the extern zone does NOT match).
     Host(u32),
     /// `(ref.func)` with no index: any non-null funcref.
     FuncAny,
@@ -2955,17 +2956,26 @@ pub enum RefPattern {
 /// Whether a runtime reference value satisfies a [`RefPattern`], following
 /// the pinned `assert_ref_pat` rows. GC object kinds are resolved through the
 /// store's (or a registered foreign) heap.
+///
+/// Reference patterns apply ONLY to reference values: the pin dispatches them
+/// from the `Ref` result case (`runner.ml:481`), so a numeric value never
+/// matches a reference pattern.
 pub fn ref_matches_pattern(value: &Value, pattern: RefPattern, store: Option<&Store>) -> bool {
+    if !is_reference_value(value) {
+        return false;
+    }
     match pattern {
         RefPattern::Null => is_null_ref(value),
         RefPattern::Extern(Some(handle)) => *value == Value::ExternRef(Some(handle)),
-        RefPattern::Extern(None) => {
-            matches!(value, Value::ExternRef(Some(_)) | Value::ExternGc(Some(_)))
+        // `RefTypePat ExternHT, _ -> true`: EVERY reference value matches,
+        // null included (runner.ml:475).
+        RefPattern::Extern(None) => true,
+        // `RefPat (HostRef n)` is `eq_ref` identity, and `script.ml:93`
+        // equates `HostRef` with `HostRef` only: the internalized any-side
+        // handle matches, the externalized extern-zone value does not.
+        RefPattern::Host(handle) => {
+            matches!(value, Value::HostAny(Some(found)) if *found == handle)
         }
-        RefPattern::Host(handle) => matches!(
-            value,
-            Value::HostAny(Some(found)) | Value::ExternRef(Some(found)) if *found == handle
-        ),
         RefPattern::FuncAny => matches!(value, Value::FuncRef(Some(_))),
         RefPattern::FuncIndex(idx) => {
             matches!(value, Value::FuncRef(Some((_, found))) if *found == idx)
@@ -2976,6 +2986,21 @@ pub fn ref_matches_pattern(value: &Value, pattern: RefPattern, store: Option<&St
         RefPattern::Array => gc_ref_is_kind(store, value, false),
         RefPattern::I31 => matches!(value, Value::I31(_)),
     }
+}
+
+/// Whether a value is a reference (`Value.ref_` in the reference
+/// interpreter). Non-reference values dispatch numeric/vector patterns.
+fn is_reference_value(value: &Value) -> bool {
+    matches!(
+        value,
+        Value::FuncRef(_)
+            | Value::ExternRef(_)
+            | Value::HostAny(_)
+            | Value::ExternGc(_)
+            | Value::ExnRef(_)
+            | Value::GcRef { .. }
+            | Value::I31(_)
+    )
 }
 
 /// Whether a `GcRef` object is a struct (`want_struct`) or an array, resolved

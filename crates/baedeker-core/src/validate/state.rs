@@ -46,6 +46,13 @@ pub struct ControlFrame {
     pub end_types: Vec<ValType>,
     pub local_inits: Vec<bool>,
     pub has_else: bool,
+    /// The reachability of the ENCLOSING frame at the moment this frame was
+    /// pushed. Stack-polymorphic typing is per frame (`push_ctrl` records the
+    /// stack height and marks the new block reachable): a block entered in
+    /// unreachable code is validated as a reachable block whose operand floor
+    /// sits at the enclosing frame's height, and the enclosing frame's
+    /// unreachable state is restored when the block ends.
+    pub entry_unreachable: bool,
 }
 
 /// Operand stack state.
@@ -121,6 +128,7 @@ impl ValidationState {
                 // empty and `local_inits` is moved, not copied.
                 local_inits: Vec::new(),
                 has_else: false,
+                entry_unreachable: false,
             }],
             locals,
             local_inits,
@@ -178,7 +186,12 @@ impl ValidationState {
             end_types,
             local_inits,
             has_else: false,
+            entry_unreachable: self.reachability == Reachability::Unreachable,
         });
+        // `push_ctrl` marks the new block reachable: the block's own body is
+        // type-checked from its declared parameter types, not from the
+        // enclosing frame's polymorphic stack.
+        self.reachability = Reachability::Reachable;
         true
     }
 

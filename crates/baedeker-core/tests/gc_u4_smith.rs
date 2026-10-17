@@ -9,6 +9,28 @@
 //! panic — no execution differential in this slice. This test runs the same
 //! generator shape for a fixed seed set so the property is enforced in CI,
 //! where the cargo-fuzz toolchain is not run.
+//!
+//! Review r1 P2-7: the campaign used to skip every VALIDATION rejection
+//! silently — `validated` and `lowered` only counted the accepts, so 54 of the
+//! 400 seeds (fresh campaigns: 56/55/58/46/56) could be false rejections of
+//! valid modules and the "acceptance" gate would still be green. The
+//! classification showed they were NOT generator configurations we decline:
+//! every rejected module is VALID per an independent validator (wasmparser at
+//! this pin), and all 54 shared one cause — the validator reset its
+//! stack-polymorphic (unreachable) state to reachable at every `end`, so an
+//! enclosing unreachable frame's polymorphic operand stack disappeared after a
+//! nested block closed. The error classes were `ControlResultTypeMismatch`
+//! (12 seeds; 8 of them with empty `expected`/`found`, the mangled stack
+//! dropping below the frame's outer height), `StackUnderflow` (21 seeds; a pop
+//! that must be `Bot` reported as a concrete underflow) and `TypeMismatch`
+//! (21 seeds; a concrete leftover type checked where the frame was
+//! polymorphic).
+//!
+//! The fix makes unreachability per frame (`push_ctrl` marks the new block
+//! reachable, `end` restores the enclosing frame's state), which is the
+//! pinned algorithm's behaviour, and the campaign now asserts FULL acceptance:
+//! every generated module that decodes validates and lowers. No rejection
+//! ledger is needed because there are no rejections left.
 
 use arbitrary::Unstructured;
 use baedeker_core::binary::module::Module;
@@ -63,8 +85,10 @@ fn seed_bytes(seed: u64, len: usize) -> Vec<u8> {
         .collect()
 }
 
-/// One seeded campaign: every generated module decodes, and every module that
-/// validates lowers without panicking. GC type sections must actually appear.
+/// One seeded campaign: every generated module decodes, and every decoded
+/// module validates and lowers without panicking. GC type sections must
+/// actually appear. Validation acceptance is TOTAL — a rejection is a hard
+/// failure naming the seed and error kind, never a silent skip.
 #[test]
 fn seeded_gc_smith_campaign_decodes_validates_and_lowers() {
     let mut generated = 0usize;
@@ -73,6 +97,7 @@ fn seeded_gc_smith_campaign_decodes_validates_and_lowers() {
     let mut lowered = 0usize;
     let mut with_gc_types = 0usize;
     let mut decode_failures: Vec<(u64, String)> = Vec::new();
+    let mut validation_failures: Vec<(u64, String)> = Vec::new();
 
     for seed in 0..400u64 {
         let bytes = seed_bytes(seed, 2048);
@@ -101,13 +126,18 @@ fn seeded_gc_smith_campaign_decodes_validates_and_lowers() {
         {
             with_gc_types += 1;
         }
-        if module.validate().is_ok() {
-            validated += 1;
-            module.lower().unwrap_or_else(|error| {
-                panic!("seed {seed}: validated module failed to lower: {error:?}")
-            });
-            lowered += 1;
+        match module.validate() {
+            Ok(()) => {}
+            Err(error) => {
+                validation_failures.push((seed, format!("{:?}", error.kind)));
+                continue;
+            }
         }
+        validated += 1;
+        module.lower().unwrap_or_else(|error| {
+            panic!("seed {seed}: validated module failed to lower: {error:?}")
+        });
+        lowered += 1;
     }
 
     assert!(
@@ -118,9 +148,19 @@ fn seeded_gc_smith_campaign_decodes_validates_and_lowers() {
         with_gc_types > 0,
         "no generated module carried a GC type section"
     );
+    assert!(
+        validation_failures.is_empty(),
+        "validation acceptance is total: every decoded module must validate, \
+         these did not (false rejections are validator defects, not \
+         unsupported generator configurations): {validation_failures:?}"
+    );
     assert_eq!(
         validated, lowered,
         "every validated module must lower (no panics, no false rejections)"
+    );
+    assert_eq!(
+        validated, decoded,
+        "every decoded module must validate (full acceptance)"
     );
     // Known decoder gap (recorded for unit 5): the data-section offset
     // expression parser scans for the first `0x0b` byte instead of decoding
@@ -133,8 +173,9 @@ fn seeded_gc_smith_campaign_decodes_validates_and_lowers() {
     );
     println!(
         "gc-smith smoke: generated={generated} decoded={decoded} with_gc_types={with_gc_types} \
-         validated={validated} lowered={lowered} decode_failures={}",
-        decode_failures.len()
+         validated={validated} lowered={lowered} decode_failures={} validation_failures={}",
+        decode_failures.len(),
+        validation_failures.len()
     );
 }
 
@@ -173,4 +214,43 @@ fn hand_written_gc_surface_lowers() {
 
     module.validate().expect("GC module validates");
     module.lower().expect("GC module lowers");
+}
+
+/// Review r1 P2-7 root cause, pinned as a hand-written regression: stack
+/// polymorphism is PER FRAME (`push_ctrl` marks the new block reachable, the
+/// enclosing unreachable state is restored at `end`).
+///
+/// `(unreachable) (block) (drop)` is valid — the enclosing function frame is
+/// still unreachable after the empty block closes, so `drop`'s operand is
+/// `Bot`. Before the fix, `end` reset the validator to reachable and the
+/// campaign's rejections appeared as `StackUnderflow { op: "drop",
+/// available: [] }` (18 of 54 seeds).
+#[test]
+fn unreachable_state_is_restored_after_a_nested_block() {
+    fn validate(source: &str) -> Result<(), String> {
+        let buf = wast::parser::ParseBuffer::new(source).unwrap();
+        let mut wat = wast::parser::parse::<wast::Wat<'_>>(&buf).unwrap();
+        let bytes = wat.encode().unwrap();
+        let module = Module::decode(&bytes).unwrap();
+        module
+            .validate()
+            .map_err(|error| format!("{:?}", error.kind))
+    }
+
+    // Valid: the polymorphic enclosing frame resumes after the block.
+    validate("(module (func (result i32) unreachable (block) drop i32.const 7))")
+        .expect("an enclosing unreachable frame keeps its polymorphic stack");
+    validate("(module (func unreachable (block) i64.const 5 drop i32.const 7 drop))")
+        .expect("concrete values pushed after the block pop concretely");
+    // Valid: `unreachable` itself is stack-polymorphic, so an `if` condition
+    // is supplied by its polymorphic output.
+    validate("(module (func unreachable if end))").expect("unreachable supplies the if condition");
+
+    // Invalid: a block entered in unreachable code is validated as a
+    // REACHABLE block, so its own operand floor is not polymorphic.
+    validate("(module (func unreachable (block i32.add drop)))")
+        .expect_err("a block body's pops must not inherit the enclosing polymorphism");
+    // Invalid: a block body must leave exactly its declared results.
+    validate("(module (func unreachable (block i32.const 1 end)))")
+        .expect_err("a block body may not leave extra operands");
 }

@@ -150,3 +150,71 @@ fn scalars_are_unchanged() {
         );
     }
 }
+
+/// Tokens are process-globally unique, so a token minted by one instance's
+/// registry NEVER resolves in another instance's registry — not even when both
+/// registries are fresh and both have minted their own first handle. Two
+/// per-registry counters that both started at 1 made A's token decode as B's
+/// unrelated value.
+#[test]
+fn cross_registry_tokens_never_collide() {
+    let value_a = Value::HostAny(Some(11));
+    let value_b = Value::HostAny(Some(22));
+
+    let mut registry_a = HandleRegistry::new();
+    let mut registry_b = HandleRegistry::new();
+    let token_a = registry_a.mint(value_a).expect("mint in A");
+    let token_b = registry_b.mint(value_b).expect("mint in B");
+    assert_ne!(
+        token_a, token_b,
+        "tokens from different registries must not collide"
+    );
+
+    let ffi_a = BaedekerValue {
+        tag: BaedekerValueTag::HostAny as u8,
+        data: baedeker_ffi::value::BaedekerValueData { handle: token_a },
+    };
+    assert_eq!(ffi_a.to_core_with_handles(&registry_a), Ok(value_a));
+    assert_eq!(
+        ffi_a.to_core_with_handles(&registry_b),
+        Err(HandleError::UnknownToken(token_a)),
+        "a foreign registry must reject the token rather than decode it"
+    );
+
+    // The reverse direction, and a token minted later in B's own sequence.
+    let ffi_b = BaedekerValue {
+        tag: BaedekerValueTag::HostAny as u8,
+        data: baedeker_ffi::value::BaedekerValueData { handle: token_b },
+    };
+    assert_eq!(
+        ffi_b.to_core_with_handles(&registry_a),
+        Err(HandleError::UnknownToken(token_b))
+    );
+    let mut registry_c = HandleRegistry::new();
+    let token_c = registry_c.mint(Value::HostAny(Some(33))).unwrap();
+    assert!(![token_a, token_b].contains(&token_c));
+}
+
+/// `Default` must behave exactly like `new()`: the first minted token is a
+/// valid non-zero token, never the derived-zero counter's `Ok(0)`.
+#[test]
+fn default_registry_mints_a_valid_token() {
+    let mut registry = HandleRegistry::default();
+    let token = registry.mint(Value::HostAny(Some(5))).expect("mint");
+    assert_ne!(token, 0, "0 is never a valid token");
+    assert!(registry.resolve(0).is_none());
+    assert_eq!(
+        registry.resolve(token),
+        Some(Value::HostAny(Some(5))),
+        "the first minted token resolves"
+    );
+    // An explicitly-zero handle is always unknown.
+    let zero = BaedekerValue {
+        tag: BaedekerValueTag::GcRef as u8,
+        data: baedeker_ffi::value::BaedekerValueData { handle: 0 },
+    };
+    assert_eq!(
+        zero.to_core_with_handles(&registry),
+        Err(HandleError::UnknownToken(0))
+    );
+}

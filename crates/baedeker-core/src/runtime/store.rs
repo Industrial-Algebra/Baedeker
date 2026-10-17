@@ -2308,72 +2308,77 @@ impl<'a> ConstEnv<'a> {
     /// allocate through the store's heap (fallible, stats-counted); a refusal
     /// or a malformed expression is a clean error with nothing published.
     fn eval(&self, expr: &[RegConstInstr]) -> Result<Value, RuntimeError> {
-        let mut stack: Vec<Value> = Vec::new();
+        let mut stack = ConstStack::new();
         for instr in expr {
             match *instr {
-                RegConstInstr::I32Const(value) => stack.push(Value::I32(value)),
-                RegConstInstr::I64Const(value) => stack.push(Value::I64(value)),
-                RegConstInstr::F32Const(bits) => stack.push(Value::F32(f32::from_bits(bits))),
-                RegConstInstr::F64Const(bits) => stack.push(Value::F64(f64::from_bits(bits))),
-                RegConstInstr::V128Const(bytes) => stack.push(Value::V128(bytes)),
-                RegConstInstr::RefNull => stack.push(Value::FuncRef(None)),
+                RegConstInstr::I32Const(value) => stack.push(Value::I32(value))?,
+                RegConstInstr::I64Const(value) => stack.push(Value::I64(value))?,
+                RegConstInstr::F32Const(bits) => stack.push(Value::F32(f32::from_bits(bits)))?,
+                RegConstInstr::F64Const(bits) => stack.push(Value::F64(f64::from_bits(bits)))?,
+                RegConstInstr::V128Const(bytes) => stack.push(Value::V128(bytes))?,
+                RegConstInstr::RefNull => stack.push(Value::FuncRef(None))?,
                 RegConstInstr::RefNullOf(ref_type) => {
-                    stack.push(crate::runtime::ref_null_value(&ref_type))
+                    stack.push(crate::runtime::ref_null_value(&ref_type))?
                 }
                 RegConstInstr::RefNullGC(heap) => stack.push(crate::runtime::ref_null_value(
                     &RefType::from_parts(true, heap),
-                )),
+                ))?,
                 RegConstInstr::RefFunc(func) => {
-                    stack.push(Value::FuncRef(Some((self.instance_id, func.0))));
+                    stack.push(Value::FuncRef(Some((self.instance_id, func.0))))?;
                 }
                 RegConstInstr::GlobalGet(global) => {
                     let value = self.globals.get(global.0).ok_or(RuntimeError {
                         kind: RuntimeErrorKind::UnknownGlobal { global: global.0 },
                     })?;
-                    stack.push(value);
+                    stack.push(value)?;
                 }
                 RegConstInstr::I32Add => {
                     let (lhs, rhs) = pop_i32_pair(&mut stack)?;
-                    stack.push(Value::I32(lhs.wrapping_add(rhs)));
+                    stack.push(Value::I32(lhs.wrapping_add(rhs)))?;
                 }
                 RegConstInstr::I32Sub => {
                     let (lhs, rhs) = pop_i32_pair(&mut stack)?;
-                    stack.push(Value::I32(lhs.wrapping_sub(rhs)));
+                    stack.push(Value::I32(lhs.wrapping_sub(rhs)))?;
                 }
                 RegConstInstr::I32Mul => {
                     let (lhs, rhs) = pop_i32_pair(&mut stack)?;
-                    stack.push(Value::I32(lhs.wrapping_mul(rhs)));
+                    stack.push(Value::I32(lhs.wrapping_mul(rhs)))?;
                 }
                 RegConstInstr::I64Add => {
                     let (lhs, rhs) = pop_i64_pair(&mut stack)?;
-                    stack.push(Value::I64(lhs.wrapping_add(rhs)));
+                    stack.push(Value::I64(lhs.wrapping_add(rhs)))?;
                 }
                 RegConstInstr::I64Sub => {
                     let (lhs, rhs) = pop_i64_pair(&mut stack)?;
-                    stack.push(Value::I64(lhs.wrapping_sub(rhs)));
+                    stack.push(Value::I64(lhs.wrapping_sub(rhs)))?;
                 }
                 RegConstInstr::I64Mul => {
                     let (lhs, rhs) = pop_i64_pair(&mut stack)?;
-                    stack.push(Value::I64(lhs.wrapping_mul(rhs)));
+                    stack.push(Value::I64(lhs.wrapping_mul(rhs)))?;
                 }
                 RegConstInstr::RefI31 => {
                     let Some(Value::I32(value)) = stack.pop() else {
                         return Err(invalid_const_expr());
                     };
-                    stack.push(Value::I31((value as u32 & 0x7FFF_FFFF) as i32));
+                    stack.push(Value::I31((value as u32 & 0x7FFF_FFFF) as i32))?;
                 }
                 RegConstInstr::StructNew { type_idx, default } => {
                     let type_id = self.type_id(type_idx)?;
-                    let mut fields: Vec<Value> = Vec::new();
-                    let storages: Vec<StorageType> = {
+                    // Copy the field layout fallibly: the struct's field count
+                    // is module-controlled, so an infallible `collect()` would
+                    // abort on allocator refusal.
+                    let mut storages: Vec<StorageType> = Vec::new();
+                    {
                         let heap = self.heap.borrow();
-                        match heap.type_kind(type_id) {
-                            Some(GcTypeKind::Struct(field_types)) => {
-                                field_types.iter().map(|field| field.storage).collect()
-                            }
-                            _ => return Err(invalid_const_expr()),
-                        }
-                    };
+                        let Some(GcTypeKind::Struct(field_types)) = heap.type_kind(type_id) else {
+                            return Err(invalid_const_expr());
+                        };
+                        storages
+                            .try_reserve(field_types.len())
+                            .map_err(|_| gc_const_allocation_failed())?;
+                        storages.extend(field_types.iter().map(|field| field.storage));
+                    }
+                    let mut fields: Vec<Value> = Vec::new();
                     fields
                         .try_reserve(storages.len())
                         .map_err(|_| gc_const_allocation_failed())?;
@@ -2382,21 +2387,18 @@ impl<'a> ConstEnv<'a> {
                             fields.push(default_for_storage(*storage));
                         }
                     } else {
-                        // Operands arrive last-field-first.
-                        let mut popped = Vec::new();
-                        popped
-                            .try_reserve(storages.len())
-                            .map_err(|_| gc_const_allocation_failed())?;
+                        // Operands arrive last-field-first: pop them in that
+                        // order, then reverse in place (no replacement vec).
                         for _ in 0..storages.len() {
-                            popped.push(stack.pop().ok_or_else(invalid_const_expr)?);
+                            fields.push(stack.pop().ok_or_else(invalid_const_expr)?);
                         }
-                        fields.extend(popped.into_iter().rev());
+                        fields.reverse();
                     }
                     let id = self.heap.borrow_mut().alloc_struct_typed(type_id, fields)?;
                     stack.push(Value::GcRef {
                         heap: self.heap_id,
                         id,
-                    });
+                    })?;
                 }
                 RegConstInstr::ArrayNew { type_idx, default } => {
                     let type_id = self.type_id(type_idx)?;
@@ -2422,7 +2424,7 @@ impl<'a> ConstEnv<'a> {
                     stack.push(Value::GcRef {
                         heap: self.heap_id,
                         id,
-                    });
+                    })?;
                 }
                 RegConstInstr::ArrayNewFixed { type_idx, count } => {
                     let type_id = self.type_id(type_idx)?;
@@ -2439,7 +2441,7 @@ impl<'a> ConstEnv<'a> {
                     stack.push(Value::GcRef {
                         heap: self.heap_id,
                         id,
-                    });
+                    })?;
                 }
                 RegConstInstr::ExternConvert { direction } => {
                     let value = stack.pop().ok_or_else(invalid_const_expr)?;
@@ -2451,7 +2453,7 @@ impl<'a> ConstEnv<'a> {
                             crate::runtime::any_convert_extern(value)?
                         }
                     };
-                    stack.push(converted);
+                    stack.push(converted)?;
                 }
             }
         }
@@ -2459,7 +2461,44 @@ impl<'a> ConstEnv<'a> {
         if stack.len() != 1 {
             return Err(invalid_const_expr());
         }
-        Ok(stack[0])
+        Ok(*stack.get(0).ok_or_else(invalid_const_expr)?)
+    }
+}
+
+/// The const-expression evaluator's operand stack.
+///
+/// Every push reserves fallibly. A const expression is module-controlled
+/// (`struct.new`/`array.new_fixed` operand lists grow with the declared
+/// field/element count, and every nested form pushes), so an infallible
+/// `Vec` growth would abort the process under allocator pressure instead of
+/// refusing with a clean [`RuntimeErrorKind::ResourceLimitExceeded`].
+struct ConstStack {
+    values: Vec<Value>,
+}
+
+impl ConstStack {
+    fn new() -> Self {
+        Self { values: Vec::new() }
+    }
+
+    fn push(&mut self, value: Value) -> Result<(), RuntimeError> {
+        self.values
+            .try_reserve(1)
+            .map_err(|_| gc_const_allocation_failed())?;
+        self.values.push(value);
+        Ok(())
+    }
+
+    fn pop(&mut self) -> Option<Value> {
+        self.values.pop()
+    }
+
+    fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    fn get(&self, index: usize) -> Option<&Value> {
+        self.values.get(index)
     }
 }
 
@@ -2477,7 +2516,7 @@ fn gc_const_allocation_failed() -> RuntimeError {
     }
 }
 
-fn pop_i32_pair(stack: &mut Vec<Value>) -> Result<(i32, i32), RuntimeError> {
+fn pop_i32_pair(stack: &mut ConstStack) -> Result<(i32, i32), RuntimeError> {
     let (Some(Value::I32(rhs)), Some(Value::I32(lhs))) = (stack.pop(), stack.pop()) else {
         return Err(RuntimeError {
             kind: RuntimeErrorKind::InvalidConstExpr,
@@ -2486,7 +2525,7 @@ fn pop_i32_pair(stack: &mut Vec<Value>) -> Result<(i32, i32), RuntimeError> {
     Ok((lhs, rhs))
 }
 
-fn pop_i64_pair(stack: &mut Vec<Value>) -> Result<(i64, i64), RuntimeError> {
+fn pop_i64_pair(stack: &mut ConstStack) -> Result<(i64, i64), RuntimeError> {
     let (Some(Value::I64(rhs)), Some(Value::I64(lhs))) = (stack.pop(), stack.pop()) else {
         return Err(RuntimeError {
             kind: RuntimeErrorKind::InvalidConstExpr,

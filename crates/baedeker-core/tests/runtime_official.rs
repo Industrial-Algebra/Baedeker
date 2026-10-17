@@ -1019,6 +1019,8 @@ fn ret_core_matches(actual: &Value, expected: &WastRetCore<'_>, store: Option<&S
             RefPattern::Extern(Some(*expected)),
             store,
         ),
+        // Bare `(ref.extern)`: the `RefTypePat ExternHT, _` row matches every
+        // reference value, nulls included (runner.ml:475).
         WastRetCore::RefExtern(None) => {
             baedeker_core::runtime::ref_matches_pattern(actual, RefPattern::Extern(None), store)
         }
@@ -1036,7 +1038,8 @@ fn ret_core_matches(actual: &Value, expected: &WastRetCore<'_>, store: Option<&S
                 baedeker_core::runtime::ref_matches_pattern(actual, RefPattern::FuncAny, store)
             }
         },
-        // `(ref.host n)`: eq_ref identity on the host handle.
+        // `(ref.host n)`: eq_ref identity on the any-side host handle only
+        // (`script.ml:93` equates `HostRef` with `HostRef`).
         WastRetCore::RefHost(expected) => {
             baedeker_core::runtime::ref_matches_pattern(actual, RefPattern::Host(*expected), store)
         }

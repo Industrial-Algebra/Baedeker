@@ -16,6 +16,28 @@
 
 use baedeker_core::runtime::Value;
 use baedeker_core::types::{NumType, ValType, VecType};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Process-global token counter. Tokens are minted for the WHOLE process, not
+/// per registry: two per-instance registries that both started at 1 would let
+/// instance A's opaque handle decode — as an unrelated value — in instance
+/// B's registry. `resolve` still only finds tokens its own registry minted;
+/// global uniqueness makes a foreign token unambiguously unknown.
+///
+/// 1 is the first token and 0 is never valid. Reaching `u64::MAX` is checked
+/// and reports [`HandleError::TokenExhausted`] instead of wrapping.
+static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
+
+fn mint_token() -> Result<u64, HandleError> {
+    let mut current = NEXT_TOKEN.load(Ordering::SeqCst);
+    loop {
+        let next = current.checked_add(1).ok_or(HandleError::TokenExhausted)?;
+        match NEXT_TOKEN.compare_exchange_weak(current, next, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return Ok(current),
+            Err(actual) => current = actual,
+        }
+    }
+}
 
 /// Type tag for [`BaedekerValue`], and the value-type encoding used when
 /// declaring host function signatures.
@@ -126,6 +148,9 @@ pub enum HandleError {
     },
     /// The registry could not reserve storage for a new token.
     AllocationFailed,
+    /// The process-global token space is exhausted (`u64::MAX` reached); no
+    /// further handles can be minted without reusing a token.
+    TokenExhausted,
 }
 
 impl std::fmt::Display for HandleError {
@@ -136,6 +161,7 @@ impl std::fmt::Display for HandleError {
                 write!(f, "handle token is a {found:?}, not a {tag:?}")
             }
             Self::AllocationFailed => write!(f, "handle registry allocation refused"),
+            Self::TokenExhausted => write!(f, "handle token space exhausted"),
         }
     }
 }
@@ -144,24 +170,29 @@ impl std::error::Error for HandleError {}
 
 /// A per-instance token → `Value` registry for opaque GC handles.
 ///
-/// Tokens are minted starting at 1 (0 is never a valid token) and never
-/// reused, so a token stays valid for the store's lifetime and a stale or
-/// foreign token resolves to [`HandleError::UnknownToken`] instead of being
-/// misread. Minting is fallible: a refused reservation reports an error
-/// rather than aborting.
-#[derive(Debug, Default)]
+/// Tokens are minted from a process-global counter (`NEXT_TOKEN`), start
+/// at 1 (0 is never a valid token), and are never reused, so a token stays
+/// valid for the store's lifetime and a stale or foreign token resolves to
+/// [`HandleError::UnknownToken`] instead of being misread as an unrelated
+/// value. Minting is fallible: a refused reservation reports an error rather
+/// than aborting, and an exhausted token space is a clean error too.
+#[derive(Debug)]
 pub struct HandleRegistry {
     values: Vec<(u64, Value)>,
-    next_token: u64,
+}
+
+impl Default for HandleRegistry {
+    /// Same state as [`HandleRegistry::new`]: a derived `Default` would leave
+    /// a zero counter behind and mint the invalid token 0 as its first token.
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl HandleRegistry {
     /// An empty registry.
     pub fn new() -> Self {
-        Self {
-            values: Vec::new(),
-            next_token: 1,
-        }
+        Self { values: Vec::new() }
     }
 
     /// Mint an opaque token for `value`. Tokens are never released (no
@@ -172,8 +203,7 @@ impl HandleRegistry {
         self.values
             .try_reserve(1)
             .map_err(|_| HandleError::AllocationFailed)?;
-        let token = self.next_token;
-        self.next_token = self.next_token.wrapping_add(1).max(1);
+        let token = mint_token()?;
         self.values.push((token, value));
         Ok(token)
     }
