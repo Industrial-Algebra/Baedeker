@@ -127,3 +127,57 @@ fn execution_is_identical_after_roundtrip() {
     assert_eq!(before.0, [Value::I32(145)]); // sum(0..10) + global 100
     assert_eq!(before.1, 45);
 }
+
+#[test]
+fn cast_conversion_opcodes_roundtrip_and_execute() {
+    // GC U3: the new cast/conversion RegOps must serialize, deserialize,
+    // and execute identically (AOT v10).
+    let wat = r#"
+(module
+  (type $a (sub (struct (field i32))))
+  (type $b (sub $a (struct (field i32) (field i32))))
+  (func (export "build") (result (ref $a))
+    i32.const 1 i32.const 2 struct.new $b)
+  (func (export "query") (param (ref null $a)) (result i32)
+    (local $t i32)
+    local.get 0
+    ref.test (ref $b)
+    local.set $t
+    local.get 0
+    ref.cast (ref $a)
+    drop
+    (block $hit (result (ref null $b))
+      local.get 0
+      br_on_cast $hit (ref null $a) (ref null $b)
+      drop
+      ref.null $b)
+    ref.is_null
+    i32.eqz
+    local.get $t
+    i32.or)
+  (func (export "convert") (param externref) (result externref)
+    local.get 0
+    any.convert_extern
+    extern.convert_any)
+  (func (export "eq") (result i32)
+    i32.const 7 ref.i31
+    i32.const 7 ref.i31
+    ref.eq))"#;
+    let buf = wast::parser::ParseBuffer::new(wat).unwrap();
+    let mut parsed = wast::parser::parse::<wast::Wat<'_>>(&buf).unwrap();
+    let bytes = parsed.encode().unwrap();
+    let module = lower_fixture(&bytes).expect("cast fixture lowers");
+
+    let restored = deserialize(&serialize(&module)).unwrap();
+    assert_eq!(restored, module, "roundtrip changed the cast IR");
+
+    let run = |m: &baedeker_core::lower::RegModule| {
+        let store = Store::instantiate(m).unwrap();
+        let object = execute_export(m, &store, "build", &[]).unwrap();
+        let query = execute_export(m, &store, "query", &object).unwrap();
+        let converted = execute_export(m, &store, "convert", &[Value::ExternRef(Some(9))]).unwrap();
+        let eq = execute_export(m, &store, "eq", &[]).unwrap();
+        (query, converted, eq)
+    };
+    assert_eq!(run(&module), run(&restored));
+}

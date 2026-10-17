@@ -3821,6 +3821,76 @@ fn validate_instr(
                 .operands
                 .push(ValType::Num(crate::types::NumType::I32));
         }
+        Instr::RefTest { nullable, ht } => {
+            validate_reftype_type_indices(
+                module,
+                RefType::from_parts(*nullable, *ht),
+                Some(function),
+                offset,
+            )?;
+            let operand = ValType::Ref(RefType::from_parts(true, top_of_heaptype(module, *ht)));
+            pop_expect(module, function, state, operand, offset, "ref.test")?;
+            state
+                .operands
+                .push(ValType::Num(crate::types::NumType::I32));
+        }
+        Instr::RefCast { nullable, ht } => {
+            validate_reftype_type_indices(
+                module,
+                RefType::from_parts(*nullable, *ht),
+                Some(function),
+                offset,
+            )?;
+            let operand = ValType::Ref(RefType::from_parts(true, top_of_heaptype(module, *ht)));
+            pop_expect(module, function, state, operand, offset, "ref.cast")?;
+            state
+                .operands
+                .push(ValType::Ref(RefType::from_parts(*nullable, *ht)));
+        }
+        Instr::RefEq => {
+            let eq = ValType::Ref(RefType::from_parts(true, HeapType::Eq));
+            for _ in 0..2 {
+                pop_expect(module, function, state, eq, offset, "ref.eq")?;
+            }
+            state
+                .operands
+                .push(ValType::Num(crate::types::NumType::I32));
+        }
+        Instr::BrOnCast {
+            fail,
+            src,
+            tgt,
+            label,
+        } => {
+            validate_br_on_cast(module, function, state, *fail, *src, *tgt, *label, offset)?;
+        }
+        Instr::AnyConvertExtern => {
+            let nullable = pop_ref_expect_heap(
+                module,
+                function,
+                state,
+                HeapType::Extern,
+                offset,
+                "any.convert_extern",
+            )?;
+            state
+                .operands
+                .push(ValType::Ref(RefType::from_parts(nullable, HeapType::Any)));
+        }
+        Instr::ExternConvertAny => {
+            let nullable = pop_ref_expect_heap(
+                module,
+                function,
+                state,
+                HeapType::Any,
+                offset,
+                "extern.convert_any",
+            )?;
+            state.operands.push(ValType::Ref(RefType::from_parts(
+                nullable,
+                HeapType::Extern,
+            )));
+        }
     }
 
     Ok(())
@@ -5013,6 +5083,127 @@ fn normalize_table_type(
 
 fn reftype_matches(module: &Module<'_>, found: RefType, expected: RefType) -> bool {
     reftype_matches_type(module, found, expected)
+}
+
+/// The top of a heap type's hierarchy (`valid/match.ml` `top_of_heaptype`):
+/// the four hierarchy tops any / func / exn / extern. Concrete struct and
+/// array types sit under `any`; concrete function types under `func`.
+fn top_of_heaptype(module: &Module<'_>, ht: HeapType) -> HeapType {
+    use HeapType::*;
+    match ht {
+        Any | None | Eq | Struct | Array | I31 => Any,
+        Func | NoFunc => Func,
+        Exn | NoExn => Exn,
+        Extern | NoExtern => Extern,
+        Type(idx) => match crate::types::concrete_kind(&module.types, idx) {
+            Some(crate::types::ConcreteKind::Func) => Func,
+            _ => Any,
+        },
+    }
+}
+
+/// `diff_reftype` (`valid/valid.ml:234`): the source heaptype with the
+/// target's nullness stripped.
+fn diff_reftype(src: RefType, tgt: RefType) -> RefType {
+    if tgt.is_nullable() {
+        src.as_non_null()
+    } else {
+        src
+    }
+}
+
+/// Pop a reference operand whose heap type is a subtype of `(ref null heap)`
+/// and return the operand's nullness (mirrors the reference's `peek_ref`).
+fn pop_ref_expect_heap(
+    module: &Module<'_>,
+    function: FuncIdx,
+    state: &mut ValidationState,
+    heap: HeapType,
+    offset: usize,
+    op: &'static str,
+) -> Result<bool, ValidationError> {
+    let expected = ValType::Ref(RefType::from_parts(true, heap));
+    let found = pop_operand(function, state, offset, op, &[expected])?;
+    if !operand_matches(module, found, expected) {
+        return Err(ValidationError {
+            offset: ByteOffset(offset),
+            function: Some(function),
+            kind: ValidationErrorKind::TypeMismatch {
+                op,
+                expected,
+                found: operand_to_valtype(found, expected),
+            },
+        });
+    }
+    Ok(match found {
+        OperandType::Typed(ValType::Ref(ref_type)) => ref_type.is_nullable(),
+        _ => false,
+    })
+}
+
+/// `br_on_cast` / `br_on_cast_fail` (`valid/valid.ml:492-519`).
+#[allow(clippy::too_many_arguments)]
+fn validate_br_on_cast(
+    module: &Module<'_>,
+    function: FuncIdx,
+    state: &mut ValidationState,
+    fail: bool,
+    src: RefType,
+    tgt: RefType,
+    label: crate::types::LabelIdx,
+    offset: usize,
+) -> Result<(), ValidationError> {
+    validate_reftype_type_indices(module, src, Some(function), offset)?;
+    validate_reftype_type_indices(module, tgt, Some(function), offset)?;
+    // rt2 <: rt1.
+    if !reftype_matches(module, tgt, src) {
+        return Err(ValidationError {
+            offset: ByteOffset(offset),
+            function: Some(function),
+            kind: ValidationErrorKind::TypeMismatch {
+                op: "br_on_cast",
+                expected: ValType::Ref(src),
+                found: ValType::Ref(tgt),
+            },
+        });
+    }
+
+    let label_types = validate_label(function, state, label, offset)?.to_vec();
+    let branch_ref = if fail { diff_reftype(src, tgt) } else { tgt };
+    let last_ok = label_types
+        .split_last()
+        .is_some_and(|(last, _)| valtype_matches(module, ValType::Ref(branch_ref), *last));
+    if !last_ok {
+        return Err(ValidationError {
+            offset: ByteOffset(offset),
+            function: Some(function),
+            kind: ValidationErrorKind::BranchTypeMismatch {
+                label,
+                expected: vec![ValType::Ref(branch_ref)],
+                found: label_types,
+            },
+        });
+    }
+
+    // The input is `ts0 @ [RefT rt1]`; the ref is popped first, then the
+    // leading types (which remain on the stack afterwards).
+    pop_expect(
+        module,
+        function,
+        state,
+        ValType::Ref(src),
+        offset,
+        "br_on_cast",
+    )?;
+    let (_, leading) = label_types.split_last().expect("label non-empty checked");
+    let leading = leading.to_vec();
+    pop_branch_types(module, function, state, label, &leading, offset)?;
+    for ty in leading {
+        state.operands.push(ty);
+    }
+    let fall = if fail { tgt } else { diff_reftype(src, tgt) };
+    state.operands.push(ValType::Ref(fall));
+    Ok(())
 }
 
 fn valtype_matches(module: &Module<'_>, found: ValType, expected: ValType) -> bool {

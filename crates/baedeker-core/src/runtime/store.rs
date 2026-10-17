@@ -313,7 +313,8 @@ fn precompute_gc_type_ids(
                     .ok_or(RuntimeError {
                         kind: RuntimeErrorKind::UnknownType { type_idx: idx },
                     })?;
-                Some(heap.intern_closed(closed, kind)?)
+                let supers = gc_direct_super_ids(module, idx, &out)?;
+                Some(heap.intern_closed_supers(closed, kind, &supers)?)
             }
             Some(CompType::Array(field)) => {
                 let kind = GcTypeKind::Array(*field);
@@ -321,11 +322,35 @@ fn precompute_gc_type_ids(
                     .ok_or(RuntimeError {
                         kind: RuntimeErrorKind::UnknownType { type_idx: idx },
                     })?;
-                Some(heap.intern_closed(closed, kind)?)
+                let supers = gc_direct_super_ids(module, idx, &out)?;
+                Some(heap.intern_closed_supers(closed, kind, &supers)?)
             }
             Some(CompType::Func(_)) | None => None,
         };
         out.push(entry);
+    }
+    Ok(out)
+}
+
+/// The already-interned heap ids of `idx`'s declared supertypes. Precompute
+/// visits the type section in index order and validation guarantees every
+/// supertype has a smaller index, so each supertype is present in `interned`
+/// (the "reachable only as supertypes" case is impossible: supertypes are
+/// themselves type-section entries).
+fn gc_direct_super_ids(
+    module: &RegModule,
+    idx: u32,
+    interned: &[Option<GcTypeId>],
+) -> Result<Vec<GcTypeId>, RuntimeError> {
+    let mut out: Vec<GcTypeId> = Vec::new();
+    if let Some(sub) = module.type_defs.get(idx as usize) {
+        out.try_reserve(sub.supertypes.len())
+            .map_err(|_| allocation_failed("gc type ancestry"))?;
+        for &super_idx in &sub.supertypes {
+            if let Some(Some(id)) = interned.get(super_idx as usize) {
+                out.push(*id);
+            }
+        }
     }
     Ok(out)
 }

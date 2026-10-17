@@ -920,6 +920,36 @@ pub enum RegOp {
         value: Reg,
         signed: bool,
     },
+    /// `ref.test (ref null? ht)`: dst = 1 when `value` matches the target.
+    RefTest {
+        dst: Reg,
+        value: Reg,
+        nullable: bool,
+        ht: HeapType,
+    },
+    /// `ref.cast (ref null? ht)`: dst = `value` when it matches, else trap.
+    RefCast {
+        dst: Reg,
+        value: Reg,
+        nullable: bool,
+        ht: HeapType,
+    },
+    /// `ref.eq`: dst = 1 when the two eq references are equal.
+    RefEq {
+        dst: Reg,
+        lhs: Reg,
+        rhs: Reg,
+    },
+    /// `any.convert_extern`: re-tag an extern reference as an any reference.
+    AnyConvertExtern {
+        dst: Reg,
+        value: Reg,
+    },
+    /// `extern.convert_any`: re-tag an any reference as an extern reference.
+    ExternConvertAny {
+        dst: Reg,
+        value: Reg,
+    },
 }
 
 /// The packed-field extension marker carried in lowered GC `get` ops.
@@ -2466,18 +2496,27 @@ struct LabelFrame {
 /// already proven precise ref types (nullability, concrete type indices,
 /// subtyping). Here we only need to keep function references and external
 /// references from crossing kinds.
-fn ref_compatible(found: ValType, expected: ValType) -> bool {
-    fn kind(ty: &crate::types::RefType) -> u8 {
+fn ref_compatible(types: &[crate::types::SubType], found: ValType, expected: ValType) -> bool {
+    fn kind(types: &[crate::types::SubType], ty: &crate::types::RefType) -> u8 {
         match ty {
             crate::types::RefType::FuncRef => 0,
             crate::types::RefType::ExternRef => 1,
             crate::types::RefType::Typed { heap, .. } => match heap {
-                crate::types::HeapType::Func | crate::types::HeapType::Type(_) => 0,
+                crate::types::HeapType::Func => 0,
                 crate::types::HeapType::Extern => 1,
                 crate::types::HeapType::Exn => 2,
                 crate::types::HeapType::NoFunc => 0,
                 crate::types::HeapType::NoExtern => 1,
                 crate::types::HeapType::NoExn => 2,
+                crate::types::HeapType::Type(idx) => {
+                    // A concrete type's hierarchy side comes from the type
+                    // section: struct/array are any-side, functions func-side.
+                    match types.get(idx.0 as usize).map(|sub| &sub.comp) {
+                        Some(crate::types::CompType::Struct(_))
+                        | Some(crate::types::CompType::Array(_)) => 3,
+                        _ => 0,
+                    }
+                }
                 crate::types::HeapType::Any
                 | crate::types::HeapType::None
                 | crate::types::HeapType::Eq
@@ -2488,7 +2527,9 @@ fn ref_compatible(found: ValType, expected: ValType) -> bool {
         }
     }
     match (found, expected) {
-        (ValType::Ref(found), ValType::Ref(expected)) => kind(&found) == kind(&expected),
+        (ValType::Ref(found), ValType::Ref(expected)) => {
+            kind(types, &found) == kind(types, &expected)
+        }
         _ => false,
     }
 }
@@ -2546,6 +2587,18 @@ fn gc_ref_type(type_idx: TypeIdx) -> ValType {
 /// The nullable concrete reference type `(ref null $idx)`.
 fn gc_ref_type_nullable(type_idx: TypeIdx) -> ValType {
     ValType::Ref(crate::types::RefType::concrete(true, type_idx))
+}
+
+/// `diff_reftype` (`valid/valid.ml:234`).
+fn lower_diff_reftype(
+    src: crate::types::RefType,
+    tgt: crate::types::RefType,
+) -> crate::types::RefType {
+    if tgt.is_nullable() {
+        src.as_non_null()
+    } else {
+        src
+    }
 }
 
 /// The unpacked value type of a storage type (packed i8/i16 → i32).
@@ -4231,6 +4284,102 @@ impl<'b> FuncBuilder<'b> {
                     },
                 );
             }
+            Instr::RefTest { nullable, ht } => {
+                let operand = self.ref_operand_type(ht);
+                let value = self.pop_expect(offset, "ref.test", operand)?;
+                let ty = ValType::Num(NumType::I32);
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(
+                    offset,
+                    RegOp::RefTest {
+                        dst,
+                        value: value.reg,
+                        nullable,
+                        ht,
+                    },
+                );
+            }
+            Instr::RefCast { nullable, ht } => {
+                let operand = self.ref_operand_type(ht);
+                let value = self.pop_expect(offset, "ref.cast", operand)?;
+                let ty = ValType::Ref(crate::types::RefType::from_parts(nullable, ht));
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(
+                    offset,
+                    RegOp::RefCast {
+                        dst,
+                        value: value.reg,
+                        nullable,
+                        ht,
+                    },
+                );
+            }
+            Instr::RefEq => {
+                let eq = ValType::Ref(crate::types::RefType::from_parts(true, HeapType::Eq));
+                let rhs = self.pop_expect(offset, "ref.eq", eq)?;
+                let lhs = self.pop_expect(offset, "ref.eq", eq)?;
+                let ty = ValType::Num(NumType::I32);
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(
+                    offset,
+                    RegOp::RefEq {
+                        dst,
+                        lhs: lhs.reg,
+                        rhs: rhs.reg,
+                    },
+                );
+            }
+            Instr::BrOnCast {
+                fail,
+                src,
+                tgt,
+                label,
+            } => {
+                self.lower_br_on_cast(offset, fail, src, tgt, label)?;
+            }
+            Instr::AnyConvertExtern => {
+                let operand =
+                    ValType::Ref(crate::types::RefType::from_parts(true, HeapType::Extern));
+                let value = self.pop_expect(offset, "any.convert_extern", operand)?;
+                let nullable = match value.ty {
+                    ValType::Ref(ref_type) => ref_type.is_nullable(),
+                    _ => true,
+                };
+                let ty = ValType::Ref(crate::types::RefType::from_parts(nullable, HeapType::Any));
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(
+                    offset,
+                    RegOp::AnyConvertExtern {
+                        dst,
+                        value: value.reg,
+                    },
+                );
+            }
+            Instr::ExternConvertAny => {
+                let operand = ValType::Ref(crate::types::RefType::from_parts(true, HeapType::Any));
+                let value = self.pop_expect(offset, "extern.convert_any", operand)?;
+                let nullable = match value.ty {
+                    ValType::Ref(ref_type) => ref_type.is_nullable(),
+                    _ => true,
+                };
+                let ty = ValType::Ref(crate::types::RefType::from_parts(
+                    nullable,
+                    HeapType::Extern,
+                ));
+                let dst = self.alloc_reg(ty);
+                self.stack.push(RegValue { reg: dst, ty });
+                self.emit(
+                    offset,
+                    RegOp::ExternConvertAny {
+                        dst,
+                        value: value.reg,
+                    },
+                );
+            }
             Instr::V128Const(value) => {
                 let ty = ValType::Vec(crate::types::VecType::V128);
                 let dst = self.alloc_reg(ty);
@@ -5045,6 +5194,124 @@ impl<'b> FuncBuilder<'b> {
             });
         }
         Ok(self.stack.pop().expect("stack height checked"))
+    }
+
+    /// The operand type a `ref.test`/`ref.cast` reads: `(ref null top(ht))`.
+    fn ref_operand_type(&self, ht: HeapType) -> ValType {
+        ValType::Ref(crate::types::RefType::from_parts(
+            true,
+            self.top_of_heaptype(ht),
+        ))
+    }
+
+    /// `top_of_heaptype` (`valid/match.ml:25`).
+    fn top_of_heaptype(&self, ht: HeapType) -> HeapType {
+        use HeapType::*;
+        match ht {
+            Any | None | Eq | Struct | Array | I31 => Any,
+            Func | NoFunc => Func,
+            Exn | NoExn => Exn,
+            Extern | NoExtern => Extern,
+            Type(idx) => match self.tables.types.get(idx.0 as usize).map(|sub| &sub.comp) {
+                Some(crate::types::CompType::Func(_)) => Func,
+                _ => Any,
+            },
+        }
+    }
+
+    /// Lower `br_on_cast`/`br_on_cast_fail` to a `ref.test` plus a
+    /// conditional branch. The reference stays live on the operand stack on
+    /// both the taken and fall-through paths (`exec/eval.ml:246-256`).
+    fn lower_br_on_cast(
+        &mut self,
+        offset: ByteOffset,
+        fail: bool,
+        src: crate::types::RefType,
+        tgt: crate::types::RefType,
+        label: LabelIdx,
+    ) -> Result<(), LowerError> {
+        let value = self.pop_expect(offset, "br_on_cast", ValType::Ref(src))?;
+        let frame_pos = self.label_position(offset, label)?;
+        let (branch_types, loop_header) = self.branch_types_at(frame_pos);
+        let Some((_, leading)) = branch_types.split_last() else {
+            return Err(LowerError {
+                offset,
+                function: Some(self.func_idx),
+                kind: LowerErrorKind::InvalidLabel { label: label.0 },
+            });
+        };
+        let leading = leading.to_vec();
+        let mut values = Vec::with_capacity(branch_types.len());
+        for &expected in leading.iter().rev() {
+            let found = self.pop_expect(offset, "br_on_cast", expected)?;
+            values.push(found.reg);
+        }
+        values.reverse();
+        // Fall-through keeps the leading values and the reference, retyped.
+        for (&reg, &ty) in values.iter().zip(leading.iter()) {
+            self.stack.push(RegValue { reg, ty });
+        }
+        let fall = if fail {
+            tgt
+        } else {
+            lower_diff_reftype(src, tgt)
+        };
+        self.stack.push(RegValue {
+            reg: value.reg,
+            ty: ValType::Ref(fall),
+        });
+
+        let test_ty = ValType::Num(NumType::I32);
+        let test_reg = self.alloc_reg(test_ty);
+        self.emit(
+            offset,
+            RegOp::RefTest {
+                dst: test_reg,
+                value: value.reg,
+                nullable: tgt.is_nullable(),
+                ht: tgt.heap_type(),
+            },
+        );
+        let cond = if fail {
+            let inverted = self.alloc_reg(test_ty);
+            self.emit(
+                offset,
+                RegOp::Unary {
+                    op: UnaryOp::I32Eqz,
+                    dst: inverted,
+                    value: test_reg,
+                },
+            );
+            inverted
+        } else {
+            test_reg
+        };
+        // The taken path forwards the reference as the label's last value.
+        values.push(value.reg);
+        let br_block_idx = self.blocks.len();
+        if let Some(loop_target) = loop_header {
+            self.pending_trampolines.push(TrampolineReq {
+                block: br_block_idx,
+                slot: BranchSlot::Single,
+                param_regs: loop_target.param_regs,
+                values: values.clone(),
+                header: loop_target.header,
+                offset,
+            });
+        } else {
+            self.pending_branches.push(PendingBranch {
+                block: br_block_idx,
+                frame_pos,
+                values: values.clone(),
+                slot: BranchSlot::Single,
+            });
+        }
+        self.finish_block(RegTerm::BrIf {
+            cond,
+            target_block: 0,
+            values,
+        });
+        Ok(())
     }
 
     /// Whether the operand stack is exactly at the current frame's entry
@@ -5882,7 +6149,7 @@ impl<'b> FuncBuilder<'b> {
         // types were proven by the validator, and the undef registers
         // lowering synthesizes cannot represent bottom.
         if found.ty != expected
-            && !ref_compatible(found.ty, expected)
+            && !ref_compatible(self.tables.types, found.ty, expected)
             && !self.current_frame_unreachable()
         {
             return Err(LowerError {

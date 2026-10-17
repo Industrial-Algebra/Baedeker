@@ -156,6 +156,11 @@ pub struct GcHeap {
     objects: Vec<GcObject>,
     types: Vec<GcTypeKind>,
     type_ids: Vec<(TypeKey, GcTypeId)>,
+    /// Declared-supertype chains, parallel to `types`: for the type at
+    /// `GcTypeId(i)`, the ids of every transitive supertype (nearest first
+    /// per declaration order). Precomputed at intern time so runtime casts
+    /// walk them without allocating.
+    ancestries: Vec<Vec<GcTypeId>>,
     allocations: u64,
 }
 
@@ -167,6 +172,7 @@ impl GcHeap {
             objects: Vec::new(),
             types: Vec::new(),
             type_ids: Vec::new(),
+            ancestries: Vec::new(),
             allocations: 0,
         }
     }
@@ -192,7 +198,7 @@ impl GcHeap {
     /// type table untouched.
     pub fn intern_type(&mut self, kind: GcTypeKind) -> Result<GcTypeId, RuntimeError> {
         let key = TypeKey::Raw(try_clone_kind(&kind)?);
-        self.intern_owned(key, kind)
+        self.intern_owned(key, kind, &[])
     }
 
     /// Intern a layout by its cross-module closed form, so structurally
@@ -204,25 +210,76 @@ impl GcHeap {
         closed: ClosedDefinedType,
         kind: GcTypeKind,
     ) -> Result<GcTypeId, RuntimeError> {
-        self.intern_owned(TypeKey::Closed(closed), kind)
+        self.intern_owned(TypeKey::Closed(closed), kind, &[])
     }
 
-    fn intern_owned(&mut self, key: TypeKey, layout: GcTypeKind) -> Result<GcTypeId, RuntimeError> {
+    /// Intern a layout by its cross-module closed form, recording the
+    /// already-interned ids of its declared supertypes so the ancestry chain
+    /// is precomputed here (fallible, intern-last: a refusal leaves the heap
+    /// untouched). Ids must be interned already; precompute visits the type
+    /// section in index order, and supertypes have smaller indices.
+    pub fn intern_closed_supers(
+        &mut self,
+        closed: ClosedDefinedType,
+        kind: GcTypeKind,
+        direct_supers: &[GcTypeId],
+    ) -> Result<GcTypeId, RuntimeError> {
+        self.intern_owned(TypeKey::Closed(closed), kind, direct_supers)
+    }
+
+    fn intern_owned(
+        &mut self,
+        key: TypeKey,
+        layout: GcTypeKind,
+        direct_supers: &[GcTypeId],
+    ) -> Result<GcTypeId, RuntimeError> {
         if let Some((_, id)) = self.type_ids.iter().find(|(known, _)| *known == key) {
             return Ok(*id);
         }
-        // Reserve every table slot before committing either push.
+        // Transitive ancestry first: every direct supertype plus that
+        // supertype's own precomputed chain. Fallible, before any commit.
+        let mut ancestry: Vec<GcTypeId> = Vec::new();
+        ancestry
+            .try_reserve(direct_supers.len())
+            .map_err(|_| alloc_failed())?;
+        for &super_id in direct_supers {
+            if !ancestry.contains(&super_id) {
+                ancestry.try_reserve(1).map_err(|_| alloc_failed())?;
+                ancestry.push(super_id);
+            }
+            if let Some(inherited) = self.ancestries.get(super_id.0 as usize) {
+                for &ancestor in inherited {
+                    if !ancestry.contains(&ancestor) {
+                        ancestry.try_reserve(1).map_err(|_| alloc_failed())?;
+                        ancestry.push(ancestor);
+                    }
+                }
+            }
+        }
+        // Reserve every table slot before committing any push.
         self.types.try_reserve(1).map_err(|_| alloc_failed())?;
         self.type_ids.try_reserve(1).map_err(|_| alloc_failed())?;
+        self.ancestries.try_reserve(1).map_err(|_| alloc_failed())?;
         let id = GcTypeId(self.types.len() as u32);
         self.types.push(layout);
         self.type_ids.push((key, id));
+        self.ancestries.push(ancestry);
         Ok(id)
     }
 
     /// The layout of an interned type.
     pub fn type_kind(&self, id: GcTypeId) -> Option<&GcTypeKind> {
         self.types.get(id.0 as usize)
+    }
+
+    /// The precomputed transitive declared-supertype chain of an interned
+    /// type (nearest first, declaration order). Empty when the type has no
+    /// declared supertypes.
+    pub fn type_ancestry(&self, id: GcTypeId) -> &[GcTypeId] {
+        self.ancestries
+            .get(id.0 as usize)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     /// The cross-module closed form of an interned type, when it was
@@ -238,6 +295,17 @@ impl GcHeap {
             } else {
                 None
             }
+        })
+    }
+
+    /// Find the id of an already-interned type by its cross-module closed
+    /// form. Read-only: no interning, no allocation; `None` when no interned
+    /// type has this closed form. Used to translate a foreign store's
+    /// positional type id into this heap's positional id space.
+    pub fn find_closed(&self, closed: &ClosedDefinedType) -> Option<GcTypeId> {
+        self.type_ids.iter().find_map(|(key, id)| match key {
+            TypeKey::Closed(known) if known == closed => Some(*id),
+            _ => None,
         })
     }
 

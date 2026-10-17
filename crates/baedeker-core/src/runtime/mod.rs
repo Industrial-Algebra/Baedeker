@@ -53,6 +53,16 @@ pub enum Value {
     /// An external reference value from the host: either null or a
     /// host-assigned index.
     ExternRef(Option<u32>),
+    /// An internalized host reference: a raw extern reference re-tagged
+    /// into the any hierarchy by `any.convert_extern`. Carries the same host
+    /// handle as [`Value::ExternRef`]; conversions are immediate re-tags and
+    /// never allocate a heap entry.
+    HostAny(Option<u32>),
+    /// An externalized GC-domain value: a struct/array/i31 reference re-tagged
+    /// into the extern hierarchy by `extern.convert_any`. Carries the GC
+    /// payload as-is so the reverse conversion is an exact identity;
+    /// conversions are immediate re-tags and never allocate a heap entry.
+    ExternGc(Option<ExternPayload>),
     /// A 128-bit vector, stored as raw little-endian bytes; lane
     /// interpretation happens per operation.
     V128([u8; 16]),
@@ -72,6 +82,19 @@ pub enum Value {
     I31(i32),
 }
 
+/// The GC-domain payload carried by an externalized [`Value::ExternGc`].
+///
+/// A struct/array reference stores its owning heap plus object id; an i31
+/// stores its 31-bit payload. Both survive an
+/// `extern.convert_any`/`any.convert_extern` roundtrip unchanged.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ExternPayload {
+    /// A `GcRef` object: owning heap plus object index.
+    Gc(HeapId, ObjectId),
+    /// An i31 immediate payload.
+    I31(i32),
+}
+
 impl Value {
     fn val_type(self) -> ValType {
         match self {
@@ -81,6 +104,8 @@ impl Value {
             Value::F64(_) => ValType::Num(NumType::F64),
             Value::FuncRef(_) => ValType::Ref(RefType::FuncRef),
             Value::ExternRef(_) => ValType::Ref(RefType::ExternRef),
+            Value::HostAny(_) => ValType::Ref(RefType::from_parts(true, HeapType::Any)),
+            Value::ExternGc(_) => ValType::Ref(RefType::ExternRef),
             Value::V128(_) => ValType::Vec(crate::types::VecType::V128),
             Value::ExnRef(_) => ValType::Ref(RefType::from_parts(true, HeapType::Exn)),
             Value::GcRef { .. } => ValType::Ref(RefType::from_parts(true, HeapType::Any)),
@@ -105,6 +130,11 @@ pub enum RuntimeErrorKind {
     TypeMismatch {
         expected: ValType,
         found: ValType,
+    },
+    /// `ref.cast` failed: the value did not match the target reference type.
+    /// The message begins with `"cast failure, expected "` per the pin.
+    CastFailure {
+        expected: RefType,
     },
     Trap(RuntimeTrap),
     UninitializedLocal {
@@ -207,6 +237,7 @@ impl core::fmt::Display for RuntimeErrorKind {
         match self {
             Self::Throw { .. } => write!(f, "exception in flight"),
             Self::UncaughtException { .. } => write!(f, "uncaught exception"),
+            Self::CastFailure { expected } => write!(f, "cast failure, expected {expected:?}"),
             other => write!(f, "{other:?}"),
         }
     }
@@ -1780,6 +1811,74 @@ fn execute_reg_op(
                 }
             }
         }
+        RegOp::RefTest {
+            dst,
+            value,
+            nullable,
+            ht,
+        } => {
+            let value = get_reg(registers, *value)?;
+            let matched = ref_matches_ht(store, value, *nullable, *ht);
+            set_reg(registers, *dst, Value::I32(matched as i32))?;
+        }
+        RegOp::RefCast {
+            dst,
+            value,
+            nullable,
+            ht,
+        } => {
+            let value = get_reg(registers, *value)?;
+            if ref_matches_ht(store, value, *nullable, *ht) {
+                set_reg(registers, *dst, value)?;
+            } else {
+                return Err(RuntimeError {
+                    kind: RuntimeErrorKind::CastFailure {
+                        expected: RefType::from_parts(*nullable, *ht),
+                    },
+                });
+            }
+        }
+        RegOp::RefEq { dst, lhs, rhs } => {
+            let lhs = get_reg(registers, *lhs)?;
+            let rhs = get_reg(registers, *rhs)?;
+            set_reg(registers, *dst, Value::I32(eq_ref(lhs, rhs) as i32))?;
+        }
+        RegOp::AnyConvertExtern { dst, value } => {
+            let value = get_reg(registers, *value)?;
+            let converted = match value {
+                Value::ExternRef(payload) => Value::HostAny(payload),
+                Value::ExternGc(Some(ExternPayload::Gc(heap, id))) => Value::GcRef { heap, id },
+                Value::ExternGc(Some(ExternPayload::I31(payload))) => Value::I31(payload),
+                other if is_null_ref(&other) => Value::FuncRef(None),
+                other => {
+                    return Err(RuntimeError {
+                        kind: RuntimeErrorKind::TypeMismatch {
+                            expected: ValType::Ref(RefType::ExternRef),
+                            found: other.val_type(),
+                        },
+                    });
+                }
+            };
+            set_reg(registers, *dst, converted)?;
+        }
+        RegOp::ExternConvertAny { dst, value } => {
+            let value = get_reg(registers, *value)?;
+            let converted = match value {
+                Value::HostAny(payload) => Value::ExternRef(payload),
+                Value::GcRef { heap, id } => Value::ExternGc(Some(ExternPayload::Gc(heap, id))),
+                Value::I31(payload) => Value::ExternGc(Some(ExternPayload::I31(payload))),
+                other if is_null_ref(&other) => Value::ExternRef(None),
+                other => {
+                    return Err(RuntimeError {
+                        kind: RuntimeErrorKind::TypeMismatch {
+                            expected: ValType::Ref(RefType::from_parts(true, HeapType::Any)),
+                            found: other.val_type(),
+                        },
+                    });
+                }
+            };
+            set_reg(registers, *dst, converted)?;
+        }
         RegOp::Load {
             op,
             dst,
@@ -2789,17 +2888,26 @@ fn value_satisfies(
             }
             match expected_ref.heap_type() {
                 HeapType::Func => matches!(value, Value::FuncRef(_)),
-                HeapType::Extern => matches!(value, Value::ExternRef(_)),
+                HeapType::Extern => matches!(value, Value::ExternRef(_) | Value::ExternGc(_)),
                 HeapType::Exn => matches!(value, Value::ExnRef(_)),
-                HeapType::Any | HeapType::Eq => match value {
-                    // i31 immediates are valid any/eq values and need no
-                    // heap resolution.
+                HeapType::Any => match value {
+                    // i31 immediates are valid any values and need no heap
+                    // resolution.
                     Value::I31(_) => true,
+                    // An internalized host handle is a non-null any value but
+                    // is NOT an eq value (it has no struct/array/i31
+                    // structure).
+                    Value::HostAny(_) => true,
                     // A `GcRef` must RESOLVE (own heap or a registered
                     // foreign heap, object in bounds) even though the
                     // declared heap type is abstract: an unregistered or
                     // stale reference is a clean rejection, never a dangling
                     // handle admitted across the boundary.
+                    Value::GcRef { heap, id } => gc_ref_resolves(store, heap, id),
+                    _ => false,
+                },
+                HeapType::Eq => match value {
+                    Value::I31(_) => true,
                     Value::GcRef { heap, id } => gc_ref_resolves(store, heap, id),
                     _ => false,
                 },
@@ -2819,9 +2927,13 @@ fn value_satisfies(
 fn null_satisfies_heap(heap: crate::types::HeapType, value: &Value) -> bool {
     use crate::types::HeapType;
     match heap {
-        HeapType::Extern | HeapType::NoExtern => matches!(value, Value::ExternRef(None)),
+        HeapType::Extern | HeapType::NoExtern => {
+            matches!(value, Value::ExternRef(None) | Value::ExternGc(None))
+        }
         HeapType::Exn | HeapType::NoExn => matches!(value, Value::ExnRef(None)),
-        _ => matches!(value, Value::FuncRef(None)),
+        // The generic funcref null is the any-side null produced by
+        // `ref.null any`; an internalized host null is also a legal any null.
+        _ => matches!(value, Value::FuncRef(None) | Value::HostAny(None)),
     }
 }
 
@@ -3008,8 +3120,109 @@ fn memory_bounds(
 fn is_null_ref(value: &Value) -> bool {
     matches!(
         value,
-        Value::FuncRef(None) | Value::ExternRef(None) | Value::ExnRef(None)
+        Value::FuncRef(None)
+            | Value::ExternRef(None)
+            | Value::ExnRef(None)
+            | Value::HostAny(None)
+            | Value::ExternGc(None)
     )
+}
+
+/// Runtime `match_reftype [] (type_of_ref r) (nullable, ht)`: whether a
+/// runtime reference value matches a target reference heap type. Zero
+/// allocation: concrete targets walk the object's precomputed ancestry
+/// chain, resolved through the store's own or a registered foreign heap.
+fn ref_matches_ht(store: Option<&Store>, value: Value, nullable: bool, ht: HeapType) -> bool {
+    if is_null_ref(&value) {
+        return nullable;
+    }
+    match (value, ht) {
+        (Value::I31(_), HeapType::I31 | HeapType::Eq | HeapType::Any) => true,
+        (Value::FuncRef(_), HeapType::Func) => true,
+        // Both extern-domain shapes match `extern`: a raw host reference and
+        // a value externalized from the GC domain.
+        (Value::ExternRef(_) | Value::ExternGc(_), HeapType::Extern) => true,
+        (Value::ExnRef(_), HeapType::Exn) => true,
+        // An internalized host handle is a non-null any value, and matches
+        // nothing else in the any hierarchy (it is not an eq value).
+        (Value::HostAny(_), HeapType::Any) => true,
+        (Value::GcRef { heap, id }, target) => {
+            let Some(store) = store else {
+                return false;
+            };
+            store
+                .with_heap(heap, |obj_heap| {
+                    let Some(actual) = obj_heap.object_type_id(id) else {
+                        return false;
+                    };
+                    match target {
+                        HeapType::Any | HeapType::Eq => true,
+                        HeapType::Struct => {
+                            matches!(obj_heap.type_kind(actual), Some(GcTypeKind::Struct(_)))
+                        }
+                        HeapType::Array => {
+                            matches!(obj_heap.type_kind(actual), Some(GcTypeKind::Array(_)))
+                        }
+                        HeapType::Type(idx) => {
+                            // FAST PATH: same-heap concrete target. Heap type
+                            // ids are per-heap positional, so the store-side
+                            // precomputed id is valid in this heap.
+                            if heap == store.gc_heap_id() {
+                                let Ok(expected) = store.gc_type_id(idx) else {
+                                    return false;
+                                };
+                                return actual == expected
+                                    || obj_heap.type_ancestry(actual).contains(&expected);
+                            }
+                            // FOREIGN HEAP: positional ids do not transfer, so
+                            // the store-side id indexes the wrong table.
+                            // Resolve the target's closed form (read-only, no
+                            // interning, zero alloc) and look it up in the
+                            // OBJECT heap's key table; a miss means no match.
+                            // Then id-walk the object heap's own chain.
+                            let expected = store.with_gc_heap(|own_heap| {
+                                let expected_id = store.gc_type_id(idx).ok()?;
+                                let closed = own_heap.closed_type(expected_id)?;
+                                obj_heap.find_closed(closed)
+                            });
+                            expected.is_some_and(|expected| {
+                                actual == expected
+                                    || obj_heap.type_ancestry(actual).contains(&expected)
+                            })
+                        }
+                        _ => false,
+                    }
+                })
+                .unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
+/// `ref.eq` semantics (`value.ml:127`, `i31.ml:17`): i31 payload equality,
+/// GC object identity (same heap AND object id), null equals null, and
+/// values from different domains are never equal.
+fn eq_ref(lhs: Value, rhs: Value) -> bool {
+    match (lhs, rhs) {
+        (Value::I31(lhs), Value::I31(rhs)) => lhs == rhs,
+        (
+            Value::GcRef {
+                heap: lhs_heap,
+                id: lhs_id,
+            },
+            Value::GcRef {
+                heap: rhs_heap,
+                id: rhs_id,
+            },
+        ) => lhs_heap == rhs_heap && lhs_id == rhs_id,
+        (Value::FuncRef(lhs), Value::FuncRef(rhs)) => lhs == rhs,
+        (Value::ExternRef(lhs), Value::ExternRef(rhs)) => lhs == rhs,
+        (Value::HostAny(lhs), Value::HostAny(rhs)) => lhs == rhs,
+        (Value::ExternGc(lhs), Value::ExternGc(rhs)) => lhs == rhs,
+        (Value::ExnRef(lhs), Value::ExnRef(rhs)) => lhs == rhs,
+        (lhs, rhs) if is_null_ref(&lhs) && is_null_ref(&rhs) => true,
+        _ => false,
+    }
 }
 
 /// Extract an i32 memory address operand as u32.

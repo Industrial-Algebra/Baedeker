@@ -167,16 +167,36 @@ fn struct_get_missing_field_index_is_eof() {
 }
 
 #[test]
-fn reserved_cast_subopcodes_are_unknown() {
-    // 0x14–0x1B are casts/conversions (U3).
-    for sub in [0x14u8, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B] {
-        let err = decode(&[0xFB, sub]).unwrap_err();
-        assert_eq!(
-            err.kind,
-            DecodeErrorKind::UnknownOpcode { byte: 0xFB },
-            "sub-opcode {sub:#04x} must be an unknown opcode"
-        );
-    }
+fn cast_subopcodes_decode() {
+    // 0x14–0x1B are casts/conversions, implemented in U3; the identity
+    // opcodes read one heaptype and the br_on_cast pair reads flags + label
+    // + two heaptypes.
+    assert!(matches!(
+        decode(&[0xFB, 0x14, 0x70]).unwrap(),
+        Instr::RefTest { .. }
+    ));
+    assert!(matches!(
+        decode(&[0xFB, 0x15, 0x70]).unwrap(),
+        Instr::RefTest { .. }
+    ));
+    assert!(matches!(
+        decode(&[0xFB, 0x16, 0x70]).unwrap(),
+        Instr::RefCast { .. }
+    ));
+    assert!(matches!(
+        decode(&[0xFB, 0x17, 0x70]).unwrap(),
+        Instr::RefCast { .. }
+    ));
+    assert!(matches!(
+        decode(&[0xFB, 0x18, 0x00, 0x00, 0x70, 0x6F]).unwrap(),
+        Instr::BrOnCast { fail: false, .. }
+    ));
+    assert!(matches!(
+        decode(&[0xFB, 0x19, 0x00, 0x00, 0x70, 0x6F]).unwrap(),
+        Instr::BrOnCast { fail: true, .. }
+    ));
+    assert_eq!(decode(&[0xFB, 0x1A]).unwrap(), Instr::AnyConvertExtern);
+    assert_eq!(decode(&[0xFB, 0x1B]).unwrap(), Instr::ExternConvertAny);
 }
 
 #[test]

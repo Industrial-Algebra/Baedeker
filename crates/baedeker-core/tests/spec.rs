@@ -150,6 +150,7 @@ fn decode_kind_name(kind: &DecodeErrorKind) -> &'static str {
         DecodeErrorKind::UnknownExportDesc { .. } => "UnknownExportDesc",
         DecodeErrorKind::InvalidTagAttribute { .. } => "InvalidTagAttribute",
         DecodeErrorKind::InvalidMutability { .. } => "InvalidMutability",
+        DecodeErrorKind::MalformedCastFlags { .. } => "MalformedCastFlags",
         DecodeErrorKind::InvalidUtf8 => "InvalidUtf8",
         DecodeErrorKind::FunctionCodeLengthMismatch { .. } => "FunctionCodeLengthMismatch",
         DecodeErrorKind::UnknownOpcode { .. } => "UnknownOpcode",

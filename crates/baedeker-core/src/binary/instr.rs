@@ -17,8 +17,8 @@ use crate::binary::typeparser::{
 };
 use crate::error::{ByteOffset, DecodeContext, DecodeError, DecodeErrorKind};
 use crate::types::{
-    BlockType, CodeBody, ElemIdx, FuncIdx, GlobalIdx, LabelIdx, LocalIdx, MemArg, MemIdx, RefType,
-    TableIdx, TagIdx, TypeIdx, ValType,
+    BlockType, CodeBody, ElemIdx, FuncIdx, GlobalIdx, HeapType, LabelIdx, LocalIdx, MemArg, MemIdx,
+    RefType, TableIdx, TagIdx, TypeIdx, ValType,
 };
 
 /// A decoded instruction paired with its absolute byte offset in the module.
@@ -198,6 +198,29 @@ pub enum Instr {
     RefIsNull,
     RefFunc(FuncIdx),
     RefAsNonNull,
+    /// `ref.test (ref null? ht)` — test a reference against a heap type.
+    RefTest {
+        nullable: bool,
+        ht: HeapType,
+    },
+    /// `ref.cast (ref null? ht)` — cast a reference, trapping on failure.
+    RefCast {
+        nullable: bool,
+        ht: HeapType,
+    },
+    /// `br_on_cast` / `br_on_cast_fail` — branch on cast success/failure.
+    BrOnCast {
+        fail: bool,
+        src: RefType,
+        tgt: RefType,
+        label: LabelIdx,
+    },
+    /// `ref.eq` — equality comparison of two eq references.
+    RefEq,
+    /// `any.convert_extern` — re-tag an extern reference as an any reference.
+    AnyConvertExtern,
+    /// `extern.convert_any` — re-tag an any reference as an extern reference.
+    ExternConvertAny,
     V128Const([u8; 16]),
     I8x16Splat,
     I16x8Splat,
@@ -788,6 +811,7 @@ pub fn decode_instr_with_offset(
         )),
         0xD1 => Instr::RefIsNull,
         0xD2 => Instr::RefFunc(FuncIdx(decode_u32(cursor, base_offset)?)),
+        0xD3 => Instr::RefEq,
         0xD4 => Instr::RefAsNonNull,
         0xD5 => Instr::BrOnNull(LabelIdx(decode_u32(cursor, base_offset)?)),
         0xD6 => Instr::BrOnNonNull(LabelIdx(decode_u32(cursor, base_offset)?)),
@@ -996,9 +1020,57 @@ fn decode_gc_instr(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Instr,
         0x1C => Ok(Instr::RefI31),
         0x1D => Ok(Instr::I31GetS),
         0x1E => Ok(Instr::I31GetU),
-        // 0x14–0x1B are casts/conversions (identity checks, br_on_cast,
-        // extern/any conversions). They are U3's scope; at this pin an
-        // unimplemented `0xFB` sub-opcode is an unknown opcode.
+        // 0x14–0x17: cast/test identity checks; 0x18/0x19: br_on_cast(_fail);
+        // 0x1a/0x1b: extern/any conversions. Shapes and operand order follow
+        // `interpreter/binary/decode.ml`.
+        0x14..=0x17 => {
+            let ht = parse_heap_type(cursor, base_offset, DecodeContext::CodeSection)?;
+            match opcode {
+                0x14 => Ok(Instr::RefTest {
+                    nullable: false,
+                    ht,
+                }),
+                0x15 => Ok(Instr::RefTest { nullable: true, ht }),
+                0x16 => Ok(Instr::RefCast {
+                    nullable: false,
+                    ht,
+                }),
+                _ => Ok(Instr::RefCast { nullable: true, ht }),
+            }
+        }
+        0x18 | 0x19 => {
+            let flags = cursor.read_byte().map_err(|_| DecodeError {
+                offset: ByteOffset(base_offset + cursor.position()),
+                context: DecodeContext::CodeSection,
+                kind: DecodeErrorKind::UnexpectedEof,
+            })?;
+            if flags & 0xfc != 0 {
+                return Err(DecodeError {
+                    offset: ByteOffset(base_offset),
+                    context: DecodeContext::CodeSection,
+                    kind: DecodeErrorKind::MalformedCastFlags { flags },
+                });
+            }
+            let label = LabelIdx(decode_u32(cursor, base_offset)?);
+            let src_null = flags & 0x01 != 0;
+            let tgt_null = flags & 0x02 != 0;
+            let src = RefType::from_parts(
+                src_null,
+                parse_heap_type(cursor, base_offset, DecodeContext::CodeSection)?,
+            );
+            let tgt = RefType::from_parts(
+                tgt_null,
+                parse_heap_type(cursor, base_offset, DecodeContext::CodeSection)?,
+            );
+            Ok(Instr::BrOnCast {
+                fail: opcode == 0x19,
+                src,
+                tgt,
+                label,
+            })
+        }
+        0x1A => Ok(Instr::AnyConvertExtern),
+        0x1B => Ok(Instr::ExternConvertAny),
         _ => Err(DecodeError {
             offset: ByteOffset(base_offset),
             context: DecodeContext::CodeSection,

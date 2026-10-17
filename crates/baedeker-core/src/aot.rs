@@ -24,7 +24,7 @@ pub const AOT_MAGIC: [u8; 7] = *b"BDKAOT1";
 const ENVELOPE_LEN: usize = AOT_MAGIC.len() + 4;
 
 /// Current artifact format version. Bump on any IR layout change.
-pub const AOT_FORMAT_VERSION: u32 = 9;
+pub const AOT_FORMAT_VERSION: u32 = 10;
 
 /// Errors deserializing an AOT artifact.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,7 +149,10 @@ mod tests {
         // recompute the tag's own referenced function type's closed
         // form at link time (GC U1); v9 the GC heap instruction terms
         // (struct/array/i31 RegOps + GcExt) and the GcRef/I31 Value
-        // shapes (GC U2).
+        // shapes (GC U2); v10 the cast/conversion instruction terms
+        // (`RefTest`/`RefCast`/`RefEq`/`AnyConvertExtern`/
+        // `ExternConvertAny` RegOps) and the HostAny/ExternGc re-tag
+        // Value shapes (GC U3).
         // The ladder covers every predecessor of the current version.
         for stale in 1..AOT_FORMAT_VERSION {
             let mut old_artifact = artifact.clone();
