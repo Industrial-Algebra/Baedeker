@@ -5551,7 +5551,7 @@ fn valtype_vec_matches(module: &Module<'_>, found: &[ValType], expected: &[ValTy
 
 fn is_stack_polymorphic(state: &ValidationState) -> bool {
     state.reachability == Reachability::Unreachable
-        && state.operands.len() == state.current_frame().outer_height
+        && state.operands.len() <= state.current_frame().outer_height
 }
 
 fn operand_matches(module: &Module<'_>, found: OperandType, expected: ValType) -> bool {
@@ -5569,9 +5569,11 @@ fn operand_to_valtype(found: OperandType, fallback: ValType) -> ValType {
 }
 
 fn concrete_stack(state: &ValidationState) -> Vec<ValType> {
-    state
-        .operands
-        .as_slice()
+    concrete_operands(state.operands.as_slice())
+}
+
+fn concrete_operands(operands: &[OperandType]) -> Vec<ValType> {
+    operands
         .iter()
         .filter_map(|operand| match operand {
             OperandType::Typed(ty) => Some(*ty),
@@ -5625,6 +5627,41 @@ fn ensure_frame_end_types(
     }
 }
 
+/// Pop one operand, bounded by the CURRENT control frame's floor.
+///
+/// Review r3 P2: this is the pinned algorithm's `pop_opd` (`valid.ml`), which
+/// compares the operand stack height against the current control frame's
+/// height rather than the stack's absolute emptiness:
+///
+/// ```text
+/// let pop_opd c =
+///   match c.ctrl with
+///   | [] -> assert false
+///   | frame :: _ ->
+///     if List.length c.vs = frame.height then
+///       if frame.unreachable then Bot
+///       else error "type mismatch: expected a type but nothing on stack"
+///     else
+///       (match c.vs with v :: vs' -> c.vs <- vs'; v | [] -> assert false)
+/// ```
+///
+/// Operands below the current frame's `outer_height` belong to ENCLOSING
+/// frames and are never this frame's to pop — not even when the shared operand
+/// vector happens to be long enough. Skipping that rule let a REACHABLE frame
+/// silently consume an enclosing frame's operand:
+///
+/// ```wat
+/// (module (func i32.const 7 i32.const 8 block drop i32.const 9 end drop drop))
+/// ```
+///
+/// The block's floor is 2, its `drop` took `vec[1]`, `i32.const 9` restored the
+/// length to 2, and `end`'s (frame-local) result check saw an empty frame-local
+/// slice against empty results — so the invalid module validated. The pin
+/// rejects it ("type mismatch: expected a type but nothing on stack").
+///
+/// At (or below) the floor, an UNREACHABLE frame is polymorphic: the pinned
+/// algorithm yields `Bot`, so popping below the floor in unreachable code stays
+/// legal and never consumes an enclosing operand.
 fn pop_operand(
     function: FuncIdx,
     state: &mut ValidationState,
@@ -5632,8 +5669,13 @@ fn pop_operand(
     op: &'static str,
     expected: &[ValType],
 ) -> Result<OperandType, ValidationError> {
-    if is_stack_polymorphic(state) {
-        return Ok(OperandType::Bottom);
+    let outer_height = state.current_frame().outer_height;
+    if state.operands.len() <= outer_height {
+        // At (or below) the current frame's floor.
+        if state.reachability == Reachability::Unreachable {
+            return Ok(OperandType::Bottom);
+        }
+        return Err(underflow_error(function, state, op, expected, offset));
     }
 
     match state.operands.pop() {
@@ -5649,13 +5691,18 @@ fn underflow_error(
     expected: &[ValType],
     offset: usize,
 ) -> ValidationError {
+    // Report the CURRENT frame's operands as available: the floor bounds this
+    // frame, so enclosing frames' values are never reachable from here and
+    // must not be named as candidates.
+    let outer_height = state.current_frame().outer_height;
+    let available = concrete_operands(state.operands.as_slice().get(outer_height..).unwrap_or(&[]));
     ValidationError {
         offset: ByteOffset(offset),
         function: Some(function),
         kind: ValidationErrorKind::StackUnderflow {
             op,
             expected: expected.to_vec(),
-            available: concrete_stack(state),
+            available,
         },
     }
 }
@@ -7785,11 +7832,20 @@ mod tests {
         ];
         let module = Module::decode(&bytes).unwrap();
         let err = module.validate().unwrap_err();
-        assert_eq!(err.offset, ByteOffset(36));
+        // Review r3 P2: the `i32.load` inside the empty block sits on the
+        // block's floor, so its address pop must NOT reach the enclosing
+        // `i32.const 0`. The rejection is therefore reported at the offending
+        // pop (offset 32, the `i32.load`) rather than downstream at `end`
+        // (offset 36) once the length had shifted — which is exactly where
+        // wasmparser at this pin reports it ("type mismatch: expected i32 but
+        // nothing on stack" at offset 0x20).
+        assert_eq!(err.offset, ByteOffset(32));
         assert!(matches!(
             err.kind,
-            ValidationErrorKind::ControlResultTypeMismatch { expected, found }
-                if expected.is_empty() && found.is_empty()
+            ValidationErrorKind::StackUnderflow { op, ref expected, ref available }
+                if op == "i32.load"
+                    && *expected == vec![ValType::Num(crate::types::NumType::I32)]
+                    && available.is_empty()
         ));
     }
 

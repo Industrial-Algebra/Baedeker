@@ -58,6 +58,7 @@
 use arbitrary::Unstructured;
 use baedeker_core::binary::module::Module;
 use baedeker_core::types::{CompType, ConcreteKind};
+use baedeker_core::validate::error::ValidationErrorKind;
 use wasm_smith::{Config, InstructionKind, InstructionKinds};
 
 /// The GC-smith configuration: mirror of the `gc-smith` fuzz-target config.
@@ -361,4 +362,169 @@ fn unreachable_state_is_restored_after_a_nested_block() {
     // Invalid: a block body must leave exactly its declared results.
     validate("(module (func unreachable (block i32.const 1 end)))")
         .expect_err("a block body may not leave extra operands");
+}
+
+/// Review r3 P2 root cause, pinned as hand-written regressions: operand pops
+/// are bounded by the CURRENT frame's floor.
+///
+/// The r2 fix made the frame-END and BRANCH type checks frame-local, but the
+/// individual instruction pops still popped the shared operand vector
+/// directly. A REACHABLE frame could therefore consume an enclosing frame's
+/// operand whenever a later push restored the stack length before the frame
+/// closed:
+///
+/// ```wat
+/// (module (func i32.const 7 i32.const 8 block drop i32.const 9 end drop drop))
+/// ```
+///
+/// The block's floor is 2, its `drop` popped `vec[1]` (an operand of the
+/// enclosing function frame), `i32.const 9` restored the length to 2, and
+/// `end`'s frame-local result check (empty frame-local slice, empty results)
+/// passed — so an invalid module was accepted. wasmparser at this pin rejects
+/// it: "type mismatch: expected a type but nothing on stack" at the inner
+/// `drop`.
+///
+/// The pinned algorithm (`valid.ml` `pop_opd`) compares the operand stack
+/// height against the current control frame's height:
+///
+/// ```text
+/// let pop_opd c =
+///   match c.ctrl with
+///   | [] -> assert false
+///   | frame :: _ ->
+///     if List.length c.vs = frame.height then
+///       if frame.unreachable then Bot
+///       else error "type mismatch: expected a type but nothing on stack"
+///     else
+///       (match c.vs with v :: vs' -> c.vs <- vs'; v | [] -> assert false)
+/// ```
+///
+/// — a reachable frame at its floor has nothing to pop (an error naming that
+/// floor's emptiness), while an unreachable (polymorphic) frame at its floor
+/// yields `Bot` and may pop any number of operands. `pop_operand` now applies
+/// exactly that rule; every pop path (`pop_any`, `pop_expect`, `pop_exact`,
+/// `pop_operand_type`, `pop_ref_type`, the indexed/ref pops) funnels through
+/// it, and it is the only site that pops the operand vector.
+#[test]
+fn operand_pops_respect_the_current_frame_floor() {
+    fn encode(source: &str) -> Vec<u8> {
+        let buf = wast::parser::ParseBuffer::new(source).unwrap();
+        let mut wat = wast::parser::parse::<wast::Wat<'_>>(&buf).unwrap();
+        wat.encode().unwrap()
+    }
+
+    /// Our verdict (lowers accepted modules so the whole pipeline is covered).
+    fn ours(source: &str) -> Result<(), baedeker_core::validate::error::ValidationError> {
+        let bytes = encode(source);
+        let module = Module::decode(&bytes).unwrap();
+        module.validate()?;
+        module.lower().unwrap_or_else(|error| {
+            panic!("a validated module must lower: {error:?} for {source}")
+        });
+        Ok(())
+    }
+
+    /// The independent oracle at this pin: wasmparser via Wasmtime's
+    /// validator. Rejections here are the authority for "this module is
+    /// invalid", so every rejection case below is double-checked.
+    fn pin_rejects(source: &str) -> bool {
+        let bytes = encode(source);
+        let engine = wasmtime::Engine::default();
+        wasmtime::Module::validate(&engine, &bytes).is_err()
+    }
+
+    /// A reachable frame at its floor: rejected, naming the floor's emptiness
+    /// (the enclosing frames' operands are not "available" to this frame).
+    fn expect_floor_rejection(source: &str, op: &'static str) {
+        assert!(
+            pin_rejects(source),
+            "the pin must reject this module: {source}"
+        );
+        let error = ours(source).err().unwrap_or_else(|| {
+            panic!("a pop below a reachable frame floor must be rejected: {source}")
+        });
+        match error.kind {
+            ValidationErrorKind::StackUnderflow {
+                op: found_op,
+                ref available,
+                ..
+            } => {
+                assert_eq!(
+                    found_op, op,
+                    "the underflow must name the offending op: {source}"
+                );
+                assert!(
+                    available.is_empty(),
+                    "the frame floor is empty: enclosing operands must not be reported as \
+                     available ({available:?}) for {source}"
+                );
+            }
+            other => panic!("expected a frame-floor StackUnderflow, found {other:?} for {source}"),
+        }
+    }
+
+    /// A module the pin also accepts: accepted (and lowered) by ours.
+    fn expect_accept(source: &str) {
+        assert!(
+            !pin_rejects(source),
+            "the pin must accept this module: {source}"
+        );
+        ours(source).unwrap_or_else(|error| {
+            panic!("a valid module must be accepted: {error:?} for {source}")
+        });
+    }
+
+    // (a) The reviewer's escaping module: the inner `drop` sits exactly on the
+    // block's floor while reachable, and `i32.const 9` restores the length so
+    // every frame-end check still passes.
+    expect_floor_rejection(
+        "(module (func i32.const 7 i32.const 8 block drop i32.const 9 end drop drop))",
+        "drop",
+    );
+
+    // (a2) The same below-floor pop through a TYPED pop: `i32.add`'s first
+    // operand would be the enclosing `i64`. Before the floor check that leaked
+    // operand surfaced as a downstream `TypeMismatch` (the enclosing `i64` read
+    // as an `i32` operand); it is a frame-floor underflow at the offending pop.
+    expect_floor_rejection(
+        "(module (func i64.const 1 block i32.add i32.const 0 end drop))",
+        "i32.binary",
+    );
+
+    // (b) Unreachable (polymorphic) frames may pop below their floor — the
+    // pinned `pop_opd` yields `Bot` at the floor and never reaches into an
+    // enclosing frame. Both engines accept these.
+    expect_accept("(module (func block unreachable drop drop drop end))");
+    expect_accept("(module (func i32.const 1 block unreachable drop drop end drop))");
+    expect_accept("(module (func block unreachable drop drop drop i32.const 1 drop end))");
+
+    // (c) Positive controls at floor boundaries: pops of frame-local operands
+    // stay legal, in both arms of an `if` and across `br` targets.
+    expect_accept("(module (func i32.const 1 block i32.const 2 drop end drop))");
+    expect_accept(
+        "(module (func i32.const 1 i32.const 2 if i32.const 3 drop else i32.const 4 drop end drop))",
+    );
+    expect_accept(
+        "(module (func (result i32) i32.const 1 if (result i32) i32.const 2 else i32.const 3 end))",
+    );
+    expect_accept("(module (func (result i32) block (result i32) i32.const 1 br 0 end))");
+    expect_accept("(module (func i32.const 1 i32.const 2 block i32.const 3 br 0 end drop drop))");
+    expect_accept("(module (func i32.const 1 loop i32.const 2 drop br 0 end drop))");
+
+    // (d) Negative controls at the same boundaries: the then-arm, the else-arm
+    // and a `br` target each leak one enclosing operand and restore the length
+    // before the frame closes, which is exactly what the floor check must
+    // catch.
+    expect_floor_rejection(
+        "(module (func i32.const 1 i32.const 2 if drop i32.const 5 else end drop))",
+        "drop",
+    );
+    expect_floor_rejection(
+        "(module (func i32.const 1 i32.const 2 if else drop i32.const 6 end drop))",
+        "drop",
+    );
+    expect_floor_rejection(
+        "(module (func i32.const 1 i32.const 2 block drop i32.const 9 br 0 end drop drop))",
+        "drop",
+    );
 }
