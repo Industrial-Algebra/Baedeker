@@ -3249,25 +3249,37 @@ impl<'b> FuncBuilder<'b> {
                     }
                     // Catch clauses targeting the function frame land on the
                     // return continuation with the function's result regs.
-                    let mut remaining_catches = Vec::with_capacity(self.pending_catches.len());
-                    for pending in core::mem::take(&mut self.pending_catches) {
-                        if pending.frame_pos != 0 {
-                            remaining_catches.push(pending);
-                            continue;
+                    // Process the matching clauses in place and then compact
+                    // the vector in place: a replacement `Vec` sized by
+                    // `pending_catches.len()` was an infallible,
+                    // module-scaled allocation that could abort on allocator
+                    // refusal.
+                    let func_idx = self.func_idx;
+                    {
+                        let regions = &mut self.regions;
+                        for pending in &self.pending_catches {
+                            if pending.frame_pos != 0 {
+                                continue;
+                            }
+                            debug_assert_eq!(
+                                pending.value_types.len(),
+                                values.len(),
+                                "catch landing arity must match the function result registers"
+                            );
+                            let dst_regs = fallible_copy_slice(
+                                func_idx,
+                                offset,
+                                "catch landing registers",
+                                &values,
+                            )?;
+                            let clause =
+                                &mut regions[pending.region_idx].catches[pending.clause_idx];
+                            clause.target_block = continuation_idx;
+                            clause.dst_regs = dst_regs;
                         }
-                        debug_assert_eq!(
-                            pending.value_types.len(),
-                            values.len(),
-                            "catch landing arity must match the function result registers"
-                        );
-                        let dst_regs =
-                            self.fallible_copy(offset, "catch landing registers", &values)?;
-                        let clause =
-                            &mut self.regions[pending.region_idx].catches[pending.clause_idx];
-                        clause.target_block = continuation_idx;
-                        clause.dst_regs = dst_regs;
                     }
-                    self.pending_catches = remaining_catches;
+                    self.pending_catches
+                        .retain(|pending| pending.frame_pos != 0);
                     self.finish_block(RegTerm::Return { values })?;
                     return Ok(true);
                 }
@@ -3360,56 +3372,63 @@ impl<'b> FuncBuilder<'b> {
                 // copies delivering each branch's values into the registers
                 // the continuation expects.
                 let continuation_idx = self.blocks.len() as u32;
-                let mut remaining = Vec::with_capacity(self.pending_branches.len());
-                for pending in core::mem::take(&mut self.pending_branches) {
-                    if pending.frame_pos != frame_pos {
-                        remaining.push(pending);
-                        continue;
-                    }
-                    let term = &mut self.blocks[pending.block].term;
-                    match pending.slot {
-                        BranchSlot::Single => match term {
-                            RegTerm::Br { target_block, .. }
-                            | RegTerm::BrIf { target_block, .. }
-                            | RegTerm::BrIfNull { target_block, .. }
-                            | RegTerm::BrIfNonNull { target_block, .. } => {
-                                *target_block = continuation_idx;
-                            }
-                            other => unreachable!(
-                                "pending branch block has non-branch terminator: {other:?}"
-                            ),
-                        },
-                        BranchSlot::Table(slot) => match term {
-                            RegTerm::BrTable {
-                                targets, default, ..
-                            } => {
-                                if slot < targets.len() {
-                                    targets[slot] = continuation_idx;
-                                } else {
-                                    *default = continuation_idx;
+                // Process the branches targeting this frame in place and then
+                // compact the vector in place, dropping the processed
+                // branches. A replacement `Vec` sized by
+                // `pending_branches.len()` was an infallible, module-scaled
+                // allocation that could abort on allocator refusal.
+                {
+                    let blocks = &mut self.blocks;
+                    for pending in &self.pending_branches {
+                        if pending.frame_pos != frame_pos {
+                            continue;
+                        }
+                        let term = &mut blocks[pending.block].term;
+                        match pending.slot {
+                            BranchSlot::Single => match term {
+                                RegTerm::Br { target_block, .. }
+                                | RegTerm::BrIf { target_block, .. }
+                                | RegTerm::BrIfNull { target_block, .. }
+                                | RegTerm::BrIfNonNull { target_block, .. } => {
+                                    *target_block = continuation_idx;
                                 }
+                                other => unreachable!(
+                                    "pending branch block has non-branch terminator: {other:?}"
+                                ),
+                            },
+                            BranchSlot::Table(slot) => match term {
+                                RegTerm::BrTable {
+                                    targets, default, ..
+                                } => {
+                                    if slot < targets.len() {
+                                        targets[slot] = continuation_idx;
+                                    } else {
+                                        *default = continuation_idx;
+                                    }
+                                }
+                                other => unreachable!(
+                                    "pending branch block has non-branch terminator: {other:?}"
+                                ),
+                            },
+                        }
+                        // Copies from every targeted frame write disjoint
+                        // register sets from the same sources, so appending
+                        // per-frame copies to one block is sound.
+                        for (dst, src) in values.iter().zip(pending.values.iter()) {
+                            if dst != src {
+                                blocks[pending.block].instrs.push(RegInstr {
+                                    offset,
+                                    op: RegOp::Copy {
+                                        dst: *dst,
+                                        src: *src,
+                                    },
+                                });
                             }
-                            other => unreachable!(
-                                "pending branch block has non-branch terminator: {other:?}"
-                            ),
-                        },
-                    }
-                    // Copies from every targeted frame write disjoint
-                    // register sets from the same sources, so appending
-                    // per-frame copies to one block is sound.
-                    for (dst, src) in values.iter().zip(pending.values.iter()) {
-                        if dst != src {
-                            self.blocks[pending.block].instrs.push(RegInstr {
-                                offset,
-                                op: RegOp::Copy {
-                                    dst: *dst,
-                                    src: *src,
-                                },
-                            });
                         }
                     }
                 }
-                self.pending_branches = remaining;
+                self.pending_branches
+                    .retain(|pending| pending.frame_pos != frame_pos);
                 // A `try_table` frame's region ends at the continuation
                 // (exclusive): its body's blocks are exactly those from
                 // `first_block` up to the continuation.
@@ -3419,24 +3438,35 @@ impl<'b> FuncBuilder<'b> {
                 // Back-patch catch clauses targeting this frame: the landing
                 // writes directly into the continuation's result registers
                 // (there is no branching block, so no copies are emitted).
-                let mut remaining_catches = Vec::with_capacity(self.pending_catches.len());
-                for pending in core::mem::take(&mut self.pending_catches) {
-                    if pending.frame_pos != frame_pos {
-                        remaining_catches.push(pending);
-                        continue;
+                // Process the catch clauses targeting this frame in place and
+                // then compact the vector in place: a replacement `Vec` sized
+                // by `pending_catches.len()` was an infallible, module-scaled
+                // allocation that could abort on allocator refusal.
+                let func_idx = self.func_idx;
+                {
+                    let regions = &mut self.regions;
+                    for pending in &self.pending_catches {
+                        if pending.frame_pos != frame_pos {
+                            continue;
+                        }
+                        debug_assert_eq!(
+                            pending.value_types.len(),
+                            values.len(),
+                            "catch landing arity must match the target frame's registers"
+                        );
+                        let dst_regs = fallible_copy_slice(
+                            func_idx,
+                            offset,
+                            "catch landing registers",
+                            &values,
+                        )?;
+                        let clause = &mut regions[pending.region_idx].catches[pending.clause_idx];
+                        clause.target_block = continuation_idx;
+                        clause.dst_regs = dst_regs;
                     }
-                    debug_assert_eq!(
-                        pending.value_types.len(),
-                        values.len(),
-                        "catch landing arity must match the target frame's registers"
-                    );
-                    let dst_regs =
-                        self.fallible_copy(offset, "catch landing registers", &values)?;
-                    let clause = &mut self.regions[pending.region_idx].catches[pending.clause_idx];
-                    clause.target_block = continuation_idx;
-                    clause.dst_regs = dst_regs;
                 }
-                self.pending_catches = remaining_catches;
+                self.pending_catches
+                    .retain(|pending| pending.frame_pos != frame_pos);
                 // For an `if` without `else`, patch the IfFork's else edge to
                 // the identity trampoline (when params exist) and retarget
                 // the then-body's end to branch over it to the continuation.
@@ -5472,11 +5502,7 @@ impl<'b> FuncBuilder<'b> {
         what: &'static str,
         src: &[T],
     ) -> Result<Vec<T>, LowerError> {
-        let mut out = Vec::new();
-        out.try_reserve(src.len())
-            .map_err(|_| self.resource_error(offset, what))?;
-        out.extend_from_slice(src);
-        Ok(out)
+        fallible_copy_slice(self.func_idx, offset, what, src)
     }
 
     /// Fallible [`FuncBuilder::branch_types_at`] used by `br_on_cast`: every

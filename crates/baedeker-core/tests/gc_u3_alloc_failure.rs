@@ -1,8 +1,8 @@
 // Copyright (C) 2026 Industrial Algebra
 // SPDX-License-Identifier: Apache-2.0
 
-//! GC unit 3 review r2 P2 reproduction: module-sized bookkeeping clones must
-//! survive allocation refusal cleanly.
+//! GC unit 3 review r2/r3 P2 reproduction: module-sized bookkeeping clones
+//! and replacement vectors must survive allocation refusal cleanly.
 //!
 //! The r1 fix made the `br_on_cast` label/leading copies fallible, but two
 //! module-sized `Vec` clones still terminated the process when the allocator
@@ -22,6 +22,14 @@
 //! and the surrounding module-scaled bookkeeping — `local_inits` snapshots,
 //! control/block vectors, and the error/result vectors — is reserved
 //! fallibly.
+//!
+//! The r3 fix eliminated the block-close `pending_branches` replacement
+//! vector (and the analogous block-close / function-end `pending_catches`
+//! replacement vectors) by processing the targeted entries in place and then
+//! compacting with `Vec::retain`; a replacement `Vec::with_capacity(len)` was
+//! an infallible, module-scaled allocation that aborted on allocator
+//! refusal (56 bytes for the reviewer's probe at both arities). The
+//! single-clause `try_table` modules below cover the changed catch paths.
 //!
 //! This file owns a failing global allocator, so it contains only these
 //! tests. The refusal sweep runs each allocation index in a child process so
@@ -108,6 +116,33 @@ fn local_heavy_wat(local_count: usize) -> String {
     )
 }
 
+/// A single-clause `try_table` module with one pending catch. With
+/// `function_level == false` the catch targets an outer non-loop block `$h`,
+/// so it is back-patched in the *block-close* path; with
+/// `function_level == true` it targets the function's implicit label (`0`),
+/// so it is back-patched in the *function-end* path. Both paths were changed
+/// from a module-sized replacement vector to in-place processing.
+fn try_table_wat(function_level: bool) -> String {
+    if function_level {
+        String::from(
+            "(module\n  (tag $e0 (param i32))\n  \
+             (func (export \"f\") (result i32)\n    \
+             (try_table (catch $e0 0)\n      \
+             i32.const 42\n      throw $e0)\n    \
+             i32.const 7))",
+        )
+    } else {
+        String::from(
+            "(module\n  (tag $e0 (param i32))\n  \
+             (func (export \"f\") (result i32)\n    \
+             (block $h (result i32)\n      \
+             (try_table (catch $e0 $h)\n        \
+             i32.const 42\n        throw $e0)\n      \
+             i32.const 7)))",
+        )
+    }
+}
+
 fn decode(wat: &str) -> Module<'static> {
     // Leak the bytes so the borrowed module can outlive this helper; the
     // child process is short-lived.
@@ -120,6 +155,9 @@ fn decode(wat: &str) -> Module<'static> {
 /// Read the child's arity/form/locals configuration and the module it should
 /// validate or lower.
 fn child_module() -> Module<'static> {
+    if let Ok(level) = std::env::var("GC_U3_TRY_TABLE") {
+        return decode(&try_table_wat(level == "func"));
+    }
     let locals: usize = std::env::var("GC_U3_LOCALS")
         .ok()
         .and_then(|value| value.parse().ok())
@@ -235,6 +273,26 @@ fn run_lower_child(target: usize, arity: usize, form: &str) -> String {
     stderr
 }
 
+/// Like [`run_lower_child`], but for the single-clause `try_table` module
+/// (one pending catch back-patched at the outer block's `end`).
+fn run_try_lower_child(target: usize, level: &str) -> String {
+    let exe = std::env::current_exe().expect("test binary path");
+    let output = std::process::Command::new(exe)
+        .args(["lower_child", "--exact", "--nocapture"])
+        .env("GC_U3_LOWER_FAIL_AT", target.to_string())
+        .env("GC_U3_TRY_TABLE", level)
+        .output()
+        .expect("spawn try_table lowering refusal child");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(
+        output.status.success(),
+        "refusing try_table lowering allocation {target} ({level}) \
+         terminated the process (status {:?}); stderr:\n{stderr}",
+        output.status
+    );
+    stderr
+}
+
 // ── pinned refusal windows ──────────────────────────────────────────
 //
 // Each window covers the former clone allocation and the module-scaled
@@ -262,24 +320,48 @@ const VALIDATE_CLEAN_ARITY512: &[usize] = &[38, 39, 40];
 /// Lowering window for arity 1: the function-setup copies, the
 /// `br_on_cast` lowering copies, the block result registers, the
 /// function-end result copies, the control-block / lowered-function
-/// reservations, and the former block-close clone index (42), which now
-/// lands on the fallible `register type table` reservation.
+/// reservations, and the fallible `register type table` reservation. The
+/// block-close `pending_branches` replacement vector (former index 37) is
+/// now eliminated in place, so refusing that index rolls to the `function
+/// result types` reservation; every window index at or after 37 shifted
+/// down by one relative to the pre-elimination pinning.
 const LOWER_WINDOW_ARITY1: &[usize] = &[
-    21, 22, 23, 24, 25, 26, 31, 32, 33, 34, 35, 36, 38, 39, 40, 41, 42,
+    21, 22, 23, 24, 25, 26, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41,
 ];
 const LOWER_CLEAN_ARITY1: &[usize] = LOWER_WINDOW_ARITY1;
 
 /// Lowering window for arity 512: the validation `br_on_cast` copies, the
 /// function-setup copies, the lowering `br_on_cast` copies, the block result
-/// registers, the function-end result copies, and the control-block /
-/// lowered-function reservations. The former block-close clone (index 112)
-/// no longer exists, so refusing it is a clean no-op.
+/// registers, the function-end result copies, the control-block /
+/// lowered-function reservations, the fallible `register type table`
+/// reservation, and the former block-close clone index (now beyond the
+/// allocation count, so refusing it is a clean no-op). The block-close
+/// `pending_branches` replacement vector (former index 91) is now
+/// eliminated in place, so refusing that index rolls to the `function
+/// result types` reservation; every window index at or after 91 shifted
+/// down by one relative to the pre-elimination pinning.
 const LOWER_WINDOW_ARITY512: &[usize] = &[
-    38, 39, 40, 51, 52, 53, 54, 55, 56, 85, 86, 87, 88, 89, 90, 92, 93, 94, 95, 112,
+    38, 39, 40, 51, 52, 53, 54, 55, 56, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 111,
 ];
 const LOWER_CLEAN_ARITY512: &[usize] = &[
-    38, 39, 40, 51, 52, 53, 54, 55, 56, 85, 86, 87, 88, 89, 90, 92, 93, 94, 95,
+    38, 39, 40, 51, 52, 53, 54, 55, 56, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94,
 ];
+
+/// `try_table` catch window. Each single-clause module exercises one of the
+/// block-close / function-end `pending_catches` processing paths that were
+/// changed from a module-sized replacement vector to in-place processing.
+/// Indices are the post-elimination positions of the removed vectors (which
+/// now fall on fallible reservations):
+///
+/// * `block` module: index 39 is the `try_table` frame's `end` (where the
+///   pending catch does not yet match the frame and is retained) and index
+///   42 is the targeted block's `end` (where it matches and is processed);
+///   both now land on the fallible `control blocks` / `catch landing
+///   registers` reservations.
+/// * `func` module: index 41 is the function-end path; it now lands on the
+///   fallible `catch landing registers` reservation.
+const TRY_TABLE_BLOCK_WINDOW: &[usize] = &[39, 42];
+const TRY_TABLE_FUNC_WINDOW: &[usize] = &[41];
 
 /// Local-heavy `local_inits` window: the `local-init flags` flag vector and
 /// the two `block frame` reservations (the frame's local-init snapshot).
@@ -325,15 +407,41 @@ fn finish_frame_refusal_windows_are_clean() {
 }
 
 /// The lowering block-close no longer clones the frame's module-sized
-/// `result_types`: refusing the block result-register reservation, the
-/// control-block/func reservations, or the clone's former index (arity 1
-/// index 42 -> the fallible `register type table` reservation; arity 512
-/// index 112 -> beyond the allocation count) never terminates the process.
+/// `result_types` (r2) and no longer allocates a `pending_branches`
+/// replacement vector (r3): refusing the block result-register reservation,
+/// the control-block/func reservations, the `pending_branches` vector's
+/// former index (arity 1 index 37 -> the fallible `function result types`
+/// reservation; arity 512 index 91 -> the same reservation), or the r2
+/// clone's former position (arity 1 index 41 -> the fallible `register type
+/// table` reservation; arity 512 index 111 -> beyond the allocation count)
+/// never terminates the process.
 #[test]
 fn block_close_refusal_windows_are_clean() {
     for form in ["cast", "fail"] {
         assert_lower_window(1, form, LOWER_WINDOW_ARITY1, LOWER_CLEAN_ARITY1);
         assert_lower_window(512, form, LOWER_WINDOW_ARITY512, LOWER_CLEAN_ARITY512);
+    }
+}
+
+/// The `try_table` pending-catch vectors no longer allocate a replacement
+/// `Vec`: refusing the former replacement-vector indices (or the fallible
+/// reservations that now occupy those positions) never terminates the
+/// process, for both the block-close and function-end catch paths.
+#[test]
+fn pending_catch_refusal_windows_are_clean() {
+    for &target in TRY_TABLE_BLOCK_WINDOW {
+        let stderr = run_try_lower_child(target, "block");
+        assert!(
+            stderr.contains("CLEAN_REFUSAL"),
+            "try_table block allocation {target} should clean-refuse, saw:\n{stderr}"
+        );
+    }
+    for &target in TRY_TABLE_FUNC_WINDOW {
+        let stderr = run_try_lower_child(target, "func");
+        assert!(
+            stderr.contains("CLEAN_REFUSAL"),
+            "try_table func allocation {target} should clean-refuse, saw:\n{stderr}"
+        );
     }
 }
 
