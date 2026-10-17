@@ -384,20 +384,20 @@ fn unreachable_state_is_restored_after_a_nested_block() {
 /// it: "type mismatch: expected a type but nothing on stack" at the inner
 /// `drop`.
 ///
-/// The pinned algorithm (`valid.ml` `pop_opd`) compares the operand stack
+/// The spec's validation algorithm (appendix) compares the operand stack
 /// height against the current control frame's height:
 ///
 /// ```text
-/// let pop_opd c =
-///   match c.ctrl with
-///   | [] -> assert false
-///   | frame :: _ ->
-///     if List.length c.vs = frame.height then
-///       if frame.unreachable then Bot
-///       else error "type mismatch: expected a type but nothing on stack"
-///     else
-///       (match c.vs with v :: vs' -> c.vs <- vs'; v | [] -> assert false)
+/// func pop_val() : val_type =
+///   if (vals.size() = ctrls[0].val_height && ctrls[0].unreachable) return Bot
+///   error_if(vals.size() = ctrls[0].val_height)
+///   return vals.pop()
 /// ```
+///
+/// (verbatim from `document/core/appendix/algorithm.rst:181-185` at this
+/// pin — the interpreter's `valid.ml` implements the same rule inline
+/// with frame-local checking but defines no `pop_opd`; the earlier
+/// attribution here was wrong, caught in review r4)
 ///
 /// — a reachable frame at its floor has nothing to pop (an error naming that
 /// floor's emptiness), while an unreachable (polymorphic) frame at its floor
@@ -492,7 +492,7 @@ fn operand_pops_respect_the_current_frame_floor() {
     );
 
     // (b) Unreachable (polymorphic) frames may pop below their floor — the
-    // pinned `pop_opd` yields `Bot` at the floor and never reaches into an
+    // appendix algorithm's `pop_val` yields `Bot` at the floor and never reaches into an
     // enclosing frame. Both engines accept these.
     expect_accept("(module (func block unreachable drop drop drop end))");
     expect_accept("(module (func i32.const 1 block unreachable drop drop end drop))");

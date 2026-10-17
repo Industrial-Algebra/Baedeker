@@ -5629,21 +5629,21 @@ fn ensure_frame_end_types(
 
 /// Pop one operand, bounded by the CURRENT control frame's floor.
 ///
-/// Review r3 P2: this is the pinned algorithm's `pop_opd` (`valid.ml`), which
+/// Review r3 P2: the spec's validation algorithm (appendix) which
 /// compares the operand stack height against the current control frame's
 /// height rather than the stack's absolute emptiness:
 ///
 /// ```text
-/// let pop_opd c =
-///   match c.ctrl with
-///   | [] -> assert false
-///   | frame :: _ ->
-///     if List.length c.vs = frame.height then
-///       if frame.unreachable then Bot
-///       else error "type mismatch: expected a type but nothing on stack"
-///     else
-///       (match c.vs with v :: vs' -> c.vs <- vs'; v | [] -> assert false)
+/// func pop_val() : val_type =
+///   if (vals.size() = ctrls[0].val_height && ctrls[0].unreachable) return Bot
+///   error_if(vals.size() = ctrls[0].val_height)
+///   return vals.pop()
 /// ```
+///
+/// (verbatim from `document/core/appendix/algorithm.rst:181-185` at this
+/// pin — the interpreter's `valid.ml` implements the same rule inline
+/// with frame-local checking but defines no `pop_opd`; the earlier
+/// attribution here was wrong, caught in review r4)
 ///
 /// Operands below the current frame's `outer_height` belong to ENCLOSING
 /// frames and are never this frame's to pop — not even when the shared operand
