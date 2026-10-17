@@ -54,8 +54,14 @@ let assert_ref_pat r p =
 ```
 
 - `AnyHT` pattern EXCLUDES funcrefs (but matches host-any/GC/i31/null
-  non-func); `ExternHT` matches EVERY non-null ref (incl. converted);
-  `EqHT` = i31/struct/array only; NullPat matches only null.
+  non-func); `ExternHT` matches EVERY ref INCLUDING null (the row is
+  `| RefTypePat Types.ExternHT, _ -> true` with no null exclusion —
+  r1 corrected the contract's "non-null" phrasing); `EqHT` =
+  i31/struct/array only; NullPat matches only null. Ref patterns apply
+  ONLY to reference values (numeric values dispatch numeric patterns —
+  a ref pattern never matches a number). Host-identity patterns match
+  the same zone only (HostRef≡HostRef, wrapped≡wrapped — never
+  cross-zone).
 
 ### RefHost (script/js.ml:196 `ref.extern`; runner arg wiring)
 
