@@ -30,7 +30,9 @@ use crate::types::{
     TypeIdx, ValType,
 };
 use crate::validate::error::{ValidationError, ValidationErrorKind};
-use crate::validate::state::{ControlKind::*, OperandType, Reachability, ValidationState};
+use crate::validate::state::{
+    ControlKind, ControlKind::*, OperandType, Reachability, ValidationState,
+};
 
 pub use error::{ValidationError as Error, ValidationErrorKind as ErrorKind};
 pub use state::{
@@ -1022,8 +1024,19 @@ fn validate_function(
     local_decls: &[LocalDecl],
     code: &crate::types::CodeBody<'_>,
 ) -> Result<(), ValidationError> {
-    let ty = normalize_func_type(module, ty);
-    let mut locals = ty.params.clone();
+    let ty = normalize_func_type(module, ty).map_err(|()| ValidationError {
+        offset: ByteOffset(code.body_offset),
+        function: Some(function),
+        kind: ValidationErrorKind::ResourceLimitExceeded {
+            what: "function type",
+        },
+    })?;
+    let mut locals = copy_valtypes_fallible(
+        function,
+        code.body_offset,
+        "function parameter types",
+        &ty.params,
+    )?;
     expand_locals(module, function, &mut locals, local_decls, code.body_offset)?;
 
     let instrs = code
@@ -1034,8 +1047,14 @@ fn validate_function(
             kind: e.into(),
         })?;
 
-    let local_inits = initial_local_inits(&locals, ty.params.len());
-    let mut state = ValidationState::new(locals, local_inits, ty.results.clone());
+    let local_inits = initial_local_inits(&locals, ty.params.len(), function, code.body_offset)?;
+    let result_types = copy_valtypes_fallible(
+        function,
+        code.body_offset,
+        "function result types",
+        &ty.results,
+    )?;
+    let mut state = ValidationState::new(locals, local_inits, result_types);
 
     for decoded in &instrs {
         validate_instr(module, function, decoded, &mut state)?;
@@ -1081,12 +1100,24 @@ fn final_result_offset(code: &crate::types::CodeBody<'_>, instrs: &[DecodedInstr
         .unwrap_or(ByteOffset(code.body_offset))
 }
 
-fn initial_local_inits(locals: &[ValType], param_count: usize) -> Vec<bool> {
-    locals
-        .iter()
-        .enumerate()
-        .map(|(idx, ty)| idx < param_count || valtype_is_defaultable(*ty))
-        .collect()
+fn initial_local_inits(
+    locals: &[ValType],
+    param_count: usize,
+    function: FuncIdx,
+    offset: usize,
+) -> Result<Vec<bool>, ValidationError> {
+    let mut out = Vec::new();
+    out.try_reserve(locals.len()).map_err(|_| ValidationError {
+        offset: ByteOffset(offset),
+        function: Some(function),
+        kind: ValidationErrorKind::ResourceLimitExceeded {
+            what: "local-init flags",
+        },
+    })?;
+    for (idx, ty) in locals.iter().enumerate() {
+        out.push(idx < param_count || valtype_is_defaultable(*ty));
+    }
+    Ok(out)
 }
 
 fn valtype_is_defaultable(ty: ValType) -> bool {
@@ -1108,7 +1139,11 @@ fn validate_instr(
         Instr::Unreachable => state.enter_unreachable(),
         Instr::Nop => {}
         Instr::Else => {
-            let (outer_height, start_types, end_types, local_inits) = {
+            // Take the frame's start/end vectors out (no ownership copy) so
+            // the operand pops — which need `&mut state` — can read
+            // `end_types`; both are put back on the frame below. The frame
+            // stays on the stack for the else-body.
+            let (outer_height, start_types, end_types) = {
                 let frame = state.current_frame_mut();
                 if frame.kind != If {
                     return Err(ValidationError {
@@ -1127,11 +1162,25 @@ fn validate_instr(
                 frame.has_else = true;
                 (
                     frame.outer_height,
-                    frame.start_types.clone(),
-                    frame.end_types.clone(),
-                    frame.local_inits.clone(),
+                    core::mem::take(&mut frame.start_types),
+                    core::mem::take(&mut frame.end_types),
                 )
             };
+            // Fallibly copy the if-frame's local-init snapshot for the reset.
+            let mut local_inits = Vec::new();
+            if local_inits
+                .try_reserve(state.current_frame().local_inits.len())
+                .is_err()
+            {
+                return Err(ValidationError {
+                    offset: ByteOffset(offset),
+                    function: Some(function),
+                    kind: ValidationErrorKind::ResourceLimitExceeded {
+                        what: "else local-init snapshot",
+                    },
+                });
+            }
+            local_inits.extend_from_slice(&state.current_frame().local_inits);
             // The then-body must have produced exactly the frame's result
             // types before the stack resets for the else-body.
             if let Err(found) = ensure_frame_end_types(module, state, outer_height, &end_types) {
@@ -1139,7 +1188,7 @@ fn validate_instr(
                     offset: ByteOffset(offset),
                     function: Some(function),
                     kind: ValidationErrorKind::ControlResultTypeMismatch {
-                        expected: end_types.clone(),
+                        expected: end_types,
                         found,
                     },
                 });
@@ -1147,23 +1196,52 @@ fn validate_instr(
             pop_control_result_types(module, function, state, &end_types, offset)?;
             state.operands.truncate(outer_height);
             state.local_inits = local_inits;
-            for ty in start_types {
-                state.operands.push(ty);
+            if !state.operands.try_reserve(start_types.len()) {
+                return Err(ValidationError {
+                    offset: ByteOffset(offset),
+                    function: Some(function),
+                    kind: ValidationErrorKind::ResourceLimitExceeded {
+                        what: "else parameter operands",
+                    },
+                });
+            }
+            for ty in &start_types {
+                state.operands.push(*ty);
             }
             let floor = state.operands.len();
             let frame = state.current_frame_mut();
+            frame.start_types = start_types;
+            frame.end_types = end_types;
             frame.stack_floor = floor;
             state.reachability = Reachability::Reachable;
         }
         Instr::Block(block_type) => {
             let sig = resolve_block_type(module, function, *block_type, offset)?;
             pop_exact(module, function, state, &sig.params, offset)?;
-            state.push_frame(Block, *block_type, sig.params, sig.results);
+            push_control_frame(
+                function,
+                offset,
+                "block frame",
+                state,
+                Block,
+                *block_type,
+                sig.params,
+                sig.results,
+            )?;
         }
         Instr::Loop(block_type) => {
             let sig = resolve_block_type(module, function, *block_type, offset)?;
             pop_exact(module, function, state, &sig.params, offset)?;
-            state.push_frame(Loop, *block_type, sig.params, sig.results);
+            push_control_frame(
+                function,
+                offset,
+                "loop frame",
+                state,
+                Loop,
+                *block_type,
+                sig.params,
+                sig.results,
+            )?;
         }
         Instr::If(block_type) => {
             pop_expect(
@@ -1176,7 +1254,16 @@ fn validate_instr(
             )?;
             let sig = resolve_block_type(module, function, *block_type, offset)?;
             pop_exact(module, function, state, &sig.params, offset)?;
-            state.push_frame(If, *block_type, sig.params, sig.results);
+            push_control_frame(
+                function,
+                offset,
+                "if frame",
+                state,
+                If,
+                *block_type,
+                sig.params,
+                sig.results,
+            )?;
         }
         Instr::End => {
             if state.controls.len() > 1 {
@@ -3348,7 +3435,16 @@ fn validate_instr(
             for catch in &try_table.catches {
                 validate_catch(module, function, state, catch, offset)?;
             }
-            state.push_frame(TryTable, try_table.block_type, sig.params, sig.results);
+            push_control_frame(
+                function,
+                offset,
+                "try_table frame",
+                state,
+                TryTable,
+                try_table.block_type,
+                sig.params,
+                sig.results,
+            )?;
         }
         Instr::Throw(tag) => {
             let (params, _results) = resolve_tag_type(module, function, *tag, offset)?;
@@ -4357,14 +4453,18 @@ fn resolve_block_type(
                 results: vec![normalize_valtype(module, val)],
             })
         }
-        BlockType::TypeIdx(idx) => module
-            .func_type_at(idx as usize)
-            .map(|ty| normalize_func_type(module, ty))
-            .ok_or(ValidationError {
+        BlockType::TypeIdx(idx) => {
+            let ty = module.func_type_at(idx as usize).ok_or(ValidationError {
                 offset: ByteOffset(offset),
                 function: Some(function),
                 kind: ValidationErrorKind::InvalidBlockType { block_type },
-            }),
+            })?;
+            normalize_func_type(module, ty).map_err(|()| ValidationError {
+                offset: ByteOffset(offset),
+                function: Some(function),
+                kind: ValidationErrorKind::ResourceLimitExceeded { what: "block type" },
+            })
+        }
     }
 }
 
@@ -4375,14 +4475,18 @@ fn resolve_type(
     offset: usize,
 ) -> Result<FuncType, ValidationError> {
     let idx = canonicalize_func_type_idx(module, idx);
-    module
-        .func_type(idx)
-        .map(|ty| normalize_func_type(module, ty))
-        .ok_or(ValidationError {
-            offset: ByteOffset(offset),
-            function,
-            kind: ValidationErrorKind::UnknownTypeIdx { idx },
-        })
+    let ty = module.func_type(idx).ok_or(ValidationError {
+        offset: ByteOffset(offset),
+        function,
+        kind: ValidationErrorKind::UnknownTypeIdx { idx },
+    })?;
+    normalize_func_type(module, ty).map_err(|()| ValidationError {
+        offset: ByteOffset(offset),
+        function,
+        kind: ValidationErrorKind::ResourceLimitExceeded {
+            what: "function type",
+        },
+    })
 }
 
 fn resolve_func_type(
@@ -4816,15 +4920,53 @@ fn validate_catch(
     Ok(())
 }
 
+/// Push a control frame, mapping a refused reservation into a clean
+/// [`ValidationErrorKind::ResourceLimitExceeded`].
+#[allow(clippy::too_many_arguments)]
+fn push_control_frame(
+    function: FuncIdx,
+    offset: usize,
+    what: &'static str,
+    state: &mut ValidationState,
+    kind: ControlKind,
+    block_type: BlockType,
+    start_types: Vec<ValType>,
+    end_types: Vec<ValType>,
+) -> Result<(), ValidationError> {
+    if state.push_frame(kind, block_type, start_types, end_types) {
+        Ok(())
+    } else {
+        Err(ValidationError {
+            offset: ByteOffset(offset),
+            function: Some(function),
+            kind: ValidationErrorKind::ResourceLimitExceeded { what },
+        })
+    }
+}
+
 fn finish_frame(
     module: &Module<'_>,
     function: FuncIdx,
     state: &mut ValidationState,
     offset: usize,
 ) -> Result<(), ValidationError> {
-    let frame = state.current_frame().clone();
+    // Read the frame's fixed-size metadata without cloning its module-sized
+    // vectors (the previous `ControlFrame::clone` scaled with result arity and
+    // terminated on allocator refusal). `end_types` is then moved out of the
+    // frame so the operand pops — which need `&mut state` — can read it
+    // without an ownership copy; nothing on the pop path reads the frame's
+    // `end_types`.
+    let (kind, has_else, outer_height, types_differ) = {
+        let frame = state.current_frame();
+        (
+            frame.kind,
+            frame.has_else,
+            frame.outer_height,
+            frame.start_types != frame.end_types,
+        )
+    };
 
-    if frame.kind == Function {
+    if kind == Function {
         return Err(ValidationError {
             offset: ByteOffset(offset),
             function: Some(function),
@@ -4834,7 +4976,7 @@ fn finish_frame(
 
     // An `if` without `else` is valid only when the if's parameter and
     // result types are identical (the implicit else is the identity).
-    if frame.kind == If && !frame.has_else && frame.start_types != frame.end_types {
+    if kind == If && !has_else && types_differ {
         return Err(ValidationError {
             offset: ByteOffset(offset),
             function: Some(function),
@@ -4842,27 +4984,40 @@ fn finish_frame(
         });
     }
 
-    if let Err(found) = ensure_frame_end_types(module, state, frame.outer_height, &frame.end_types)
-    {
+    let end_types = core::mem::take(&mut state.current_frame_mut().end_types);
+
+    if let Err(found) = ensure_frame_end_types(module, state, outer_height, &end_types) {
         return Err(ValidationError {
             offset: ByteOffset(offset),
             function: Some(function),
             kind: ValidationErrorKind::ControlResultTypeMismatch {
-                expected: frame.end_types.clone(),
+                expected: end_types,
                 found,
             },
         });
     }
 
-    pop_control_result_types(module, function, state, &frame.end_types, offset)?;
-    let _closed = state.pop_frame().ok_or(ValidationError {
+    pop_control_result_types(module, function, state, &end_types, offset)?;
+    let frame = state.pop_frame().ok_or(ValidationError {
         offset: ByteOffset(offset),
         function: Some(function),
         kind: ValidationErrorKind::UnexpectedEnd,
     })?;
-    state.operands.truncate(frame.outer_height);
+    state.operands.truncate(outer_height);
     state.local_inits = frame.local_inits;
-    for ty in frame.end_types {
+    // The result operands were popped just above, so this normally reuses the
+    // freed capacity; the reservation exists so a refused re-growth is a
+    // clean resource error rather than an abort.
+    if !state.operands.try_reserve(end_types.len()) {
+        return Err(ValidationError {
+            offset: ByteOffset(offset),
+            function: Some(function),
+            kind: ValidationErrorKind::ResourceLimitExceeded {
+                what: "control frame result operands",
+            },
+        });
+    }
+    for ty in end_types {
         state.operands.push(ty);
     }
     state.reachability = Reachability::Reachable;
@@ -5043,21 +5198,27 @@ fn normalize_valtype(module: &Module<'_>, ty: ValType) -> ValType {
     }
 }
 
-fn normalize_func_type(module: &Module<'_>, ty: &FuncType) -> FuncType {
-    FuncType {
-        params: ty
-            .params
+/// Normalize a function type's params/results, reserving both vectors
+/// fallibly: they scale with module-controlled arity and must not abort on
+/// allocator refusal.
+fn normalize_func_type(module: &Module<'_>, ty: &FuncType) -> Result<FuncType, ()> {
+    let mut params = Vec::new();
+    params.try_reserve(ty.params.len()).map_err(|_| ())?;
+    params.extend(
+        ty.params
             .iter()
             .copied()
-            .map(|ty| normalize_valtype(module, ty))
-            .collect(),
-        results: ty
-            .results
+            .map(|ty| normalize_valtype(module, ty)),
+    );
+    let mut results = Vec::new();
+    results.try_reserve(ty.results.len()).map_err(|_| ())?;
+    results.extend(
+        ty.results
             .iter()
             .copied()
-            .map(|ty| normalize_valtype(module, ty))
-            .collect(),
-    }
+            .map(|ty| normalize_valtype(module, ty)),
+    );
+    Ok(FuncType { params, results })
 }
 
 fn normalize_global_type(
@@ -5313,10 +5474,13 @@ fn ensure_frame_end_types(
         return Err(Vec::new());
     }
     let actual = &operands[outer_height..];
-    let found = stack_found(actual, expected);
 
+    // Compute the `found` vector only on the failure path: `stack_found`
+    // allocates a module-scaled vector (arity = operand count), so calling it
+    // on the success path would abort on allocator refusal for a valid
+    // module.
     if actual.len() > expected.len() {
-        return Err(found);
+        return Err(stack_found(actual, expected));
     }
 
     let expected_suffix = &expected[expected.len().saturating_sub(actual.len())..];
@@ -5328,7 +5492,7 @@ fn ensure_frame_end_types(
     {
         Ok(())
     } else {
-        Err(found)
+        Err(stack_found(actual, expected))
     }
 }
 
@@ -5542,6 +5706,15 @@ fn expand_locals(
 ) -> Result<(), ValidationError> {
     for decl in local_decls {
         validate_valtype_type_indices(module, decl.val_type, Some(function), offset)?;
+        if locals.try_reserve(decl.count as usize).is_err() {
+            return Err(ValidationError {
+                offset: ByteOffset(offset),
+                function: Some(function),
+                kind: ValidationErrorKind::ResourceLimitExceeded {
+                    what: "function locals",
+                },
+            });
+        }
         for _ in 0..decl.count {
             locals.push(normalize_valtype(module, decl.val_type));
         }

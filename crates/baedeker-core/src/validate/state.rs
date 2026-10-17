@@ -116,7 +116,10 @@ impl ValidationState {
                 stack_floor: 0,
                 start_types: Vec::new(),
                 end_types: result_types,
-                local_inits: local_inits.clone(),
+                // The function frame's local-init snapshot is never restored
+                // (`finish_frame` rejects the function frame), so it stays
+                // empty and `local_inits` is moved, not copied.
+                local_inits: Vec::new(),
                 has_else: false,
             }],
             locals,
@@ -137,19 +140,35 @@ impl ValidationState {
             .expect("validation state must always contain a function frame")
     }
 
+    /// Push a new control frame, reserving every module-scaled structure
+    /// fallibly (the operand stack, the frame's local-init snapshot, and the
+    /// control stack). Returns `false` when the allocator refuses, so callers
+    /// surface a clean resource error instead of aborting.
     pub fn push_frame(
         &mut self,
         kind: ControlKind,
         block_type: BlockType,
         start_types: Vec<ValType>,
         end_types: Vec<ValType>,
-    ) {
+    ) -> bool {
+        if !self.operands.try_reserve(start_types.len()) {
+            return false;
+        }
         let outer_height = self.operands.len();
         for ty in &start_types {
             self.operands.push(*ty);
         }
         let stack_floor = self.operands.len();
 
+        let mut local_inits = Vec::new();
+        if local_inits.try_reserve(self.local_inits.len()).is_err() {
+            return false;
+        }
+        local_inits.extend_from_slice(&self.local_inits);
+
+        if self.controls.try_reserve(1).is_err() {
+            return false;
+        }
         self.controls.push(ControlFrame {
             kind,
             block_type,
@@ -157,9 +176,10 @@ impl ValidationState {
             stack_floor,
             start_types,
             end_types,
-            local_inits: self.local_inits.clone(),
+            local_inits,
             has_else: false,
         });
+        true
     }
 
     pub fn pop_frame(&mut self) -> Option<ControlFrame> {

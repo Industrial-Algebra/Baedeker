@@ -1947,7 +1947,17 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
                 type_idx: type_idx.0,
             },
         })?;
-        funcs.push(lower_function(func_idx, *type_idx, ty, code, &tables)?);
+        let reg_func = lower_function(func_idx, *type_idx, ty, code, &tables)?;
+        if funcs.try_reserve(1).is_err() {
+            return Err(LowerError {
+                offset: ByteOffset(0),
+                function: None,
+                kind: LowerErrorKind::Validation(ValidationErrorKind::ResourceLimitExceeded {
+                    what: "lowered functions",
+                }),
+            });
+        }
+        funcs.push(reg_func);
     }
 
     let imported_memory_count = module
@@ -2067,7 +2077,7 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
     let start = module.start();
 
     let tables = module.tables().to_vec();
-    let type_defs = reg_type_table(module);
+    let type_defs = reg_type_table(module)?;
     let types = func_type_view(&type_defs);
 
     let mut elements = Vec::with_capacity(module.elements().len());
@@ -2250,9 +2260,21 @@ fn func_type_table<'a, 'm>(module: &'a Module<'m>) -> Vec<&'a FuncType> {
 
 /// The module's full, kind-preserving type section. Used as the source of
 /// truth for cross-module structural comparison of concrete reference
-/// types; `func_type_view` derives the function-only view from it.
-fn reg_type_table(module: &Module<'_>) -> Vec<SubType> {
-    module.types().to_vec()
+/// types; `func_type_view` derives the function-only view from it. The outer
+/// vector is reserved fallibly (it scales with the type-section length);
+/// per-element `SubType` cloning is bounded by the type's own arity.
+fn reg_type_table(module: &Module<'_>) -> Result<Vec<SubType>, LowerError> {
+    let types = module.types();
+    let mut out = Vec::new();
+    out.try_reserve(types.len()).map_err(|_| LowerError {
+        offset: ByteOffset(0),
+        function: None,
+        kind: LowerErrorKind::Validation(ValidationErrorKind::ResourceLimitExceeded {
+            what: "register type table",
+        }),
+    })?;
+    out.extend_from_slice(types);
+    Ok(out)
 }
 
 /// Function types in type-index order, for the register IR's structural
@@ -2338,12 +2360,12 @@ fn lower_function(
             },
         })?;
 
-    let locals = local_types(ty, code.locals.as_slice());
-    let mut builder = FuncBuilder::new(func_idx, type_idx, ty, locals, tables);
+    let locals = local_types(func_idx, code.body_offset, ty, code.locals.as_slice())?;
+    let mut builder = FuncBuilder::new(func_idx, type_idx, ty, locals, tables)?;
 
     for decoded in instrs {
         if builder.lower_instr(decoded)? {
-            return Ok(builder.finish());
+            return builder.finish();
         }
     }
 
@@ -2354,19 +2376,56 @@ fn lower_function(
     })
 }
 
-fn local_types(ty: &FuncType, locals: &[LocalDecl]) -> Vec<ValType> {
+fn local_types(
+    func_idx: FuncIdx,
+    offset: usize,
+    ty: &FuncType,
+    locals: &[LocalDecl],
+) -> Result<Vec<ValType>, LowerError> {
     let local_count = locals
         .iter()
         .map(|local| local.count as usize)
         .sum::<usize>();
-    let mut types = Vec::with_capacity(ty.params.len() + local_count);
-    types.extend_from_slice(ty.params.as_slice());
+    let mut types = fallible_copy_slice(
+        func_idx,
+        ByteOffset(offset),
+        "function parameter types",
+        &ty.params,
+    )?;
+    if types.try_reserve(local_count).is_err() {
+        return Err(LowerError {
+            offset: ByteOffset(offset),
+            function: Some(func_idx),
+            kind: LowerErrorKind::Validation(ValidationErrorKind::ResourceLimitExceeded {
+                what: "function locals",
+            }),
+        });
+    }
     for local in locals {
         for _ in 0..local.count {
             types.push(local.val_type);
         }
     }
-    types
+    Ok(types)
+}
+
+/// Fallibly copy `src` into a fresh `Vec` (try_reserve-then-fill), anchored at
+/// `func_idx`. Mirrors [`FuncBuilder::fallible_copy`] for the pre-builder
+/// function-setup path.
+fn fallible_copy_slice<T: Clone>(
+    func_idx: FuncIdx,
+    offset: ByteOffset,
+    what: &'static str,
+    src: &[T],
+) -> Result<Vec<T>, LowerError> {
+    let mut out = Vec::new();
+    out.try_reserve(src.len()).map_err(|_| LowerError {
+        offset,
+        function: Some(func_idx),
+        kind: LowerErrorKind::Validation(ValidationErrorKind::ResourceLimitExceeded { what }),
+    })?;
+    out.extend_from_slice(src);
+    Ok(out)
 }
 
 struct FuncBuilder<'b> {
@@ -2379,6 +2438,10 @@ struct FuncBuilder<'b> {
     reg_types: Vec<ValType>,
     blocks: Vec<RegBlock>,
     current_instrs: Vec<RegInstr>,
+    /// Offset of the instruction currently being lowered, used to anchor
+    /// resource-limit errors raised by bookkeeping helpers that lack an
+    /// offset parameter.
+    cur_offset: ByteOffset,
     /// Shared module-level tables used while lowering function bodies.
     tables: &'b ModuleTables<'b>,
     /// Stack of active block/loop/if frames. Each entry records the label of
@@ -2632,44 +2695,82 @@ impl<'b> FuncBuilder<'b> {
         ty: &FuncType,
         locals: Vec<ValType>,
         tables: &'b ModuleTables<'b>,
-    ) -> Self {
+    ) -> Result<Self, LowerError> {
         // The function body itself is label 0, targeting a block that will
         // receive function-end returns (created on demand).
-        Self {
+        let params = fallible_copy_slice(
+            func_idx,
+            ByteOffset(0),
+            "function parameter types",
+            &ty.params,
+        )?;
+        let results = fallible_copy_slice(
+            func_idx,
+            ByteOffset(0),
+            "function result types",
+            &ty.results,
+        )?;
+        let frame_results = fallible_copy_slice(
+            func_idx,
+            ByteOffset(0),
+            "function frame result types",
+            &ty.results,
+        )?;
+        let mut label_stack = Vec::new();
+        if label_stack.try_reserve(1).is_err() {
+            return Err(LowerError {
+                offset: ByteOffset(0),
+                function: Some(func_idx),
+                kind: LowerErrorKind::Validation(ValidationErrorKind::ResourceLimitExceeded {
+                    what: "function label stack",
+                }),
+            });
+        }
+        label_stack.push(LabelFrame {
+            label: LabelIdx(0),
+            kind: FrameKind::Block,
+            result_types: frame_results,
+            param_types: Vec::new(),
+            param_regs: Vec::new(),
+            height: 0,
+            unreachable: false,
+        });
+        Ok(Self {
             func_idx,
             type_idx,
-            params: ty.params.clone(),
-            results: ty.results.clone(),
+            params,
+            results,
             locals,
             stack: Vec::new(),
             reg_types: Vec::new(),
             blocks: Vec::new(),
             current_instrs: Vec::new(),
-            label_stack: alloc::vec![LabelFrame {
-                label: LabelIdx(0),
-                kind: FrameKind::Block,
-                result_types: ty.results.clone(),
-                param_types: Vec::new(),
-                param_regs: Vec::new(),
-                height: 0,
-                unreachable: false,
-            }],
+            cur_offset: ByteOffset(0),
+            label_stack,
             pending_branches: Vec::new(),
             pending_trampolines: Vec::new(),
             regions: Vec::new(),
             pending_catches: Vec::new(),
             tables,
-        }
+        })
     }
 
-    fn finish_block_with_label(&mut self, label: LabelIdx, term: RegTerm) {
+    fn finish_block_with_label(
+        &mut self,
+        label: LabelIdx,
+        term: RegTerm,
+    ) -> Result<(), LowerError> {
         let instrs = core::mem::take(&mut self.current_instrs);
+        if self.blocks.try_reserve(1).is_err() {
+            return Err(self.resource_error(self.cur_offset, "control blocks"));
+        }
         self.blocks.push(RegBlock::new(label, instrs, term));
+        Ok(())
     }
 
-    fn finish_block(&mut self, term: RegTerm) {
+    fn finish_block(&mut self, term: RegTerm) -> Result<(), LowerError> {
         let label = LabelIdx(self.blocks.len() as u32);
-        self.finish_block_with_label(label, term);
+        self.finish_block_with_label(label, term)
     }
 
     /// Finish a conditional reference branch (`br_on_null` /
@@ -2683,7 +2784,7 @@ impl<'b> FuncBuilder<'b> {
         values: Vec<Reg>,
         value_reg: Reg,
         kind: RefBranchKind,
-    ) {
+    ) -> Result<(), LowerError> {
         let make_term = |target_block: u32, values: Vec<Reg>| match kind {
             RefBranchKind::OnNull => RegTerm::BrIfNull {
                 value: value_reg,
@@ -2702,26 +2803,27 @@ impl<'b> FuncBuilder<'b> {
                 block: br_block_idx,
                 slot: BranchSlot::Single,
                 param_regs: loop_target.param_regs,
-                values: values.clone(),
+                values: self.fallible_copy(offset, "branch values", &values)?,
                 header: loop_target.header,
                 offset,
             });
-            self.finish_block(make_term(0, values));
+            self.finish_block(make_term(0, values))?;
         } else {
             self.pending_branches.push(PendingBranch {
                 block: br_block_idx,
                 frame_pos,
-                values: values.clone(),
+                values: self.fallible_copy(offset, "branch values", &values)?,
                 slot: BranchSlot::Single,
             });
-            self.finish_block(make_term(0, values));
+            self.finish_block(make_term(0, values))?;
         }
+        Ok(())
     }
 
-    fn finish(mut self) -> RegFunc {
+    fn finish(mut self) -> Result<RegFunc, LowerError> {
         // If there are pending instructions without a terminator, add Fallthrough
         if !self.current_instrs.is_empty() || self.blocks.is_empty() {
-            self.finish_block(RegTerm::Fallthrough);
+            self.finish_block(RegTerm::Fallthrough)?;
         }
         // Create back-edge trampolines for conditional branches to loops
         // with parameters: each runs the parameter copies, then branches
@@ -2729,19 +2831,24 @@ impl<'b> FuncBuilder<'b> {
         // block list so no fallthrough can reach them.
         for req in core::mem::take(&mut self.pending_trampolines) {
             let trampoline_idx = self.blocks.len() as u32;
-            let instrs = req
-                .param_regs
-                .iter()
-                .zip(req.values.iter())
-                .filter(|(dst, src)| dst != src)
-                .map(|(dst, src)| RegInstr {
-                    offset: req.offset,
-                    op: RegOp::Copy {
-                        dst: *dst,
-                        src: *src,
-                    },
-                })
-                .collect();
+            let mut instrs: Vec<RegInstr> = Vec::new();
+            instrs
+                .try_reserve(req.param_regs.len())
+                .map_err(|_| self.resource_error(self.cur_offset, "loop trampoline copies"))?;
+            for (dst, src) in req.param_regs.iter().zip(req.values.iter()) {
+                if dst != src {
+                    instrs.push(RegInstr {
+                        offset: req.offset,
+                        op: RegOp::Copy {
+                            dst: *dst,
+                            src: *src,
+                        },
+                    });
+                }
+            }
+            if self.blocks.try_reserve(1).is_err() {
+                return Err(self.resource_error(self.cur_offset, "loop trampoline blocks"));
+            }
             self.blocks.push(RegBlock::new(
                 LabelIdx(trampoline_idx),
                 instrs,
@@ -2796,7 +2903,7 @@ impl<'b> FuncBuilder<'b> {
                 }
             }
         }
-        RegFunc {
+        Ok(RegFunc {
             idx: self.func_idx,
             type_idx: self.type_idx,
             params: self.params,
@@ -2805,11 +2912,12 @@ impl<'b> FuncBuilder<'b> {
             reg_types: self.reg_types,
             blocks: self.blocks,
             regions: self.regions,
-        }
+        })
     }
     /// Lower one decoded instruction. Returns `true` when the function body is complete.
     fn lower_instr(&mut self, decoded: DecodedInstr) -> Result<bool, LowerError> {
         let offset = decoded.offset;
+        self.cur_offset = offset;
         match decoded.instr {
             Instr::LocalGet(local) => {
                 let ty = self.locals[local.0 as usize];
@@ -2925,7 +3033,7 @@ impl<'b> FuncBuilder<'b> {
                 self.emit(offset, RegOp::F64Const { dst, value });
             }
             Instr::Unreachable => {
-                self.finish_block(RegTerm::Trap);
+                self.finish_block(RegTerm::Trap)?;
                 self.set_unreachable();
             }
             Instr::Nop => {}
@@ -2937,7 +3045,7 @@ impl<'b> FuncBuilder<'b> {
                     values.push(found.reg);
                 }
                 values.reverse();
-                self.finish_block(RegTerm::Throw { tag, values });
+                self.finish_block(RegTerm::Throw { tag, values })?;
                 self.set_unreachable();
             }
             Instr::ThrowRef => {
@@ -2946,15 +3054,15 @@ impl<'b> FuncBuilder<'b> {
                     "throw_ref",
                     ValType::Ref(RefType::from_parts(true, HeapType::Exn)),
                 )?;
-                self.finish_block(RegTerm::ThrowRef { exn: found.reg });
+                self.finish_block(RegTerm::ThrowRef { exn: found.reg })?;
                 self.set_unreachable();
             }
             Instr::Block(block_type) => {
-                self.finish_block(RegTerm::Fallthrough);
+                self.finish_block(RegTerm::Fallthrough)?;
                 self.enter_frame(offset, "block", FrameKind::Block, block_type)?;
             }
             Instr::Loop(block_type) => {
-                self.finish_block(RegTerm::Fallthrough);
+                self.finish_block(RegTerm::Fallthrough)?;
                 // The loop body starts a fresh block; branches to the loop
                 // label jump back to it (back-edge), so its index is known
                 // immediately and needs no back-patching.
@@ -2970,7 +3078,7 @@ impl<'b> FuncBuilder<'b> {
                     // Back-patched at `else` (else-body start) or at `end`
                     // (no else: the continuation).
                     else_block: 0,
-                });
+                })?;
                 self.enter_frame(
                     offset,
                     "if",
@@ -2984,7 +3092,7 @@ impl<'b> FuncBuilder<'b> {
             Instr::TryTable(try_table) => {
                 // The body is a fresh block region: its first block is the
                 // next one to be created (after the tip block is finished).
-                self.finish_block(RegTerm::Fallthrough);
+                self.finish_block(RegTerm::Fallthrough)?;
                 let first_block = self.blocks.len() as u32;
                 let region_idx = self.regions.len();
                 self.regions.push(ProtectedRegion {
@@ -3000,7 +3108,7 @@ impl<'b> FuncBuilder<'b> {
                     // A loop label's branch convention delivers into the
                     // loop's parameter registers and targets its header,
                     // both known now (the loop frame is already on the stack).
-                    let clause = match self.branch_types_at(frame_pos).1 {
+                    let clause = match self.branch_types_at_fallible(offset, frame_pos)?.1 {
                         Some(loop_target) => RegCatch {
                             tag: catch.tag,
                             target_block: loop_target.header,
@@ -3063,13 +3171,13 @@ impl<'b> FuncBuilder<'b> {
                 self.pending_branches.push(PendingBranch {
                     block: br_block_idx,
                     frame_pos,
-                    values: values.clone(),
+                    values: self.fallible_copy(offset, "branch values", &values)?,
                     slot: BranchSlot::Single,
                 });
                 self.finish_block(RegTerm::Br {
                     target_block: 0,
                     values,
-                });
+                })?;
                 // The else-body starts at the next block.
                 let else_start = self.blocks.len() as u32;
                 if let RegTerm::IfFork { else_block, .. } = &mut self.blocks[cond_block].term {
@@ -3102,7 +3210,7 @@ impl<'b> FuncBuilder<'b> {
                     // the function frame (`br 0`) to a continuation block
                     // that returns — delivering their values into the
                     // return registers via copies, like any other frame.
-                    self.finish_block(RegTerm::Fallthrough);
+                    self.finish_block(RegTerm::Fallthrough)?;
                     let continuation_idx = self.blocks.len() as u32;
                     for pending in core::mem::take(&mut self.pending_branches) {
                         match &mut self.blocks[pending.block].term {
@@ -3152,30 +3260,43 @@ impl<'b> FuncBuilder<'b> {
                             values.len(),
                             "catch landing arity must match the function result registers"
                         );
+                        let dst_regs =
+                            self.fallible_copy(offset, "catch landing registers", &values)?;
                         let clause =
                             &mut self.regions[pending.region_idx].catches[pending.clause_idx];
                         clause.target_block = continuation_idx;
-                        clause.dst_regs = values.clone();
+                        clause.dst_regs = dst_regs;
                     }
                     self.pending_catches = remaining_catches;
-                    self.finish_block(RegTerm::Return { values });
+                    self.finish_block(RegTerm::Return { values })?;
                     return Ok(true);
                 }
                 // Pop results matching this control frame's expected types.
                 // The frame must still be on the stack while they are
                 // popped: pops are frame-aware (entry height and
-                // polymorphic-stack state).
-                let result_types = self
-                    .label_stack
-                    .last()
-                    .ok_or(LowerError {
+                // polymorphic-stack state). Move the frame's result types out
+                // (no ownership copy — the previous `result_types.clone()`
+                // scaled with result arity and terminated on allocator
+                // refusal); the frame is popped immediately below, so nothing
+                // else reads them.
+                if self.label_stack.last().is_none() {
+                    return Err(LowerError {
                         offset,
                         function: Some(self.func_idx),
                         kind: LowerErrorKind::MissingFunctionEnd,
-                    })?
-                    .result_types
-                    .clone();
-                let mut values = Vec::with_capacity(result_types.len());
+                    });
+                }
+                let result_types = core::mem::take(
+                    &mut self
+                        .label_stack
+                        .last_mut()
+                        .expect("frame presence checked above")
+                        .result_types,
+                );
+                let mut values: Vec<Reg> = Vec::new();
+                values
+                    .try_reserve(result_types.len())
+                    .map_err(|_| self.resource_error(offset, "block result registers"))?;
                 for &expected in result_types.iter().rev() {
                     let found = self.pop_expect(offset, "end", expected)?;
                     values.push(found.reg);
@@ -3188,11 +3309,14 @@ impl<'b> FuncBuilder<'b> {
                 // Reset the operand stack to the frame entry height, then push
                 // the block's result values back onto the outer stack.
                 self.stack.truncate(frame.height);
-                for (&reg, &ty) in values.iter().zip(frame.result_types.iter()) {
+                if self.stack.try_reserve(result_types.len()).is_err() {
+                    return Err(self.resource_error(offset, "block result operands"));
+                }
+                for (&reg, &ty) in values.iter().zip(result_types.iter()) {
                     self.stack.push(RegValue { reg, ty });
                 }
                 // Finish the body block.
-                self.finish_block(RegTerm::Fallthrough);
+                self.finish_block(RegTerm::Fallthrough)?;
                 // The continuation block will be at self.blocks.len().
                 // For an `if` without `else` that takes parameters, the
                 // IfFork's else edge is the identity: deliver the params into
@@ -3306,9 +3430,11 @@ impl<'b> FuncBuilder<'b> {
                         values.len(),
                         "catch landing arity must match the target frame's registers"
                     );
+                    let dst_regs =
+                        self.fallible_copy(offset, "catch landing registers", &values)?;
                     let clause = &mut self.regions[pending.region_idx].catches[pending.clause_idx];
                     clause.target_block = continuation_idx;
-                    clause.dst_regs = values.clone();
+                    clause.dst_regs = dst_regs;
                 }
                 self.pending_catches = remaining_catches;
                 // For an `if` without `else`, patch the IfFork's else edge to
@@ -3334,14 +3460,15 @@ impl<'b> FuncBuilder<'b> {
                 }
                 // Start a new continuation block (content will be filled by
                 // subsequent instructions).
-                self.finish_block(RegTerm::Fallthrough);
+                self.finish_block(RegTerm::Fallthrough)?;
             }
             Instr::Br(label) => {
                 let frame_pos = self.label_position(offset, label)?;
                 // Branches to a loop label jump to the header carrying the
                 // loop's parameters; all other branches jump to the frame's
                 // continuation carrying its results.
-                let (branch_types, loop_header) = self.branch_types_at(frame_pos);
+                let (branch_types, loop_header) =
+                    self.branch_types_at_fallible(offset, frame_pos)?;
                 let mut values = Vec::with_capacity(branch_types.len());
                 for &expected in branch_types.iter().rev() {
                     let found = self.pop_expect(offset, "br", expected)?;
@@ -3355,26 +3482,27 @@ impl<'b> FuncBuilder<'b> {
                     self.finish_block(RegTerm::Br {
                         target_block: loop_target.header,
                         values,
-                    });
+                    })?;
                 } else {
                     let br_block_idx = self.blocks.len();
                     self.pending_branches.push(PendingBranch {
                         block: br_block_idx,
                         frame_pos,
-                        values: values.clone(),
+                        values: self.fallible_copy(offset, "branch values", &values)?,
                         slot: BranchSlot::Single,
                     });
                     self.finish_block(RegTerm::Br {
                         target_block: 0,
                         values,
-                    });
+                    })?;
                 }
                 self.set_unreachable();
             }
             Instr::BrIf(label) => {
                 let cond = self.pop_expect(offset, "br_if", ValType::Num(NumType::I32))?;
                 let frame_pos = self.label_position(offset, label)?;
-                let (branch_types, loop_header) = self.branch_types_at(frame_pos);
+                let (branch_types, loop_header) =
+                    self.branch_types_at_fallible(offset, frame_pos)?;
                 let mut values = Vec::with_capacity(branch_types.len());
                 for &expected in branch_types.iter().rev() {
                     let found = self.pop_expect(offset, "br_if", expected)?;
@@ -3394,7 +3522,7 @@ impl<'b> FuncBuilder<'b> {
                         block: br_block_idx,
                         slot: BranchSlot::Single,
                         param_regs: loop_target.param_regs,
-                        values: values.clone(),
+                        values: self.fallible_copy(offset, "branch values", &values)?,
                         header: loop_target.header,
                         offset,
                     });
@@ -3402,20 +3530,20 @@ impl<'b> FuncBuilder<'b> {
                         cond: cond.reg,
                         target_block: 0,
                         values,
-                    });
+                    })?;
                 } else {
                     let br_block_idx = self.blocks.len();
                     self.pending_branches.push(PendingBranch {
                         block: br_block_idx,
                         frame_pos,
-                        values: values.clone(),
+                        values: self.fallible_copy(offset, "branch values", &values)?,
                         slot: BranchSlot::Single,
                     });
                     self.finish_block(RegTerm::BrIf {
                         cond: cond.reg,
                         target_block: 0,
                         values,
-                    });
+                    })?;
                 }
             }
             Instr::BrTable { targets, default } => {
@@ -3423,7 +3551,7 @@ impl<'b> FuncBuilder<'b> {
                 // All targets must agree on branch arity and types (the
                 // validator guarantees this); pop using the default target.
                 let default_pos = self.label_position(offset, default)?;
-                let (branch_types, _) = self.branch_types_at(default_pos);
+                let (branch_types, _) = self.branch_types_at_fallible(offset, default_pos)?;
                 let mut values = Vec::with_capacity(branch_types.len());
                 for &expected in branch_types.iter().rev() {
                     let found = self.pop_expect(offset, "br_table", expected)?;
@@ -3437,7 +3565,7 @@ impl<'b> FuncBuilder<'b> {
                 let mut target_blocks = Vec::with_capacity(targets.len() + 1);
                 for (slot, target) in targets.iter().chain(core::iter::once(&default)).enumerate() {
                     let frame_pos = self.label_position(offset, *target)?;
-                    let (_, loop_header) = self.branch_types_at(frame_pos);
+                    let (_, loop_header) = self.branch_types_at_fallible(offset, frame_pos)?;
                     match loop_header {
                         Some(loop_target) => {
                             target_blocks.push(0);
@@ -3445,7 +3573,7 @@ impl<'b> FuncBuilder<'b> {
                                 block: br_block_idx,
                                 slot: BranchSlot::Table(slot),
                                 param_regs: loop_target.param_regs,
-                                values: values.clone(),
+                                values: self.fallible_copy(offset, "branch values", &values)?,
                                 header: loop_target.header,
                                 offset,
                             });
@@ -3455,7 +3583,7 @@ impl<'b> FuncBuilder<'b> {
                             self.pending_branches.push(PendingBranch {
                                 block: br_block_idx,
                                 frame_pos,
-                                values: values.clone(),
+                                values: self.fallible_copy(offset, "branch values", &values)?,
                                 slot: BranchSlot::Table(slot),
                             });
                         }
@@ -3467,13 +3595,14 @@ impl<'b> FuncBuilder<'b> {
                     targets: target_blocks,
                     default: default_block,
                     values,
-                });
+                })?;
                 self.set_unreachable();
             }
             Instr::BrOnNull(label) => {
                 let value = self.pop_any(offset, "br_on_null")?;
                 let frame_pos = self.label_position(offset, label)?;
-                let (branch_types, loop_header) = self.branch_types_at(frame_pos);
+                let (branch_types, loop_header) =
+                    self.branch_types_at_fallible(offset, frame_pos)?;
                 let mut values = Vec::with_capacity(branch_types.len());
                 for &expected in branch_types.iter().rev() {
                     let found = self.pop_expect(offset, "br_on_null", expected)?;
@@ -3493,12 +3622,13 @@ impl<'b> FuncBuilder<'b> {
                     values,
                     value.reg,
                     RefBranchKind::OnNull,
-                );
+                )?;
             }
             Instr::BrOnNonNull(label) => {
                 let value = self.pop_any(offset, "br_on_non_null")?;
                 let frame_pos = self.label_position(offset, label)?;
-                let (branch_types, loop_header) = self.branch_types_at(frame_pos);
+                let (branch_types, loop_header) =
+                    self.branch_types_at_fallible(offset, frame_pos)?;
                 // The label's last value is the forwarded non-null ref; only
                 // the leading types come from the stack.
                 let leading_types = match branch_types.split_last() {
@@ -3524,11 +3654,11 @@ impl<'b> FuncBuilder<'b> {
                     values,
                     value.reg,
                     RefBranchKind::OnNonNull,
-                );
+                )?;
             }
             Instr::Return => {
                 let values = self.pop_results(offset)?;
-                self.finish_block(RegTerm::Return { values });
+                self.finish_block(RegTerm::Return { values })?;
                 // Code after `return` is unreachable, but lowering continues:
                 // instructions up to the function's final `end` must still be
                 // processed (under polymorphic stack discipline).
@@ -3548,7 +3678,7 @@ impl<'b> FuncBuilder<'b> {
                     args.push(found.reg);
                 }
                 args.reverse();
-                self.finish_block(RegTerm::TailCall { func, args });
+                self.finish_block(RegTerm::TailCall { func, args })?;
                 self.set_unreachable();
             }
             Instr::ReturnCallIndirect {
@@ -3580,7 +3710,7 @@ impl<'b> FuncBuilder<'b> {
                     table: table_idx,
                     index: index.reg,
                     args,
-                });
+                })?;
                 self.set_unreachable();
             }
             Instr::ReturnCallRef(type_idx) => {
@@ -3605,7 +3735,7 @@ impl<'b> FuncBuilder<'b> {
                     type_idx,
                     func: func.reg,
                     args,
-                });
+                })?;
                 self.set_unreachable();
             }
             Instr::CallRef(type_idx) => {
@@ -5321,7 +5451,7 @@ impl<'b> FuncBuilder<'b> {
             cond,
             target_block: 0,
             values,
-        });
+        })?;
         Ok(())
     }
 
@@ -5522,22 +5652,6 @@ impl<'b> FuncBuilder<'b> {
             if dst != src {
                 self.emit(offset, RegOp::Copy { dst, src });
             }
-        }
-    }
-
-    /// The value types a branch to the frame at `frame_pos` must carry, and
-    /// the loop target details when the frame is a loop.
-    fn branch_types_at(&self, frame_pos: usize) -> (Vec<ValType>, Option<LoopTarget>) {
-        let frame = &self.label_stack[frame_pos];
-        match frame.kind {
-            FrameKind::Loop { header_block } => (
-                frame.param_types.clone(),
-                Some(LoopTarget {
-                    header: header_block,
-                    param_regs: frame.param_regs.clone(),
-                }),
-            ),
-            _ => (frame.result_types.clone(), None),
         }
     }
 
@@ -6233,8 +6347,11 @@ impl<'b> FuncBuilder<'b> {
     }
 
     fn pop_results(&mut self, offset: ByteOffset) -> Result<Vec<Reg>, LowerError> {
-        let results = self.results.clone();
-        let mut values = Vec::with_capacity(results.len());
+        let results = self.fallible_copy(offset, "function result types", &self.results)?;
+        let mut values: Vec<Reg> = Vec::new();
+        values
+            .try_reserve(results.len())
+            .map_err(|_| self.resource_error(offset, "function result registers"))?;
         for &expected in results.iter().rev() {
             let found = self.pop_expect(offset, "function end", expected)?;
             values.push(found.reg);
