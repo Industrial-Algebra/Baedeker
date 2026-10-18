@@ -76,16 +76,21 @@ pub fn call_i32(module: &RegModule, store: &Store, name: &str, args: &[Value]) -
 pub const CHUNK: u64 = 1_000_000;
 
 /// Run `total` units in chunks, accumulating the (wrapping) `i32` results.
+/// `run` receives the chunk's `(base, count)` pair, so the INPUT RANGE
+/// advances with `base` between chunks — a campaign split into several calls
+/// computes the same total-range result as one whole call.
 /// Returns the first error unchanged, so a structured refusal is preserved.
 pub fn sum_chunks<F>(total: u64, chunk: u64, mut run: F) -> Result<i64, RuntimeError>
 where
-    F: FnMut(u64) -> Result<i32, RuntimeError>,
+    F: FnMut(u64, u64) -> Result<i32, RuntimeError>,
 {
     let mut remaining = total;
+    let mut base = 0u64;
     let mut sum: i32 = 0;
     while remaining > 0 {
         let this = chunk.min(remaining);
-        sum = sum.wrapping_add(run(this)?);
+        sum = sum.wrapping_add(run(base, this)?);
+        base += this;
         remaining -= this;
     }
     Ok(i64::from(sum))

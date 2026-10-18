@@ -989,7 +989,10 @@ pub struct Store {
     type_defs: Vec<crate::types::SubType>,
     rec_groups: Vec<(u32, u32)>,
     /// Declared type index of every function in this module's index space
-    /// (imported funcs first, mirroring `RegModule.funcs[].idx`).
+    /// (imported funcs first, mirroring `RegModule.funcs[].idx`). For an
+    /// imported function this is the IMPORT DECLARATION; the funcref type is
+    /// the binding's instead ([`Store::func_origin_type`]), so this table is
+    /// only the declaration fallback for an unbound import.
     func_type_idxs: Vec<crate::types::TypeIdx>,
 }
 
@@ -2040,6 +2043,13 @@ impl Store {
     /// export at `$t0`, `$t1`, … from a provider whose function has type
     /// `$t1`). The caller holds both type sections and performs that match
     /// (`types::defined_type_matches`); this binds the resolved slot.
+    ///
+    /// The bound [`HostFunction`] also carries the type a FUNCREF to this
+    /// import reports: `runtime/instance.ml:48` derives it from the function
+    /// instance (`Func.type_of f`), so a [`link_func`](crate::runtime::link_func)
+    /// binding keeps the provider's defining type and a native host function
+    /// reports its own `FuncType` — never the import declaration, which only
+    /// constrained linking.
     pub fn bind_host_func(
         &mut self,
         func_idx: u32,
@@ -2068,53 +2078,116 @@ impl Store {
     /// to `match_deftype`), `valid/match.ml:151-155` (closed-form identity, or
     /// the unrolled declared-supertype chain reaches the target).
     ///
-    /// The function's type comes from the module that defines it — the link
-    /// group's module for a linked instance, this store's own module when
-    /// standalone — so distinct-ID subtypes compare by declared structure, not
-    /// by module-local ids.
+    /// `Func.type_of f` is the type of the FUNCTION INSTANCE the reference
+    /// denotes — for an imported function, the PROVIDER's defining function
+    /// (`exec/eval.ml:632-634`: `ref.func x` resolves `func c.frame.inst x`),
+    /// never the importing module's import declaration. The declaration only
+    /// constrains linking (`eval.ml:1187`); it is not the reference's type.
+    /// [`Store::func_origin_type`] follows that resolution.
     pub(crate) fn func_ref_matches_type(
         &self,
         instance: u32,
         func: u32,
         target: crate::types::TypeIdx,
     ) -> bool {
-        use crate::types::{ClosedDefinedType, FuncIdx};
+        use crate::types::ClosedDefinedType;
         let Some(declared) = ClosedDefinedType::of(&self.type_defs, &self.rec_groups, target)
         else {
             return false;
         };
-        let provided = match self.group_module(instance) {
-            Some(module) => {
-                let type_idx = if func < module.imported_func_count {
-                    module
-                        .imported_funcs
-                        .get(func as usize)
-                        .map(|import| import.type_idx)
-                } else {
-                    module
-                        .funcs
-                        .iter()
-                        .find(|defined| defined.idx == FuncIdx(func))
-                        .map(|defined| defined.type_idx)
-                };
-                let Some(type_idx) = type_idx else {
-                    return false;
-                };
-                ClosedDefinedType::of(&module.type_defs, &module.rec_groups, type_idx)
-            }
-            // Standalone store: only its own functions are addressable.
-            None if instance == self.instance_id => self
-                .func_type_idxs
-                .get(func as usize)
-                .and_then(|&type_idx| {
-                    ClosedDefinedType::of(&self.type_defs, &self.rec_groups, type_idx)
-                }),
-            None => None,
-        };
-        let Some(provided) = provided else {
+        let Some(provided) = self.func_defining_type(instance, func) else {
             return false;
         };
         provided == declared || provided.is_subtype_of(&declared)
+    }
+
+    /// The closed defined type of the function at `(instance, func)`.
+    ///
+    /// This store's own instance resolves through [`Store::func_origin_type`]
+    /// (imports follow their binding to the provider). Another instance of the
+    /// link group resolves through ITS module and, when `func` is one of its
+    /// imports, through that instance's own recorded binding — the import
+    /// chain terminates at whichever function actually defines it.
+    fn func_defining_type(
+        &self,
+        instance: u32,
+        func: u32,
+    ) -> Option<crate::types::ClosedDefinedType> {
+        use crate::types::{ClosedDefinedType, FuncIdx};
+        if instance == self.instance_id {
+            return self.func_origin_type(func);
+        }
+        let module = self.group_module(instance)?;
+        if func < module.imported_func_count {
+            // Imports of another instance: ask that instance's store for the
+            // binding it installed. Borrow opportunistically — execution holds
+            // only shared borrows, but a mutable borrow would mean this
+            // instance is mid-reconfiguration, where the declaration is the
+            // only type information available.
+            let store = {
+                let group = self.link_group.as_ref()?;
+                let group = group.borrow();
+                group.get(&instance)?.1.clone()
+            };
+            return store
+                .try_borrow()
+                .ok()
+                .and_then(|store| store.func_origin_type(func));
+        }
+        let type_idx = module
+            .funcs
+            .iter()
+            .find(|defined| defined.idx == FuncIdx(func))
+            .map(|defined| defined.type_idx)?;
+        ClosedDefinedType::of(&module.type_defs, &module.rec_groups, type_idx)
+    }
+
+    /// The defined type entry that types the function at `func_idx` in THIS
+    /// instance's index space, as the runtime derives a funcref's type
+    /// (`runtime/instance.ml:48`).
+    ///
+    /// A defined function uses this module's type entry. An IMPORTED function
+    /// resolves through the binding installed on it:
+    ///
+    /// - a [`link_func`](crate::runtime::link_func) bridge carries the
+    ///   provider's defining type (resolved through the provider's own import
+    ///   chain when the provider re-exports an import),
+    /// - a native host function's type is the embedder's bare function type
+    ///   (`host/spectest.ml:35` allocates host types as one final, supertype-free
+    ///   member), so it compares as [`ClosedDefinedType::of_func_type`].
+    ///
+    /// An UNBOUND import has no function instance at runtime, and a native
+    /// host function whose signature mentions a CONCRETE heap type has no
+    /// closed form of its own (a bare `FuncType` cannot express module-local
+    /// indices); the declaration is then the only available (and previously
+    /// used) answer.
+    pub(crate) fn func_origin_type(
+        &self,
+        func_idx: u32,
+    ) -> Option<crate::types::ClosedDefinedType> {
+        use crate::types::ClosedDefinedType;
+        if func_idx < self.imported_funcs.len() as u32 {
+            if let Some(host) = self
+                .host_funcs
+                .get(func_idx as usize)
+                .and_then(|slot| slot.as_ref())
+                .and_then(|host| host.try_borrow().ok())
+            {
+                if let Some(origin) = host.origin_type() {
+                    return Some(origin.clone());
+                }
+                if let Some(host_ty) = ClosedDefinedType::of_func_type(host.ty()) {
+                    return Some(host_ty);
+                }
+                // Concrete heap types in a bare host signature: fall through
+                // to the declaration, the only type information available.
+            }
+        }
+        self.func_type_idxs
+            .get(func_idx as usize)
+            .and_then(|&type_idx| {
+                ClosedDefinedType::of(&self.type_defs, &self.rec_groups, type_idx)
+            })
     }
 
     /// The lowered module of an instance registered in this store's link

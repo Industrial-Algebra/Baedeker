@@ -11,13 +11,16 @@
 //! Slice-5 honesty: the heap never frees, so the churn's "bounded live window"
 //! (one wasm global slot) does not bound `live_objects`; the article asserts
 //! the never-free accounting (`live_objects == allocations`) rather than a
-//! bounded live set, which is the 5b flip.
+//! bounded live set, which is the 5b flip. What the window DOES bound is
+//! REACHABILITY: each iteration overwrites the slot's root and the new pair
+//! does not point at its predecessor, so exactly one pair stays reachable
+//! (`probe`) while the accounting still counts every allocation.
 
 use baedeker_core::lower::RegModule;
 use baedeker_core::runtime::{RuntimeError, Store, Value, execute_export};
 
 use crate::harness::{
-    CHUNK, article_count, child_marker, child_stats, instantiate, is_child, is_refusal,
+    CHUNK, article_count, call_i32, child_marker, child_stats, instantiate, is_child, is_refusal,
     spawn_capped_child, sum_chunks, triangular, yes_no,
 };
 
@@ -25,7 +28,9 @@ const SOURCE: &str = r#"
 (module
   (type $pair (struct (field i32) (field (ref null $pair))))
   (type $big (array (mut i32)))
-  ;; The bounded live window: one slot, overwritten every iteration.
+  ;; The bounded live window: one slot, overwritten every iteration. Each new
+  ;; pair is a LEAF (null tail), so overwriting the slot makes the previous
+  ;; iterations genuinely unreachable instead of extending a live chain.
   (global $live (mut (ref null $pair)) (ref.null $pair))
   ;; Churn $n pairs starting at value $base; the sum over the whole range is
   ;; chunk-independent, so large campaigns may be split across calls.
@@ -36,11 +41,25 @@ const SOURCE: &str = r#"
         (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
         (local.set $value (i32.add (local.get $base) (local.get $i)))
         (global.set $live
-          (struct.new $pair (local.get $value) (global.get $live)))
+          (struct.new $pair (local.get $value) (ref.null $pair)))
         (local.set $acc (i32.add (local.get $acc) (local.get $value)))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $loop)))
     (local.get $acc))
+  ;; Reachability probe: walk the pair chain reachable from $live and count
+  ;; its links. The never-free heap keeps every allocation live in the
+  ;; accounting sense, but the bounded live window must leave exactly ONE
+  ;; pair reachable once the root has been overwritten.
+  (func (export "probe") (result i32)
+    (local $count i32) (local $cursor (ref null $pair))
+    (local.set $cursor (global.get $live))
+    (block $done
+      (loop $loop
+        (br_if $done (ref.is_null (local.get $cursor)))
+        (local.set $count (i32.add (local.get $count) (i32.const 1)))
+        (local.set $cursor (struct.get $pair 1 (local.get $cursor)))
+        (br $loop)))
+    (local.get $count))
   ;; A reservation no process can satisfy: u32::MAX i32 elements.
   (func (export "huge") (result i32)
     (drop (array.new_default $big (i32.const -1)))
@@ -67,6 +86,62 @@ fn expected_i32(
     }
 }
 
+/// The churn oracle is independent of how the campaign is SPLIT across
+/// calls: the same run count produces the same sum whatever the chunk size,
+/// because the input range advances with `$base` between chunks. A base that
+/// resets per chunk re-sums the low range instead (concealed at the default
+/// magnitude, where one call covers the whole campaign).
+#[test]
+fn a1_chunk_splittings_share_one_oracle() {
+    let total = 8;
+    let mut sums = Vec::new();
+    for chunk in [1, 2, 4, 8] {
+        let (module, store) = instantiate(SOURCE);
+        let sum = sum_chunks(total, chunk, |base, count| {
+            expected_i32(&module, &store, count, base as i32)
+        })
+        .expect("churn");
+        assert_eq!(
+            store.gc_stats().live_objects,
+            total as u32,
+            "{chunk}-sized chunks: one pair per iteration, never freed"
+        );
+        sums.push((chunk, sum));
+    }
+    for (chunk, sum) in &sums {
+        assert_eq!(
+            *sum,
+            i64::from(triangular(total) as i32),
+            "{chunk}-sized chunks must reproduce the total-count oracle (all: {sums:?})"
+        );
+    }
+}
+
+/// The bounded live window is REACHABILITY, not accounting: after `n` churn
+/// iterations only the newest pair is reachable from the single live slot, so
+/// the prior iterations are genuinely garbage even though the never-free heap
+/// still counts them.
+#[test]
+fn a1_live_window_bounds_reachability() {
+    let (module, store) = instantiate(SOURCE);
+    let n = 8u64;
+    let sum = sum_chunks(n, n, |base, count| {
+        expected_i32(&module, &store, count, base as i32)
+    })
+    .expect("churn");
+    assert_eq!(sum, i64::from(triangular(n) as i32));
+    assert_eq!(
+        store.gc_stats().live_objects,
+        n as u32,
+        "never-free accounting: every pair is still allocated"
+    );
+    assert_eq!(
+        call_i32(&module, &store, "probe", &[]),
+        1,
+        "only the newest pair may stay reachable from the live slot"
+    );
+}
+
 const ARTICLE: &str = "a1-capped";
 const TEST: &str = "a1::a1_capped_churn_refuses_structurally";
 
@@ -76,8 +151,10 @@ fn a1_ephemeral_churn_is_schedule_independent_and_accounted() {
     let (module, store) = instantiate(SOURCE);
 
     let snapshot = store.gc_snapshot();
-    let result =
-        sum_chunks(n, CHUNK, |count| expected_i32(&module, &store, count, 0)).expect("churn");
+    let result = sum_chunks(n, CHUNK, |base, count| {
+        expected_i32(&module, &store, count, base as i32)
+    })
+    .expect("churn");
     assert_eq!(
         result,
         i64::from(triangular(n) as i32),

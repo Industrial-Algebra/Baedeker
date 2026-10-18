@@ -178,3 +178,262 @@ fn ref_cast_failure_is_cast_failure_kind() {
         Ok(values) => panic!("expected a cast failure, got {values:?}"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Imported function references: the type comes from the DEFINING function
+// ---------------------------------------------------------------------------
+//
+// `runtime/instance.ml:48` derives a funcref's type from the ACTUAL function
+// instance: `| FuncRef f -> UseHT (Def (Func.type_of f))`, and
+// `exec/eval.ml:632-634` resolves `ref.func x` to that function instance
+// (`let f = func c.frame.inst x in Ref (FuncRef f)`). An import declaration is
+// only a LINK constraint, so `ref.test` on an imported funcref must see the
+// PROVIDER's defining type (a subtype of the declaration), never the
+// declaration itself.
+
+mod linking {
+    use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use baedeker_core::runtime::{ExceptionRecord, Imports, LinkGroup, link_func};
+
+    /// One link group plus the arena its members share.
+    struct Group {
+        group: Rc<RefCell<LinkGroup>>,
+        arena: Rc<RefCell<Vec<ExceptionRecord>>>,
+        next_id: u32,
+    }
+
+    impl Group {
+        fn new() -> Self {
+            Self {
+                group: Rc::new(RefCell::new(LinkGroup::new())),
+                arena: Rc::new(RefCell::new(Vec::new())),
+                next_id: 1,
+            }
+        }
+
+        fn add(&mut self, module: &Rc<RegModule>) -> Rc<RefCell<Store>> {
+            let id = self.next_id;
+            self.next_id += 1;
+            Store::instantiate_linked(module, &Imports::new(), &self.group, id, &self.arena)
+                .expect("module instantiates")
+        }
+
+        /// Bind every function import of `consumer` from `provider`, using the
+        /// runner's per-declaration `link_func` + `bind_host_func` wiring.
+        fn link(
+            &mut self,
+            consumer: &Rc<RegModule>,
+            consumer_store: &Rc<RefCell<Store>>,
+            provider: &Rc<RegModule>,
+            provider_store: &Rc<RefCell<Store>>,
+            module_name: &str,
+        ) {
+            for (idx, declared) in consumer.imported_funcs.iter().enumerate() {
+                if declared.module != module_name {
+                    continue;
+                }
+                let func_idx = provider_store
+                    .borrow()
+                    .export_func(&declared.name)
+                    .unwrap_or_else(|| {
+                        panic!("provider has no function export {:?}", declared.name)
+                    });
+                let host = link_func(
+                    provider.clone(),
+                    provider_store.clone(),
+                    func_idx,
+                    declared.ty.clone(),
+                );
+                consumer_store
+                    .borrow_mut()
+                    .bind_host_func(idx as u32, host)
+                    .expect("import binds");
+            }
+        }
+    }
+
+    fn export_i32(module: &RegModule, store: &Store, name: &str) -> i32 {
+        match execute_export(module, store, name, &[])
+            .expect("export runs")
+            .as_slice()
+        {
+            [Value::I32(value)] => *value,
+            other => panic!("expected one i32 from {name}, got {other:?}"),
+        }
+    }
+
+    const PROVIDER: &str = r#"
+        (module
+          (type $sup (sub (func (result i32))))
+          (type $sub (sub $sup (func (result i32))))
+          (func (export "g") (type $sub) (i32.const 7)))
+    "#;
+
+    /// The consumer imports `g` declared as `$sup`; its defining type is `$sub`.
+    const CONSUMER: &str = r#"
+        (module
+          (type $sup (sub (func (result i32))))
+          (type $sub (sub $sup (func (result i32))))
+          (import "a" "g" (func $g (type $sup)))
+          (elem declare func $g)
+          (func (export "to_sub") (result i32) (ref.test (ref $sub) (ref.func $g)))
+          (func (export "to_sup") (result i32) (ref.test (ref $sup) (ref.func $g)))
+          (func (export "call") (result i32) (call $g)))
+    "#;
+
+    /// `ref.test` on an imported funcref matches the PROVIDER's defining type
+    /// (a declared subtype of the import declaration), not the declaration.
+    #[test]
+    fn imported_funcref_keeps_defining_type() {
+        let provider = Rc::new(wat_module(PROVIDER));
+        let consumer = Rc::new(wat_module(CONSUMER));
+        let mut group = Group::new();
+        let provider_store = group.add(&provider);
+        let consumer_store = group.add(&consumer);
+        group.link(&consumer, &consumer_store, &provider, &provider_store, "a");
+
+        let store = consumer_store.borrow();
+        assert_eq!(
+            export_i32(&consumer, &store, "to_sub"),
+            1,
+            "the imported function's defining type ($sub) must match"
+        );
+        assert_eq!(
+            export_i32(&consumer, &store, "to_sup"),
+            1,
+            "the requested supertype still matches"
+        );
+        assert_eq!(export_i32(&consumer, &store, "call"), 7);
+    }
+
+    /// The defining type survives an IMPORT CHAIN: C imports from B, whose
+    /// export is itself an import of A's function.
+    #[test]
+    fn imported_funcref_keeps_defining_type_through_chain() {
+        let provider = Rc::new(wat_module(PROVIDER));
+        let middle = Rc::new(wat_module(
+            r#"
+            (module
+              (type $sup (sub (func (result i32))))
+              (import "a" "g" (func $g (type $sup)))
+              (export "g" (func $g)))
+            "#,
+        ));
+        let consumer = Rc::new(wat_module(CONSUMER));
+        let mut group = Group::new();
+        let provider_store = group.add(&provider);
+        let middle_store = group.add(&middle);
+        group.link(&middle, &middle_store, &provider, &provider_store, "a");
+        let consumer_store = group.add(&consumer);
+        group.link(&consumer, &consumer_store, &middle, &middle_store, "a");
+
+        let store = consumer_store.borrow();
+        assert_eq!(
+            export_i32(&consumer, &store, "to_sub"),
+            1,
+            "the provider's defining type must survive the import chain"
+        );
+        assert_eq!(export_i32(&consumer, &store, "call"), 7);
+    }
+
+    /// A STANDALONE store's `link_func` binding carries the provider's
+    /// defining type too (no link group involved).
+    #[test]
+    fn standalone_link_func_binding_keeps_defining_type() {
+        let provider = Rc::new(wat_module(PROVIDER));
+        let consumer = Rc::new(wat_module(CONSUMER));
+        let provider_store = Rc::new(RefCell::new(
+            Store::instantiate(&provider).expect("provider instantiates"),
+        ));
+        let mut consumer_store =
+            Store::instantiate_with_imports(&consumer, &Imports::new()).expect("consumer");
+
+        for (idx, declared) in consumer.imported_funcs.iter().enumerate() {
+            let func_idx = provider_store
+                .borrow()
+                .export_func(&declared.name)
+                .expect("provider export");
+            let host = link_func(
+                provider.clone(),
+                provider_store.clone(),
+                func_idx,
+                declared.ty.clone(),
+            );
+            consumer_store
+                .bind_host_func(idx as u32, host)
+                .expect("import binds");
+        }
+
+        assert_eq!(
+            export_i32(&consumer, &consumer_store, "to_sub"),
+            1,
+            "a standalone link_func binding must carry the defining type"
+        );
+        assert_eq!(export_i32(&consumer, &consumer_store, "call"), 7);
+    }
+}
+
+/// A NATIVE host function has no defining module, so its funcref type is its
+/// own function type: the pin allocates host functions with the type entry
+/// `DefT (RecT [SubT (Final, [], FuncT (ts1, ts2))], 0l)`
+/// (`interpreter/host/spectest.ml:35`) — FINAL and supertype-free.
+///
+/// `register_host_func` matches signatures at the `FuncType` level (more
+/// permissive than the spec's `match_deftype` link check, which would also
+/// compare finality), so a non-final declaration can be bound here. The
+/// funcref's type still comes from the HOST function, not the declaration:
+/// the non-final `$open` does not match, while the final `$final` — the shape
+/// the pin allocates — does.
+#[test]
+fn host_function_funcref_is_typed_by_its_own_signature() {
+    use baedeker_core::runtime::{HostFunction, Imports};
+    use baedeker_core::types::{FuncType, NumType, ValType};
+
+    let source = r#"
+        (module
+          (type $final (sub final (func (result i32))))
+          (type $open (sub (func (result i32))))
+          (import "env" "f" (func $f (type $open)))
+          (elem declare func $f)
+          (func (export "to_open") (result i32) (ref.test (ref $open) (ref.func $f)))
+          (func (export "to_final") (result i32) (ref.test (ref $final) (ref.func $f)))
+          (func (export "call") (result i32) (call $f)))
+    "#;
+    let module = wat_module(source);
+    let mut store = Store::instantiate_with_imports(&module, &Imports::new()).expect("instantiate");
+    store
+        .register_host_func(
+            "env",
+            "f",
+            HostFunction::new(
+                FuncType {
+                    params: vec![],
+                    results: vec![ValType::Num(NumType::I32)],
+                },
+                |_args| Ok(vec![Value::I32(9)]),
+            ),
+        )
+        .expect("host function registers");
+
+    let run = |export: &str| match execute_export(&module, &store, export, &[]) {
+        Ok(values) => match values.as_slice() {
+            [Value::I32(value)] => *value,
+            other => panic!("expected one i32 from {export}, got {other:?}"),
+        },
+        Err(error) => panic!("{export} failed: {error:?}"),
+    };
+    assert_eq!(
+        run("to_open"),
+        0,
+        "the host's own type entry is FINAL, so a non-final declaration does not type it"
+    );
+    assert_eq!(
+        run("to_final"),
+        1,
+        "the pin's host allocation (one final supertype-free member) matches $final"
+    );
+    assert_eq!(run("call"), 9);
+}

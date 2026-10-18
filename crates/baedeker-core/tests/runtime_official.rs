@@ -22,7 +22,8 @@ use baedeker_core::runtime::{
     execute_export, link_func,
 };
 use baedeker_core::types::{
-    FuncType, GlobalType, MemType, Mutability, NumType, TableType, ValType,
+    CompType, FuncType, GlobalType, MemType, Mutability, NumType, SubType, TableType, TypeIdx,
+    ValType, defined_type_matches,
 };
 use wast::core::{WastArgCore, WastRetCore};
 use wast::parser::{ParseBuffer, parse};
@@ -261,7 +262,25 @@ fn instantiate(
     // matched against the provider's type entry by `match_deftype` above.
     for (func_idx, declared) in module.imported_funcs.iter().enumerate() {
         let host = if declared.module == "spectest" {
-            spectest_host_func(&declared.name)?
+            let host = spectest_host_func(&declared.name)?;
+            // Spectest imports are matched like any other extern: by the
+            // PROVIDER's type entry against this DECLARATION's entry
+            // (`eval.ml:1187` runs `Match.match_externtype [] xt' xt` with
+            // `xt'` the provider). `host/spectest.ml:35` allocates each host
+            // function with `DefT (RecT [SubT (Final, [], FuncT (ts1, ts2))],
+            // 0l)`, so the check is `match_deftype` against that single final
+            // supertype-free member. Skipping it would let a mismatched
+            // declaration bind silently (e.g. `print_i32` declared `(param
+            // i64)`).
+            if !spectest_signature_matches(&host, &module, declared.type_idx) {
+                return Err(format!(
+                    "link: incompatible import type on \"spectest\".\"{}\": spectest provides {:?}, import declares type {:?}",
+                    declared.name,
+                    host.ty(),
+                    declared.type_idx
+                ));
+            }
+            host
         } else {
             let source = registry.get(Some(&declared.module)).ok_or_else(|| {
                 format!(
@@ -434,6 +453,31 @@ fn spectest_table(name: &str) -> Result<TableType, String> {
         }),
         other => Err(format!("unknown spectest table {other:?}")),
     }
+}
+
+/// Whether a spectest host function matches an import DECLARATION's type
+/// entry, as `match_deftype` (`valid/match.ml:145-150`, reached from
+/// `eval.ml:1187`'s `match_externtype`).
+///
+/// `host/spectest.ml:35` gives every host function the type entry
+/// `DefT (RecT [SubT (Final, [], FuncT (ts1, ts2))], 0l)`: one final member,
+/// no declared supertypes, no rec-group neighbours. That is exactly the
+/// synthetic provider section built here.
+fn spectest_signature_matches(host: &HostFunction, module: &RegModule, declared: TypeIdx) -> bool {
+    let provided = [SubType {
+        is_final: true,
+        supertypes: Vec::new(),
+        comp: CompType::Func(host.ty().clone()),
+    }];
+    let provided_recs = [(0u32, 1u32)];
+    defined_type_matches(
+        &provided,
+        &provided_recs,
+        TypeIdx(0),
+        &module.type_defs,
+        &module.rec_groups,
+        declared,
+    )
 }
 
 fn spectest_host_func(name: &str) -> Result<HostFunction, String> {
@@ -1277,4 +1321,65 @@ fn cast_failure_reports_trap_shaped_message() {
     );
     assert!(message_matches(&message, "cast failure"));
     assert!(message_matches(&message, "cast failure, expected"));
+}
+
+/// Lower an inline WAT module for a unit-level harness test.
+fn inline_module(source: &str) -> RegModule {
+    let buf = ParseBuffer::new(source).expect("parse buffer");
+    let mut wat = parse::<wast::Wat<'_>>(&buf).expect("parse wat");
+    let bytes = wat.encode().expect("encode wat");
+    Module::decode(&bytes)
+        .expect("decode module")
+        .lower()
+        .expect("lower module")
+}
+
+/// Link `source` against a fresh registry and return the outcome.
+fn link_inline(source: &str) -> Result<(), String> {
+    let mut registry = Registry::new();
+    instantiate(Path::new("<inline>"), &mut registry, inline_module(source)).map(|_| ())
+}
+
+/// A spectest declaration is an IMPORT DECLARATION like any other: its type
+/// entry must `match_deftype` the host function's own type entry
+/// (`host/spectest.ml:35` allocates the host function with `DefT (RecT [SubT
+/// (Final, [], FuncT (ts1, ts2))], 0)` and `eval.ml:1187` runs
+/// `Match.match_externtype [] xt' xt` on it). A mismatched declaration is a
+/// link error — never a silent binding.
+#[test]
+fn spectest_import_type_mismatch_is_a_link_error() {
+    let error = link_inline(r#"(module (import "spectest" "print_i32" (func (param i64))))"#)
+        .expect_err("a mismatched spectest declaration must not link");
+    assert!(
+        error.contains("incompatible import type"),
+        "expected an incompatible-import-type link error, got {error}"
+    );
+
+    // The matching declaration links.
+    link_inline(r#"(module (import "spectest" "print_i32" (func (param i32))))"#)
+        .expect("the matching declaration links");
+}
+
+/// The spectest check runs PER DECLARATION (the `$t0`/`$t1` shape): two
+/// declarations of one name with the same type both bind, and a mismatched
+/// declaration is rejected even when a matching one is present.
+#[test]
+fn spectest_import_type_check_is_per_declaration() {
+    link_inline(
+        r#"(module
+             (import "spectest" "print_i32" (func (param i32)))
+             (import "spectest" "print_i32" (func (param i32))))"#,
+    )
+    .expect("both matching declarations link");
+
+    let error = link_inline(
+        r#"(module
+             (import "spectest" "print_i32" (func (param i32)))
+             (import "spectest" "print_i32" (func (param i64))))"#,
+    )
+    .expect_err("the mismatched declaration must not link");
+    assert!(
+        error.contains("incompatible import type"),
+        "expected an incompatible-import-type link error, got {error}"
+    );
 }

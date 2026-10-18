@@ -757,6 +757,39 @@ impl ClosedDefinedType {
         Self::resolve(types, rec_groups, idx, &mut path)
     }
 
+    /// The closed form of a BARE function type: one final member with no
+    /// declared supertypes and no rec-group neighbours.
+    ///
+    /// This is how an embedder-provided host function reaches the runtime —
+    /// the pin allocates every host function's type that way
+    /// (`interpreter/host/spectest.ml:35`: `DefT (RecT [SubT (Final, [],
+    /// FuncT (ts1, ts2))], 0l)`), so `runtime/instance.ml:48`'s
+    /// `type_of_ref (FuncRef f) = UseHT (Def (Func.type_of f))` compares a
+    /// host funcref against a concrete target through exactly this shape.
+    ///
+    /// Returns `None` when the signature mentions a concrete heap type:
+    /// those carry module-local indices, which a bare `FuncType` cannot
+    /// express.
+    pub fn of_func_type(ty: &FuncType) -> Option<Self> {
+        Some(Self {
+            members: vec![ClosedSubType {
+                is_final: true,
+                supers: Vec::new(),
+                comp: ClosedCompType::Func(
+                    ty.params
+                        .iter()
+                        .map(closed_val_no_context)
+                        .collect::<Option<_>>()?,
+                    ty.results
+                        .iter()
+                        .map(closed_val_no_context)
+                        .collect::<Option<_>>()?,
+                ),
+            }],
+            position: 0,
+        })
+    }
+
     /// Structural subtype test between two cross-module closed forms:
     /// equality, or a declared-supertype chain rooted at `self` that reaches
     /// `expected`. Mirrors the validator's `deftype_matches`, but works
@@ -843,6 +876,26 @@ fn closed_sub(
             })
             .collect::<Option<_>>()?,
         comp: closed_comp(&sub.comp, types, rec_groups, start, len, path)?,
+    })
+}
+
+/// The closed form of a value type with NO enclosing type section: only
+/// abstract heap types are expressible, so a concrete (module-local) heap
+/// reference has no closed form here.
+fn closed_val_no_context(val: &ValType) -> Option<ClosedValType> {
+    Some(match *val {
+        ValType::Num(num) => ClosedValType::Num(num),
+        ValType::Vec(vec) => ClosedValType::Vec(vec),
+        ValType::Ref(RefType::FuncRef) => {
+            ClosedValType::Ref(true, ClosedHeapRef::Abstract(HeapType::Func))
+        }
+        ValType::Ref(RefType::ExternRef) => {
+            ClosedValType::Ref(true, ClosedHeapRef::Abstract(HeapType::Extern))
+        }
+        ValType::Ref(RefType::Typed { nullable, heap }) => match heap {
+            HeapType::Type(_) => return None,
+            other => ClosedValType::Ref(nullable, ClosedHeapRef::Abstract(other)),
+        },
     })
 }
 
