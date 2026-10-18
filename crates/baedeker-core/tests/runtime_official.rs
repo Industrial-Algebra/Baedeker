@@ -31,18 +31,6 @@ use wast::{QuoteWat, Wast, WastArg, WastDirective, WastExecute, WastRet};
 /// Files deferred with a reason (feature not yet implemented). Every entry
 /// here is a known gap; keep the list honest and shrinking.
 const DEFERRED_FILES: &[(&str, &str)] = &[
-    // Function-references / GC-era references.
-    ("ref_null.wast", "GC heap types (anyref) not implemented"),
-    (
-        "type-canon.wast",
-        "GC type canonicalization not implemented",
-    ),
-    (
-        "type-equivalence.wast",
-        "GC type equivalence not implemented",
-    ),
-    ("type-rec.wast", "recursive types not implemented"),
-    ("type.wast", "recursive/GC types not implemented"),
     // Guard-page semantics are host/OS-specific.
     (
         "skip-stack-guard-page.wast",
@@ -268,7 +256,10 @@ fn instantiate(
     let store = &mut *store_guard;
 
     // Function imports: link lazily against spectest + registered instances.
-    for declared in &module.imported_funcs {
+    // Bound per DECLARATION: one `(module, name)` may be imported several
+    // times with different declared types (`type-subtyping.wast`), each
+    // matched against the provider's type entry by `match_deftype` above.
+    for (func_idx, declared) in module.imported_funcs.iter().enumerate() {
         let host = if declared.module == "spectest" {
             spectest_host_func(&declared.name)?
         } else {
@@ -332,7 +323,7 @@ fn instantiate(
             )
         };
         store
-            .register_host_func(&declared.module, &declared.name, host)
+            .bind_host_func(func_idx as u32, host)
             .map_err(|error| format!("register host func failed: {error:?}"))?;
     }
 
@@ -565,7 +556,7 @@ fn run_file(path: &Path, stats: &mut OfficialStats) {
                         let _ = name;
                         match instantiate(path, &mut registry, lowered) {
                             Err(msg) => {
-                                if !msg.contains(message) {
+                                if !message_matches(&msg, message) {
                                     stats.failures.push(format!(
                                         "{}: assert_trap expected {message:?}, got {msg:?}",
                                         path.display()
@@ -883,6 +874,27 @@ fn assert_return(
     }
 }
 
+/// The pin's assertion-message rule (`interpreter/script/runner.ml:498-502`,
+/// `assert_message`): the ACTUAL message must start with the EXPECTED
+/// string; the actual may be longer, but never differ inside the expected
+/// prefix (`String.sub msg 0 (String.length re) <> re` is the failure case).
+fn message_matches(actual: &str, expected: &str) -> bool {
+    actual.starts_with(expected)
+}
+
+/// The trap-shaped message for an execution error, if the error is a trap in
+/// the spec's sense. `ref.cast` failure is a runtime trap whose message
+/// starts with `"cast failure, expected "` (`interpreter/exec/eval.ml:657`);
+/// `RuntimeErrorKind::CastFailure` stays a distinct embedder-facing kind, but
+/// the script harness reports it through the trap-message channel.
+fn trap_message(error: &RuntimeError) -> Option<String> {
+    match &error.kind {
+        RuntimeErrorKind::Trap(trap) => Some(trap.wast_message().to_owned()),
+        RuntimeErrorKind::CastFailure { .. } => Some(error.kind.to_string()),
+        _ => None,
+    }
+}
+
 fn assert_trap(
     path: &Path,
     registry: &Registry,
@@ -910,18 +922,17 @@ fn assert_trap(
     };
     match result {
         Err(error) => {
-            let RuntimeErrorKind::Trap(trap) = error.kind else {
+            let Some(actual) = trap_message(&error) else {
                 stats.failures.push(format!(
                     "{}: assert_trap expected {message:?}, got non-trap error: {error:?}",
                     path.display()
                 ));
                 return;
             };
-            if trap.wast_message() != message {
+            if !message_matches(&actual, message) {
                 stats.failures.push(format!(
-                    "{}: assert_trap message mismatch: got {:?}, expected {message:?}",
-                    path.display(),
-                    trap.wast_message()
+                    "{}: assert_trap message mismatch: got {actual:?}, expected {message:?}",
+                    path.display()
                 ));
             }
         }
@@ -1218,4 +1229,52 @@ fn official_spec_cases_inner() {
         panic!("{report}");
     }
     assert!(stats.files > 0, "expected official spec files to run");
+}
+
+/// `assert_message` accepts an actual message that extends the expected one
+/// (the pin's prefix rule) …
+#[test]
+fn assert_message_prefix_accepts_longer_actual() {
+    assert!(message_matches(
+        "cast failure, expected (ref null struct) but got i31",
+        "cast failure"
+    ));
+    assert!(message_matches(
+        "out of bounds memory access",
+        "out of bounds"
+    ));
+    assert!(message_matches("cast failure", "cast failure"));
+}
+
+/// … and rejects an actual message that diverges inside the expected prefix
+/// (including one that merely CONTAINS the expected text later on).
+#[test]
+fn assert_message_prefix_rejects_divergent_actual() {
+    assert!(!message_matches("cast failure", "cast failure, expected"));
+    assert!(!message_matches("expected cast failure", "cast failure"));
+    assert!(!message_matches(
+        "call stack exhausted, cast failure",
+        "cast failure"
+    ));
+}
+
+/// A `ref.cast` failure reaches the harness as the trap message the corpus
+/// asserts (`eval.ml:657`), while keeping its distinct embedder-facing kind.
+#[test]
+fn cast_failure_reports_trap_shaped_message() {
+    let error = RuntimeError {
+        kind: RuntimeErrorKind::CastFailure {
+            expected: baedeker_core::types::RefType::from_parts(
+                true,
+                baedeker_core::types::HeapType::Struct,
+            ),
+        },
+    };
+    let message = trap_message(&error).expect("cast failure is trap-shaped");
+    assert!(
+        message.starts_with("cast failure, expected "),
+        "rendered prefix must be exactly `cast failure, expected `: {message}"
+    );
+    assert!(message_matches(&message, "cast failure"));
+    assert!(message_matches(&message, "cast failure, expected"));
 }

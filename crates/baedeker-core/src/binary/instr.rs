@@ -716,6 +716,43 @@ pub fn decode_instr(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Instr
     decode_instr_with_offset(cursor, base_offset).map(|decoded| decoded.instr)
 }
 
+/// Decode one constant/init expression's raw bytes (including its terminating
+/// `end`) and return the slice consumed.
+///
+/// Shared by the data- and element-section decoders. The boundary is found by
+/// walking the instruction stream with real opcode + immediate consumption,
+/// never by scanning for the first `0x0B` byte: operand bytes can themselves
+/// be `0x0B` (e.g. the LEB128 funcidx 11 in `ref.func 11`, or a wide
+/// `array.new_fixed`/`struct.new` operand), which a raw scan misreads as the
+/// terminator. Every failure is a `DecodeError` with the caller's section
+/// context; the scan can never return a wrong-length slice.
+pub(crate) fn decode_const_expr_bytes<'a>(
+    cursor: &mut Cursor<'a>,
+    base_offset: usize,
+    context: DecodeContext,
+) -> Result<&'a [u8], DecodeError> {
+    let start = cursor.position();
+    let mut block_depth = 0usize;
+    loop {
+        let instr = decode_instr(cursor, base_offset).map_err(|mut error| {
+            error.context = context;
+            error
+        })?;
+        match instr {
+            Instr::Block(_) | Instr::Loop(_) | Instr::If(_) | Instr::TryTable(_) => {
+                block_depth += 1
+            }
+            Instr::End => {
+                if block_depth == 0 {
+                    return Ok(&cursor.original()[start..cursor.position()]);
+                }
+                block_depth -= 1;
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Decode a single instruction with its absolute module offset.
 pub fn decode_instr_with_offset(
     cursor: &mut Cursor<'_>,

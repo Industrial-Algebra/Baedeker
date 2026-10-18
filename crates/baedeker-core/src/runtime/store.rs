@@ -334,6 +334,32 @@ fn precompute_gc_type_ids(
     Ok(out)
 }
 
+/// The declared type index of every function in the module's index space,
+/// imported functions first. `RegModule.funcs` holds DEFINED functions only;
+/// their `idx` is the index-space position, so imported slots are filled from
+/// the import declarations and defined slots from `funcs`.
+fn func_type_idxs_of(module: &RegModule) -> Vec<crate::types::TypeIdx> {
+    let mut out: Vec<crate::types::TypeIdx> = module
+        .imported_funcs
+        .iter()
+        .map(|import| import.type_idx)
+        .collect();
+    let total = module
+        .funcs
+        .iter()
+        .map(|func| func.idx.0 as usize + 1)
+        .max()
+        .unwrap_or(0)
+        .max(out.len());
+    out.resize(total, crate::types::TypeIdx(0));
+    for func in &module.funcs {
+        if let Some(slot) = out.get_mut(func.idx.0 as usize) {
+            *slot = func.type_idx;
+        }
+    }
+    out
+}
+
 /// The already-interned heap ids of `idx`'s declared supertypes. Precompute
 /// visits the type section in index order and validation guarantees every
 /// supertype has a smaller index, so each supertype is present in `interned`
@@ -955,6 +981,16 @@ pub struct Store {
     /// registration may see several declarations of one import name whose
     /// local indices differ but whose types are `match_deftype`-equivalent).
     func_canon: crate::types::TypeCanon,
+    /// This module's type section and rec groups. A runtime `FuncRef` carries
+    /// no type of its own: `type_of_ref (FuncRef f) = UseHT (Def
+    /// (Func.type_of f))` (`runtime/instance.ml:48`), so `ref.test`/`ref.cast`
+    /// with a CONCRETE target resolve both the function's declared type and
+    /// the target through these tables (`defined_type_matches`).
+    type_defs: Vec<crate::types::SubType>,
+    rec_groups: Vec<(u32, u32)>,
+    /// Declared type index of every function in this module's index space
+    /// (imported funcs first, mirroring `RegModule.funcs[].idx`).
+    func_type_idxs: Vec<crate::types::TypeIdx>,
 }
 
 impl Store {
@@ -1389,6 +1425,9 @@ impl Store {
             foreign_heaps: register_provider_heaps(&imports.provider_heaps),
             gc_type_ids,
             func_canon: crate::types::TypeCanon::new(&module.type_defs, &module.rec_groups),
+            type_defs: module.type_defs.clone(),
+            rec_groups: module.rec_groups.clone(),
+            func_type_idxs: func_type_idxs_of(module),
         };
 
         // Register defined-tag types (module-agnostic tag ids).
@@ -1988,6 +2027,94 @@ impl Store {
             });
         }
         Ok(())
+    }
+
+    /// Bind a host function to ONE function-import declaration, addressed by
+    /// its index-space function index.
+    ///
+    /// [`Store::register_host_func`] fills every declaration of
+    /// `(module, name)` and requires them to share one canonically-equal
+    /// declared type. A module may instead import the same extern several
+    /// times with DIFFERENT declared types, each matched against the
+    /// provider's type by `match_deftype` (`type-subtyping.wast` imports one
+    /// export at `$t0`, `$t1`, … from a provider whose function has type
+    /// `$t1`). The caller holds both type sections and performs that match
+    /// (`types::defined_type_matches`); this binds the resolved slot.
+    pub fn bind_host_func(
+        &mut self,
+        func_idx: u32,
+        func: HostFunction,
+    ) -> Result<(), RuntimeError> {
+        let Some(slot) = self.host_funcs.get_mut(func_idx as usize) else {
+            let (module, name) = self
+                .imported_func(func_idx)
+                .map(|import| (import.module.clone(), import.name.clone()))
+                .unwrap_or_default();
+            return Err(RuntimeError {
+                kind: RuntimeErrorKind::UnknownImport { module, name },
+            });
+        };
+        *slot = Some(alloc::rc::Rc::new(core::cell::RefCell::new(func)));
+        Ok(())
+    }
+
+    /// Whether the function `func` of `instance` matches the concrete heap
+    /// type `target` (a module-local type index of THIS store's module).
+    ///
+    /// `ref.test`/`ref.cast` on a function reference compare the function's
+    /// DECLARED defined type against the target with `match_deftype`:
+    /// `runtime/instance.ml:48` (`type_of_ref (FuncRef f) = UseHT (Def
+    /// (Func.type_of f))`), `valid/match.ml:92` (concrete-vs-concrete routes
+    /// to `match_deftype`), `valid/match.ml:151-155` (closed-form identity, or
+    /// the unrolled declared-supertype chain reaches the target).
+    ///
+    /// The function's type comes from the module that defines it — the link
+    /// group's module for a linked instance, this store's own module when
+    /// standalone — so distinct-ID subtypes compare by declared structure, not
+    /// by module-local ids.
+    pub(crate) fn func_ref_matches_type(
+        &self,
+        instance: u32,
+        func: u32,
+        target: crate::types::TypeIdx,
+    ) -> bool {
+        use crate::types::{ClosedDefinedType, FuncIdx};
+        let Some(declared) = ClosedDefinedType::of(&self.type_defs, &self.rec_groups, target)
+        else {
+            return false;
+        };
+        let provided = match self.group_module(instance) {
+            Some(module) => {
+                let type_idx = if func < module.imported_func_count {
+                    module
+                        .imported_funcs
+                        .get(func as usize)
+                        .map(|import| import.type_idx)
+                } else {
+                    module
+                        .funcs
+                        .iter()
+                        .find(|defined| defined.idx == FuncIdx(func))
+                        .map(|defined| defined.type_idx)
+                };
+                let Some(type_idx) = type_idx else {
+                    return false;
+                };
+                ClosedDefinedType::of(&module.type_defs, &module.rec_groups, type_idx)
+            }
+            // Standalone store: only its own functions are addressable.
+            None if instance == self.instance_id => self
+                .func_type_idxs
+                .get(func as usize)
+                .and_then(|&type_idx| {
+                    ClosedDefinedType::of(&self.type_defs, &self.rec_groups, type_idx)
+                }),
+            None => None,
+        };
+        let Some(provided) = provided else {
+            return false;
+        };
+        provided == declared || provided.is_subtype_of(&declared)
     }
 
     /// The lowered module of an instance registered in this store's link

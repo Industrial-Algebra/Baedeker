@@ -32,10 +32,19 @@ jobs:
       - name: Clippy
         run: cargo clippy -- -D warnings
 
+      # The GC R2 articles (tests/gc_articles) default to their FULL local
+      # magnitudes (10⁵–10⁷ operations). CI divides every magnitude by 100:
+      # the assertions are formulas over the run count, so the accounting is
+      # graded identically at both magnitudes. The dedicated `GC articles` job
+      # below re-runs them explicitly.
       - name: Tests
+        env:
+          BAEDEKER_GC_ARTICLE_DIVISOR: '100'
         run: cargo test
 
       - name: Tests (AOT feature)
+        env:
+          BAEDEKER_GC_ARTICLE_DIVISOR: '100'
         run: cargo test -p baedeker-core --features aot
 
       - name: FFI header is up to date
@@ -93,6 +102,27 @@ jobs:
 
       - name: Fuzz trap_edges
         run: cargo +nightly fuzz run trap_edges -- -runs=50000
+
+  # GC slice R2 article ladder (A1–A8): logical-stats accounting and the
+  # structured-refusal harness. The capped articles (A1, A2b) re-execute this
+  # test binary under `ulimit -v` 64 MiB and grade a structured
+  # `ResourceLimitExceeded` with an untouched `GcStats` snapshot — a panic,
+  # abort or SIGKILL fails the job. Magnitudes are divided by 100 here; the
+  # formulas are exact at any count (see `tests/gc_articles/main.rs`).
+  gc-articles:
+    name: GC articles
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: GC articles A1–A8 (CI magnitudes, capped refusal harness)
+        env:
+          BAEDEKER_GC_ARTICLE_DIVISOR: '100'
+        run: cargo test -p baedeker-core --test gc_articles -- --nocapture
 
   # Cross-arch correctness coverage. These are NOT in the required-check set
   # yet (see AGENTS.md required-check case-sensitivity pitfall) — added as

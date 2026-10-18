@@ -3302,6 +3302,13 @@ fn ref_matches_ht(store: Option<&Store>, value: Value, nullable: bool, ht: HeapT
     match (value, ht) {
         (Value::I31(_), HeapType::I31 | HeapType::Eq | HeapType::Any) => true,
         (Value::FuncRef(_), HeapType::Func) => true,
+        // A function reference carries no type of its own: its runtime type is
+        // the function's declared defined type, and a concrete target is
+        // matched with `match_deftype` (`runtime/instance.ml:48`,
+        // `valid/match.ml:92,151-155`).
+        (Value::FuncRef(Some((instance, func))), HeapType::Type(idx)) => {
+            store.is_some_and(|store| store.func_ref_matches_type(instance, func, idx))
+        }
         // Both extern-domain shapes match `extern`: a raw host reference and
         // a value externalized from the GC domain.
         (Value::ExternRef(_) | Value::ExternGc(_), HeapType::Extern) => true,

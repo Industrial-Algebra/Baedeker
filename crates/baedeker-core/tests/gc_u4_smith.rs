@@ -191,14 +191,19 @@ fn seeded_gc_smith_campaign_decodes_validates_and_lowers() {
         validated, decoded,
         "every decoded module must validate (full acceptance)"
     );
-    // Known decoder gap (recorded for unit 5): the data-section offset
-    // expression parser scans for the first `0x0b` byte instead of decoding
-    // instructions, so an `i32.const` whose LEB128 payload contains `0x0b`
-    // truncates the expression. Only a few seeds hit it; the campaign must
-    // not regress beyond that.
+    // Decode acceptance is TOTAL since unit 5: the data-section offset
+    // expression decoder used to scan for the first `0x0b` byte instead of
+    // decoding instructions, truncating any expression whose operands contain
+    // `0x0b` (seeds 36/89/275 all failed this way with `data section:
+    // unexpected end of input`). The data and element sections now share
+    // `instr::decode_const_expr_bytes`, so a decode rejection is a defect.
     assert!(
-        decode_failures.len() <= 8,
-        "decode rejections grew beyond the known offset-expression gap: {decode_failures:?}"
+        decode_failures.is_empty(),
+        "every generated module must decode: {decode_failures:?}"
+    );
+    assert_eq!(
+        decoded, generated,
+        "every generated module must decode (no decoder rejections)"
     );
     println!(
         "gc-smith smoke: generated={generated} decoded={decoded} with_gc_types={with_gc_types} \
@@ -206,6 +211,29 @@ fn seeded_gc_smith_campaign_decodes_validates_and_lowers() {
         decode_failures.len(),
         validation_failures.len()
     );
+    println!("decode failures: {decode_failures:?}");
+}
+
+/// The three seeds the U4 campaign recorded as decode failures
+/// (`data section: unexpected end of input`) now decode: each one's data
+/// section carries an offset/init expression whose operand bytes include
+/// `0x0b`, which the old first-`0x0b` scan truncated.
+#[test]
+fn u4_decode_failure_seeds_now_decode() {
+    for seed in [36u64, 89, 275] {
+        let bytes = seed_bytes(seed, 2048);
+        let mut unstructured = Unstructured::new(&bytes);
+        let Ok(smith_module) = wasm_smith::Module::new(config(), &mut unstructured) else {
+            panic!("seed {seed} no longer generates a module");
+        };
+        let encoded = smith_module.to_bytes();
+        let module = Module::decode(&encoded)
+            .unwrap_or_else(|error| panic!("seed {seed} must decode: {error}"));
+        assert!(
+            !module.data.is_empty(),
+            "seed {seed} was a DATA-section decode failure; the module must still carry data"
+        );
+    }
 }
 
 /// The decoder/validator/lowerer accept GC aggregate types end to end on a
