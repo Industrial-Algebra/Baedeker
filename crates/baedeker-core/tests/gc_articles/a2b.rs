@@ -62,6 +62,10 @@ fn a2b_persistent_build_refuses_under_caps() {
 
 fn a2b_child() {
     let (module, store) = instantiate(SOURCE);
+    // Start-marker FIRST (before any allocation-heavy work): if the child is
+    // killed by the platform (MacCloud runner incidents), the marker tells
+    // us whether it died before or mid-work.
+    child_marker("article=a2b-capped started=1");
     let capped = process_is_capped();
 
     // Provisioned base: a real workload before the caps make themselves felt,
@@ -75,13 +79,12 @@ fn a2b_child() {
     // Pressure phase: 10⁷ nodes (the design's magnitude) under the cap,
     // chunked so the engine's per-call backstop is never what stops it.
     // When NO cap is enforceable (macOS: `ulimit -v` is a no-op there), the
-    // workload must not run to its full magnitude — two uncapped children
-    // at 10⁷ live nodes each OOM-killed the hosted MacCloud runner (CI
-    // incident, 2026-10-19). The refusal itself is only gradeable under a
-    // real cap; uncapped, two chunks preserve the schedule-independence
-    // evidence at bounded memory and the grader already skips the
-    // pressure-refusal assertion when `capped=no`.
-    let pressure_target: u64 = if capped { 10_000_000 } else { 2 * CHUNK };
+    // pressure phase is SKIPPED entirely — its purpose (demonstrate refusal
+    // under a cap) is ungradeable uncapped, and even bounded magnitudes
+    // killed the hosted MacCloud runner twice (CI incident, 2026-10-19:
+    // children died by signal with no output). Uncapped grading still
+    // covers: the provisioned base, the over-large refusal, stats-untouched.
+    let pressure_target: u64 = if capped { 10_000_000 } else { 0 };
     let mut built = 0u64;
     let mut pressure_refused = false;
     while built < pressure_target {

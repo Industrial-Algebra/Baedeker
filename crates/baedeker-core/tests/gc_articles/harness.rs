@@ -166,6 +166,8 @@ pub struct CappedOutcome {
     pub stderr: String,
     /// Exit status code; a signal death has no code.
     pub code: Option<i32>,
+    /// Full process status (carries the signal number on a signal death).
+    pub status: std::process::ExitStatus,
     /// Whether the child process was actually memory-capped.
     pub capped: bool,
     /// Whether the pressure phase itself was refused (only meaningful capped).
@@ -184,7 +186,10 @@ impl CappedOutcome {
         assert_eq!(
             self.code,
             Some(0),
-            "{article}: child must exit 0 (a panic/abort/signal is a failure); stderr:\n{}",
+            "{article}: child must exit 0 (a panic/abort/signal is a failure; \
+             status = {:?}, so the child reached start-marker={} and no further); stderr:\n{}",
+            self.status,
+            self.stdout.contains("GC-ARTICLE-CHILD article="),
             self.stderr
         );
         assert!(
@@ -248,6 +253,7 @@ pub fn spawn_capped_child(article: &str, test_name: &str) -> CappedOutcome {
         stdout,
         stderr,
         code: output.status.code(),
+        status: output.status,
         capped,
         pressure_refused,
         huge_refused,

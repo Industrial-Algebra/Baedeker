@@ -189,17 +189,21 @@ fn a1_capped_churn_refuses_structurally() {
 
 fn a1_child() {
     let (module, store) = instantiate(SOURCE);
+    // Start-marker FIRST (before any allocation-heavy work): if the child is
+    // killed by the platform (MacCloud runner incidents), the marker tells
+    // us whether it died before or mid-work.
+    child_marker("article=a1-capped started=1");
     let capped = crate::harness::process_is_capped();
 
     // Pressure phase: 10⁷ pairs under the cap, chunked across calls so the
     // engine's per-call backstop is never the thing that stops it. When NO
-    // cap is enforceable (macOS: `ulimit -v` is a no-op there), do not run
-    // the full magnitude — two uncapped children OOM-killed the hosted
-    // MacCloud runner (CI incident, 2026-10-19). Uncapped, two chunks keep
-    // the schedule-independence evidence at bounded memory; the pressure
-    // refusal is only graded under a real cap (see the grader's `capped`
-    // branch).
-    let pressure_target: u64 = if capped { 10_000_000 } else { 2 * CHUNK };
+    // cap is enforceable (macOS: `ulimit -v` is a no-op there), the phase
+    // is SKIPPED entirely — its purpose (refusal under a real cap) is
+    // ungradeable uncapped, and bounded magnitudes still killed the hosted
+    // MacCloud runner twice (CI incident, 2026-10-19: children died by
+    // signal with no output). Uncapped grading still covers: churn,
+    // schedule-independence, the over-large refusal, stats-untouched.
+    let pressure_target: u64 = if capped { 10_000_000 } else { 0 };
     let mut base = 0u64;
     let mut pressure_refused = false;
     while base < pressure_target {
