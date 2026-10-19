@@ -149,6 +149,27 @@ fn alloc_failed() -> RuntimeError {
     }
 }
 
+/// Per-allocation payload bound for a single array fill (`array.new`,
+/// `array.new_default`). Runtime-controlled lengths can request anything up
+/// to `u32::MAX` elements; reserving that on an overcommitting allocator
+/// (macOS) succeeds and the fill then touches the whole range, killing the
+/// process (observed: CI `Check (macOS Apple Silicon)` SIGKILL since the
+/// heap landed). A deterministic byte bound, checked BEFORE any reserve,
+/// makes the refusal identical on every platform — same kind, state
+/// untouched — per this module's contract. One GiB; no corpus case or
+/// article approaches it (largest legit allocation in the tree: ~tens of
+/// MiB).
+const MAX_ARRAY_FILL_BYTES: usize = 1 << 30;
+
+/// The deterministic guard for array fills: refuse when the requested
+/// payload exceeds [`MAX_ARRAY_FILL_BYTES`] or the byte count does not fit
+/// the platform's `usize` (32-bit targets: `u32::MAX` elements overflow).
+fn array_fill_within_bound(count: usize) -> bool {
+    count
+        .checked_mul(core::mem::size_of::<Value>())
+        .is_some_and(|bytes| bytes <= MAX_ARRAY_FILL_BYTES)
+}
+
 /// A never-free GC heap.
 #[derive(Debug)]
 pub struct GcHeap {
@@ -465,8 +486,12 @@ impl GcHeap {
             GcTypeKind::Struct(_) => return Err(alloc_failed()),
         };
         let count = len as usize;
-        // Count-first: payload capacity, then the table slot; only then
-        // intern and materialize. A refusal leaves both untouched.
+        // Count-first: a deterministic platform-independent bound, then
+        // payload capacity, then the table slot; only then intern and
+        // materialize. A refusal leaves everything untouched.
+        if !array_fill_within_bound(count) {
+            return Err(alloc_failed());
+        }
         let mut elems: Vec<Value> = Vec::new();
         elems.try_reserve(count).map_err(|_| alloc_failed())?;
         self.objects.try_reserve(1).map_err(|_| alloc_failed())?;
@@ -882,6 +907,27 @@ mod tests {
             heap.alloc_array(kind, u32::MAX, Value::FuncRef(None))
                 .is_err()
         );
+        assert_eq!(heap.stats(), before);
+    }
+
+    #[test]
+    fn array_fill_bound_is_deterministic_at_the_boundary() {
+        // The guard is a pure predicate: exactly at the bound it still
+        // admits; one element past it refuses; on every platform the
+        // decision depends only on the byte count, never the allocator
+        // (the macOS overcommit incident, CI SIGKILL since bfe1100).
+        let elem = core::mem::size_of::<Value>();
+        let max_elems = MAX_ARRAY_FILL_BYTES / elem;
+        assert!(array_fill_within_bound(max_elems));
+        assert!(!array_fill_within_bound(max_elems + 1));
+        assert!(!array_fill_within_bound(usize::MAX));
+        // And the alloc path itself refuses just past the bound without
+        // touching state (do NOT allocate at the bound itself — 1 GiB).
+        let mut heap = GcHeap::new();
+        let before = heap.stats();
+        let kind = GcTypeKind::Array(f(StorageType::Val(ValType::Num(NumType::I32))));
+        let over = u32::try_from(max_elems + 1).unwrap_or(u32::MAX);
+        assert!(heap.alloc_array(kind, over, Value::I32(0)).is_err());
         assert_eq!(heap.stats(), before);
     }
 
