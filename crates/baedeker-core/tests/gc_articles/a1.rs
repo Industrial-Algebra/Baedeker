@@ -192,11 +192,23 @@ fn a1_child() {
     let capped = crate::harness::process_is_capped();
 
     // Pressure phase: 10⁷ pairs under the cap, chunked across calls so the
-    // engine's per-call backstop is never the thing that stops it.
+    // engine's per-call backstop is never the thing that stops it. When NO
+    // cap is enforceable (macOS: `ulimit -v` is a no-op there), do not run
+    // the full magnitude — two uncapped children OOM-killed the hosted
+    // MacCloud runner (CI incident, 2026-10-19). Uncapped, two chunks keep
+    // the schedule-independence evidence at bounded memory; the pressure
+    // refusal is only graded under a real cap (see the grader's `capped`
+    // branch).
+    let pressure_target: u64 = if capped { 10_000_000 } else { 2 * CHUNK };
     let mut base = 0u64;
     let mut pressure_refused = false;
-    while base < 10_000_000 {
-        match expected_i32(&module, &store, (10_000_000 - base).min(CHUNK), base as i32) {
+    while base < pressure_target {
+        match expected_i32(
+            &module,
+            &store,
+            (pressure_target - base).min(CHUNK),
+            base as i32,
+        ) {
             Ok(_) => base += CHUNK,
             Err(error) => {
                 assert!(

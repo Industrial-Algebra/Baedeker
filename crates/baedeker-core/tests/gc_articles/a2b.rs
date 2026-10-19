@@ -74,14 +74,22 @@ fn a2b_child() {
 
     // Pressure phase: 10⁷ nodes (the design's magnitude) under the cap,
     // chunked so the engine's per-call backstop is never what stops it.
+    // When NO cap is enforceable (macOS: `ulimit -v` is a no-op there), the
+    // workload must not run to its full magnitude — two uncapped children
+    // at 10⁷ live nodes each OOM-killed the hosted MacCloud runner (CI
+    // incident, 2026-10-19). The refusal itself is only gradeable under a
+    // real cap; uncapped, two chunks preserve the schedule-independence
+    // evidence at bounded memory and the grader already skips the
+    // pressure-refusal assertion when `capped=no`.
+    let pressure_target: u64 = if capped { 10_000_000 } else { 2 * CHUNK };
     let mut built = 0u64;
     let mut pressure_refused = false;
-    while built < 10_000_000 {
+    while built < pressure_target {
         match execute_export(
             &module,
             &store,
             "build",
-            &[Value::I32((10_000_000 - built).min(CHUNK) as i32)],
+            &[Value::I32((pressure_target - built).min(CHUNK) as i32)],
         ) {
             Ok(_) => built += CHUNK,
             Err(error) => {
