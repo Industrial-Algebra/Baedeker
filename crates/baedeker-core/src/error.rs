@@ -92,6 +92,9 @@ pub struct DecodeError {
 pub enum DecodeErrorKind {
     /// Unexpected end of input.
     UnexpectedEof,
+    /// A refused reservation while building a decoded structure (resource
+    /// discipline: clean error, never an allocation abort).
+    ResourceLimitExceeded,
     /// Invalid magic number (expected `\0asm`).
     InvalidMagic,
     /// Unsupported WASM version.
@@ -152,6 +155,9 @@ impl fmt::Display for DecodeErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             DecodeErrorKind::UnexpectedEof => write!(f, "unexpected end of input"),
+            DecodeErrorKind::ResourceLimitExceeded => {
+                write!(f, "resource limit exceeded")
+            }
             DecodeErrorKind::InvalidMagic => write!(f, "invalid magic number (expected \\0asm)"),
             DecodeErrorKind::UnsupportedVersion { found } => {
                 write!(f, "unsupported WASM version {found} (expected 1)")

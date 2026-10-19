@@ -591,9 +591,18 @@ impl fmt::Display for ValidationErrorKind {
 
 impl From<DecodeError> for ValidationErrorKind {
     fn from(error: DecodeError) -> Self {
-        Self::Decode {
-            context: error.context,
-            kind: error.kind,
+        match error.kind {
+            // A refused allocation while decoding is a resource limit, not a
+            // malformed-input error: surface it as the shared refusal so the
+            // whole validate path reports one resource-limit idiom (resource
+            // discipline, never an allocation abort).
+            DecodeErrorKind::ResourceLimitExceeded => Self::ResourceLimitExceeded {
+                what: "decoded instructions",
+            },
+            kind => Self::Decode {
+                context: error.context,
+                kind,
+            },
         }
     }
 }

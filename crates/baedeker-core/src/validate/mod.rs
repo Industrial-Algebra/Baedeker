@@ -17,7 +17,7 @@
 pub mod error;
 pub mod state;
 
-use alloc::{collections::BTreeSet, vec, vec::Vec};
+use alloc::{vec, vec::Vec};
 
 use crate::binary::instr::{
     DecodedInstr, Instr, TryTableCatch, TryTableCatchKind, decode_instr_sequence_with_offsets,
@@ -93,23 +93,43 @@ pub fn validate_module(module: &Module<'_>) -> Result<(), ValidationError> {
 
 /// Group spans covering every type index: explicit `rec` groups as decoded,
 /// and every other index as its own singleton group.
-fn type_group_spans(module: &Module<'_>) -> Vec<(u32, u32)> {
+///
+/// Fallible throughout (resource discipline): a refused reservation is a
+/// clean `ResourceLimitExceeded`, never an allocation abort — found by the
+/// U3 declining-allocator sweep (a plain `Vec::push` here aborted a child
+/// under allocation pressure; CI flake 2026-10-19).
+fn type_group_spans(module: &Module<'_>) -> Result<Vec<(u32, u32)>, ()> {
     // Empty rec groups contribute no indices, so only non-empty groups form
-    // spans; every other index is its own singleton group.
-    let mut by_start: alloc::collections::BTreeMap<u32, u32> = module
-        .rec_groups
-        .iter()
-        .filter(|&&(_, len)| len > 0)
-        .copied()
-        .collect();
+    // spans; every other index is its own singleton group. The groups are
+    // kept in a sorted vector consumed by an ascending cursor instead of a
+    // `BTreeMap`: a `BTreeMap` insert allocates a node infallibly, which
+    // aborts on allocator refusal.
+    let mut groups: Vec<(u32, u32)> = Vec::new();
+    groups
+        .try_reserve(module.rec_groups.len())
+        .map_err(|_| ())?;
+    for &(start, len) in module.rec_groups.iter() {
+        if len > 0 {
+            groups.push((start, len));
+        }
+    }
+    groups.sort_unstable_by_key(|&(start, _)| start);
     let mut spans = Vec::new();
+    spans.try_reserve(module.types.len()).map_err(|_| ())?;
+    let mut cursor = 0usize;
     let mut start: u32 = 0;
     while (start as usize) < module.types.len() {
-        let len = by_start.remove(&start).unwrap_or(1);
+        let mut len = 1;
+        if cursor < groups.len() && groups[cursor].0 == start {
+            len = groups[cursor].1;
+        }
+        while cursor < groups.len() && groups[cursor].0 <= start {
+            cursor += 1;
+        }
         spans.push((start, len));
         start += len;
     }
-    spans
+    Ok(spans)
 }
 
 /// Validate the type section: roll & install each rec group, then check every
@@ -126,7 +146,13 @@ fn validate_type_definitions(module: &Module<'_>) -> Result<(), ValidationError>
         .map(|section| section.offset)
         .unwrap_or(0);
 
-    for (start, len) in type_group_spans(module) {
+    for (start, len) in type_group_spans(module).map_err(|()| ValidationError {
+        offset: ByteOffset(offset),
+        function: None,
+        kind: ValidationErrorKind::ResourceLimitExceeded {
+            what: "type group spans",
+        },
+    })? {
         let end = start + len;
 
         // 1. Every referenced type index must be installed (`< end`); this
@@ -1005,18 +1031,34 @@ fn validate_exports(module: &Module<'_>) -> Result<(), ValidationError> {
         .section(crate::binary::section::SectionId::Export)
         .map(|section| section.offset)
         .unwrap_or(0);
-    let mut names = BTreeSet::new();
+    // Export-name uniqueness is tracked in a sorted `Vec` rather than a
+    // `BTreeSet`: a `BTreeSet` insert allocates a leaf node infallibly, which
+    // aborts on allocator refusal, while the vector's growth is try-reserved
+    // and a binary-search lookup keeps the duplicate scan logarithmic.
+    let mut names: Vec<&str> = Vec::new();
 
     for export in module.exports() {
-        if !names.insert(export.name.as_str()) {
-            return Err(ValidationError {
-                offset: ByteOffset(offset),
-                function: None,
-                kind: ValidationErrorKind::DuplicateExportName {
-                    name: export.name.clone(),
-                },
-            });
-        }
+        let name = export.name.as_str();
+        names.try_reserve(1).map_err(|_| ValidationError {
+            offset: ByteOffset(offset),
+            function: None,
+            kind: ValidationErrorKind::ResourceLimitExceeded {
+                what: "export names",
+            },
+        })?;
+        let position = match names.binary_search(&name) {
+            Ok(_) => {
+                return Err(ValidationError {
+                    offset: ByteOffset(offset),
+                    function: None,
+                    kind: ValidationErrorKind::DuplicateExportName {
+                        name: export.name.clone(),
+                    },
+                });
+            }
+            Err(position) => position,
+        };
+        names.insert(position, name);
 
         match export.desc {
             ExportDesc::Func(idx) => {
@@ -1176,7 +1218,14 @@ fn validate_function(
         "function result types",
         &ty.results,
     )?;
-    let mut state = ValidationState::new(locals, local_inits, result_types);
+    let mut state =
+        ValidationState::new(locals, local_inits, result_types).ok_or(ValidationError {
+            offset: ByteOffset(code.body_offset),
+            function: Some(function),
+            kind: ValidationErrorKind::ResourceLimitExceeded {
+                what: "block frame",
+            },
+        })?;
 
     for decoded in &instrs {
         validate_instr(module, function, decoded, &mut state)?;
@@ -1328,7 +1377,7 @@ fn validate_instr(
                 });
             }
             for ty in &start_types {
-                state.operands.push(*ty);
+                push_operand(function, offset, state, OperandType::Typed(*ty))?;
             }
             let floor = state.operands.len();
             let frame = state.current_frame_mut();
@@ -1393,7 +1442,12 @@ fn validate_instr(
             }
         }
         Instr::Br(label) => {
-            let label_types = validate_label(function, state, *label, offset)?.to_vec();
+            let label_types = copy_valtypes_fallible(
+                function,
+                offset,
+                "branch label types",
+                validate_label(function, state, *label, offset)?,
+            )?;
             pop_branch_types(module, function, state, *label, &label_types, offset)?;
             state.enter_unreachable();
         }
@@ -1406,26 +1460,46 @@ fn validate_instr(
                 offset,
                 "br_if",
             )?;
-            let label_types = validate_label(function, state, *label, offset)?.to_vec();
+            let label_types = copy_valtypes_fallible(
+                function,
+                offset,
+                "branch label types",
+                validate_label(function, state, *label, offset)?,
+            )?;
             pop_branch_types(module, function, state, *label, &label_types, offset)?;
             for ty in label_types {
-                state.operands.push(ty);
+                push_operand(function, offset, state, OperandType::Typed(ty))?;
             }
         }
         Instr::BrOnNull(label) => {
-            let label_types = validate_label(function, state, *label, offset)?.to_vec();
+            let label_types = copy_valtypes_fallible(
+                function,
+                offset,
+                "branch label types",
+                validate_label(function, state, *label, offset)?,
+            )?;
             let found = pop_ref_type(function, state, offset, "br_on_null")?;
             pop_branch_types(module, function, state, *label, &label_types, offset)?;
             for ty in label_types {
-                state.operands.push(ty);
+                push_operand(function, offset, state, OperandType::Typed(ty))?;
             }
             match found {
-                Some(found) => state.operands.push(ValType::Ref(found.as_non_null())),
-                None => state.operands.push_bottom(),
+                Some(found) => push_operand(
+                    function,
+                    offset,
+                    state,
+                    OperandType::Typed(ValType::Ref(found.as_non_null())),
+                )?,
+                None => push_operand(function, offset, state, OperandType::Bottom)?,
             }
         }
         Instr::BrOnNonNull(label) => {
-            let label_types = validate_label(function, state, *label, offset)?.to_vec();
+            let label_types = copy_valtypes_fallible(
+                function,
+                offset,
+                "branch label types",
+                validate_label(function, state, *label, offset)?,
+            )?;
             let Some((ValType::Ref(expected), rest)) = label_types.split_last() else {
                 return Err(ValidationError {
                     offset: ByteOffset(offset),
@@ -1453,7 +1527,7 @@ fn validate_instr(
             }
             pop_branch_types(module, function, state, *label, rest, offset)?;
             for ty in rest {
-                state.operands.push(*ty);
+                push_operand(function, offset, state, OperandType::Typed(*ty))?;
             }
         }
         Instr::BrTable { targets, default } => {
@@ -1465,7 +1539,12 @@ fn validate_instr(
                 offset,
                 "br_table",
             )?;
-            let default_types = validate_label(function, state, *default, offset)?.to_vec();
+            let default_types = copy_valtypes_fallible(
+                function,
+                offset,
+                "branch label types",
+                validate_label(function, state, *default, offset)?,
+            )?;
             // Every target must agree on arity; the operand must be a
             // subtype of each target's label types (they need not be
             // identical — the join is the operand's own type).
@@ -1514,7 +1593,7 @@ fn validate_instr(
             let ty = resolve_func_type(module, *idx, function, offset)?;
             pop_exact(module, function, state, &ty.params, offset)?;
             for result in &ty.results {
-                state.operands.push(*result);
+                push_operand(function, offset, state, OperandType::Typed(*result))?;
             }
         }
         Instr::ReturnCall(idx) => {
@@ -1538,7 +1617,7 @@ fn validate_instr(
             )?;
             pop_exact(module, function, state, &ty.params, offset)?;
             for result in &ty.results {
-                state.operands.push(*result);
+                push_operand(function, offset, state, OperandType::Typed(*result))?;
             }
         }
         Instr::ReturnCallRef(type_idx) => {
@@ -1585,7 +1664,7 @@ fn validate_instr(
             )?;
             pop_exact(module, function, state, &ty.params, offset)?;
             for result in &ty.results {
-                state.operands.push(*result);
+                push_operand(function, offset, state, OperandType::Typed(*result))?;
             }
         }
         Instr::ReturnCallIndirect {
@@ -1632,9 +1711,13 @@ fn validate_instr(
             let rhs = pop_operand_type(function, state, offset, "select")?;
             let lhs = pop_operand_type(function, state, offset, "select")?;
             match (lhs, rhs) {
-                (OperandType::Bottom, OperandType::Bottom) => state.operands.push_bottom(),
+                (OperandType::Bottom, OperandType::Bottom) => {
+                    push_operand(function, offset, state, OperandType::Bottom)?
+                }
                 (OperandType::Bottom, OperandType::Typed(rhs))
-                | (OperandType::Typed(rhs), OperandType::Bottom) => state.operands.push(rhs),
+                | (OperandType::Typed(rhs), OperandType::Bottom) => {
+                    push_operand(function, offset, state, OperandType::Typed(rhs))?
+                }
                 (OperandType::Typed(lhs), OperandType::Typed(rhs)) => {
                     if lhs != rhs {
                         return Err(ValidationError {
@@ -1658,7 +1741,7 @@ fn validate_instr(
                             },
                         });
                     }
-                    state.operands.push(lhs);
+                    push_operand(function, offset, state, OperandType::Typed(lhs))?;
                 }
             }
         }
@@ -1695,7 +1778,7 @@ fn validate_instr(
                     },
                 });
             }
-            state.operands.push(expected);
+            push_operand(function, offset, state, OperandType::Typed(expected))?;
         }
         Instr::LocalGet(idx) => {
             let ty = *state.locals.get(idx.0 as usize).ok_or(ValidationError {
@@ -1715,7 +1798,7 @@ fn validate_instr(
                     kind: ValidationErrorKind::UninitializedLocal { idx: *idx },
                 });
             }
-            state.operands.push(ty);
+            push_operand(function, offset, state, OperandType::Typed(ty))?;
         }
         Instr::LocalSet(idx) => {
             let ty = *state.locals.get(idx.0 as usize).ok_or(ValidationError {
@@ -1734,11 +1817,11 @@ fn validate_instr(
             })?;
             pop_expect(module, function, state, ty, offset, "local.tee")?;
             state.local_inits[idx.0 as usize] = true;
-            state.operands.push(ty);
+            push_operand(function, offset, state, OperandType::Typed(ty))?;
         }
         Instr::GlobalGet(idx) => {
             let ty = resolve_global_type(module, *idx, function, offset)?;
-            state.operands.push(ty.val_type);
+            push_operand(function, offset, state, OperandType::Typed(ty.val_type))?;
         }
         Instr::GlobalSet(idx) => {
             let ty = resolve_global_type(module, *idx, function, offset)?;
@@ -1761,7 +1844,12 @@ fn validate_instr(
                 offset,
                 "table.get",
             )?;
-            state.operands.push(ValType::Ref(ty.elem));
+            push_operand(
+                function,
+                offset,
+                state,
+                OperandType::Typed(ValType::Ref(ty.elem)),
+            )?;
         }
         Instr::TableSet(idx) => {
             let ty = resolve_table_type_with_context(module, *idx, Some(function), offset)?;
@@ -2512,11 +2600,21 @@ fn validate_instr(
                 offset,
                 "table.grow",
             )?;
-            state.operands.push(ValType::Num(addr_ty));
+            push_operand(
+                function,
+                offset,
+                state,
+                OperandType::Typed(ValType::Num(addr_ty)),
+            )?;
         }
         Instr::TableSize(idx) => {
             let ty = resolve_table_type_with_context(module, *idx, Some(function), offset)?;
-            state.operands.push(ValType::Num(addr_num_type(&ty.limits)));
+            push_operand(
+                function,
+                offset,
+                state,
+                OperandType::Typed(ValType::Num(addr_num_type(&ty.limits))),
+            )?;
         }
         Instr::TableFill(idx) => {
             let ty = resolve_table_type_with_context(module, *idx, Some(function), offset)?;
@@ -2549,9 +2647,12 @@ fn validate_instr(
         }
         Instr::MemorySize(idx) => {
             let mem_type = resolve_memory_type(module, *idx, function, offset)?;
-            state
-                .operands
-                .push(ValType::Num(addr_num_type(&mem_type.limits)));
+            push_operand(
+                function,
+                offset,
+                state,
+                OperandType::Typed(ValType::Num(addr_num_type(&mem_type.limits))),
+            )?;
         }
         Instr::MemoryGrow(idx) => {
             let mem_type = resolve_memory_type(module, *idx, function, offset)?;
@@ -2564,25 +2665,45 @@ fn validate_instr(
                 offset,
                 "memory.grow",
             )?;
-            state.operands.push(ValType::Num(addr_ty));
+            push_operand(
+                function,
+                offset,
+                state,
+                OperandType::Typed(ValType::Num(addr_ty)),
+            )?;
         }
-        Instr::I32Const(_) => state
-            .operands
-            .push(ValType::Num(crate::types::NumType::I32)),
-        Instr::I64Const(_) => state
-            .operands
-            .push(ValType::Num(crate::types::NumType::I64)),
-        Instr::F32Const(_) => state
-            .operands
-            .push(ValType::Num(crate::types::NumType::F32)),
-        Instr::F64Const(_) => state
-            .operands
-            .push(ValType::Num(crate::types::NumType::F64)),
+        Instr::I32Const(_) => push_operand(
+            function,
+            offset,
+            state,
+            OperandType::Typed(ValType::Num(crate::types::NumType::I32)),
+        )?,
+        Instr::I64Const(_) => push_operand(
+            function,
+            offset,
+            state,
+            OperandType::Typed(ValType::Num(crate::types::NumType::I64)),
+        )?,
+        Instr::F32Const(_) => push_operand(
+            function,
+            offset,
+            state,
+            OperandType::Typed(ValType::Num(crate::types::NumType::F32)),
+        )?,
+        Instr::F64Const(_) => push_operand(
+            function,
+            offset,
+            state,
+            OperandType::Typed(ValType::Num(crate::types::NumType::F64)),
+        )?,
         Instr::RefNull(ref_type) => {
             validate_reftype_type_indices(module, *ref_type, Some(function), offset)?;
-            state
-                .operands
-                .push(normalize_valtype(module, ValType::Ref(*ref_type)));
+            push_operand(
+                function,
+                offset,
+                state,
+                OperandType::Typed(normalize_valtype(module, ValType::Ref(*ref_type))),
+            )?;
         }
         Instr::RefIsNull => validate_ref_is_null(function, state, offset)?,
         Instr::RefAsNonNull => validate_ref_as_non_null(function, state, offset)?,
@@ -2595,13 +2716,19 @@ fn validate_instr(
                     kind: ValidationErrorKind::UndeclaredFuncRef { idx: *idx },
                 });
             }
-            state
-                .operands
-                .push(ValType::Ref(RefType::concrete(false, type_idx)));
+            push_operand(
+                function,
+                offset,
+                state,
+                OperandType::Typed(ValType::Ref(RefType::concrete(false, type_idx))),
+            )?;
         }
-        Instr::V128Const(_) => state
-            .operands
-            .push(ValType::Vec(crate::types::VecType::V128)),
+        Instr::V128Const(_) => push_operand(
+            function,
+            offset,
+            state,
+            OperandType::Typed(ValType::Vec(crate::types::VecType::V128)),
+        )?,
         Instr::I8x16Splat => validate_numeric_unary(
             module,
             function,
@@ -2746,9 +2873,12 @@ fn validate_instr(
                 offset,
                 "i32x4.replace_lane",
             )?;
-            state
-                .operands
-                .push(ValType::Vec(crate::types::VecType::V128));
+            push_operand(
+                function,
+                offset,
+                state,
+                OperandType::Typed(ValType::Vec(crate::types::VecType::V128)),
+            )?;
         }
         Instr::I8x16ReplaceLane(lane) | Instr::I16x8ReplaceLane(lane) => {
             let max = if matches!(decoded.instr, Instr::I8x16ReplaceLane(_)) {
@@ -2773,9 +2903,12 @@ fn validate_instr(
                 offset,
                 "simd.replace_lane",
             )?;
-            state
-                .operands
-                .push(ValType::Vec(crate::types::VecType::V128));
+            push_operand(
+                function,
+                offset,
+                state,
+                OperandType::Typed(ValType::Vec(crate::types::VecType::V128)),
+            )?;
         }
         Instr::F32x4ReplaceLane(lane) => {
             validate_simd_lane_idx(function, offset, "f32x4.replace_lane", *lane, 3)?;
@@ -2795,9 +2928,12 @@ fn validate_instr(
                 offset,
                 "f32x4.replace_lane",
             )?;
-            state
-                .operands
-                .push(ValType::Vec(crate::types::VecType::V128));
+            push_operand(
+                function,
+                offset,
+                state,
+                OperandType::Typed(ValType::Vec(crate::types::VecType::V128)),
+            )?;
         }
         Instr::I64x2ReplaceLane(lane) => {
             validate_simd_lane_idx(function, offset, "i64x2.replace_lane", *lane, 1)?;
@@ -2817,9 +2953,12 @@ fn validate_instr(
                 offset,
                 "i64x2.replace_lane",
             )?;
-            state
-                .operands
-                .push(ValType::Vec(crate::types::VecType::V128));
+            push_operand(
+                function,
+                offset,
+                state,
+                OperandType::Typed(ValType::Vec(crate::types::VecType::V128)),
+            )?;
         }
         Instr::F64x2ReplaceLane(lane) => {
             validate_simd_lane_idx(function, offset, "f64x2.replace_lane", *lane, 1)?;
@@ -2839,9 +2978,12 @@ fn validate_instr(
                 offset,
                 "f64x2.replace_lane",
             )?;
-            state
-                .operands
-                .push(ValType::Vec(crate::types::VecType::V128));
+            push_operand(
+                function,
+                offset,
+                state,
+                OperandType::Typed(ValType::Vec(crate::types::VecType::V128)),
+            )?;
         }
         Instr::V128Not => validate_numeric_unary(
             module,
@@ -3076,9 +3218,12 @@ fn validate_instr(
                 offset,
                 "v128.bitselect",
             )?;
-            state
-                .operands
-                .push(ValType::Vec(crate::types::VecType::V128));
+            push_operand(
+                function,
+                offset,
+                state,
+                OperandType::Typed(ValType::Vec(crate::types::VecType::V128)),
+            )?;
         }
         Instr::I8x16Shuffle(lanes) => {
             if let Some(&found) = lanes.iter().find(|&&lane| lane >= 32) {
@@ -3130,9 +3275,12 @@ fn validate_instr(
                 offset,
                 "simd.shift",
             )?;
-            state
-                .operands
-                .push(ValType::Vec(crate::types::VecType::V128));
+            push_operand(
+                function,
+                offset,
+                state,
+                OperandType::Typed(ValType::Vec(crate::types::VecType::V128)),
+            )?;
         }
         Instr::V128AnyTrue
         | Instr::I8x16AllTrue
@@ -3596,9 +3744,12 @@ fn validate_instr(
                     "struct.new",
                 )?;
             }
-            state
-                .operands
-                .push(ValType::Ref(RefType::concrete(false, *type_idx)));
+            push_operand(
+                function,
+                offset,
+                state,
+                OperandType::Typed(ValType::Ref(RefType::concrete(false, *type_idx))),
+            )?;
         }
         Instr::StructNewDefault(type_idx) => {
             let fields = struct_field_types(module, function, *type_idx, offset)?;
@@ -3608,9 +3759,12 @@ fn validate_instr(
                 function,
                 offset,
             )?;
-            state
-                .operands
-                .push(ValType::Ref(RefType::concrete(false, *type_idx)));
+            push_operand(
+                function,
+                offset,
+                state,
+                OperandType::Typed(ValType::Ref(RefType::concrete(false, *type_idx))),
+            )?;
         }
         Instr::StructGet { type_idx, field } => {
             validate_gc_field_get(module, function, state, *type_idx, *field, None, offset)?;
@@ -3679,9 +3833,12 @@ fn validate_instr(
                 offset,
                 "array.new",
             )?;
-            state
-                .operands
-                .push(ValType::Ref(RefType::concrete(false, *type_idx)));
+            push_operand(
+                function,
+                offset,
+                state,
+                OperandType::Typed(ValType::Ref(RefType::concrete(false, *type_idx))),
+            )?;
         }
         Instr::ArrayNewDefault(type_idx) => {
             let field = array_field_type(module, function, *type_idx, offset)?;
@@ -3694,9 +3851,12 @@ fn validate_instr(
                 offset,
                 "array.new_default",
             )?;
-            state
-                .operands
-                .push(ValType::Ref(RefType::concrete(false, *type_idx)));
+            push_operand(
+                function,
+                offset,
+                state,
+                OperandType::Typed(ValType::Ref(RefType::concrete(false, *type_idx))),
+            )?;
         }
         Instr::ArrayNewFixed { type_idx, count } => {
             let field = array_field_type(module, function, *type_idx, offset)?;
@@ -3710,9 +3870,12 @@ fn validate_instr(
                     pop_expect(module, function, state, t, offset, "array.new_fixed")?;
                 }
             }
-            state
-                .operands
-                .push(ValType::Ref(RefType::concrete(false, *type_idx)));
+            push_operand(
+                function,
+                offset,
+                state,
+                OperandType::Typed(ValType::Ref(RefType::concrete(false, *type_idx))),
+            )?;
         }
         Instr::ArrayNewData { type_idx, data } => {
             let field = array_field_type(module, function, *type_idx, offset)?;
@@ -3740,9 +3903,12 @@ fn validate_instr(
                 offset,
                 "array.new_data",
             )?;
-            state
-                .operands
-                .push(ValType::Ref(RefType::concrete(false, *type_idx)));
+            push_operand(
+                function,
+                offset,
+                state,
+                OperandType::Typed(ValType::Ref(RefType::concrete(false, *type_idx))),
+            )?;
         }
         Instr::ArrayNewElem { type_idx, elem } => {
             let field = array_field_type(module, function, *type_idx, offset)?;
@@ -3774,9 +3940,12 @@ fn validate_instr(
                 offset,
                 "array.new_elem",
             )?;
-            state
-                .operands
-                .push(ValType::Ref(RefType::concrete(false, *type_idx)));
+            push_operand(
+                function,
+                offset,
+                state,
+                OperandType::Typed(ValType::Ref(RefType::concrete(false, *type_idx))),
+            )?;
         }
         Instr::ArrayGet(type_idx) => {
             validate_array_get(module, function, state, *type_idx, None, offset)?;
@@ -3830,9 +3999,12 @@ fn validate_instr(
                 offset,
                 "array.len",
             )?;
-            state
-                .operands
-                .push(ValType::Num(crate::types::NumType::I32));
+            push_operand(
+                function,
+                offset,
+                state,
+                OperandType::Typed(ValType::Num(crate::types::NumType::I32)),
+            )?;
         }
         Instr::ArrayFill(type_idx) => {
             let field = array_field_type(module, function, *type_idx, offset)?;
@@ -4022,9 +4194,12 @@ fn validate_instr(
                 offset,
                 "ref.i31",
             )?;
-            state
-                .operands
-                .push(ValType::Ref(RefType::from_parts(false, HeapType::I31)));
+            push_operand(
+                function,
+                offset,
+                state,
+                OperandType::Typed(ValType::Ref(RefType::from_parts(false, HeapType::I31))),
+            )?;
         }
         Instr::I31GetS | Instr::I31GetU => {
             pop_expect(
@@ -4035,9 +4210,12 @@ fn validate_instr(
                 offset,
                 "i31.get",
             )?;
-            state
-                .operands
-                .push(ValType::Num(crate::types::NumType::I32));
+            push_operand(
+                function,
+                offset,
+                state,
+                OperandType::Typed(ValType::Num(crate::types::NumType::I32)),
+            )?;
         }
         Instr::RefTest { nullable, ht } => {
             validate_reftype_type_indices(
@@ -4048,9 +4226,12 @@ fn validate_instr(
             )?;
             let operand = ValType::Ref(RefType::from_parts(true, top_of_heaptype(module, *ht)));
             pop_expect(module, function, state, operand, offset, "ref.test")?;
-            state
-                .operands
-                .push(ValType::Num(crate::types::NumType::I32));
+            push_operand(
+                function,
+                offset,
+                state,
+                OperandType::Typed(ValType::Num(crate::types::NumType::I32)),
+            )?;
         }
         Instr::RefCast { nullable, ht } => {
             validate_reftype_type_indices(
@@ -4061,18 +4242,24 @@ fn validate_instr(
             )?;
             let operand = ValType::Ref(RefType::from_parts(true, top_of_heaptype(module, *ht)));
             pop_expect(module, function, state, operand, offset, "ref.cast")?;
-            state
-                .operands
-                .push(ValType::Ref(RefType::from_parts(*nullable, *ht)));
+            push_operand(
+                function,
+                offset,
+                state,
+                OperandType::Typed(ValType::Ref(RefType::from_parts(*nullable, *ht))),
+            )?;
         }
         Instr::RefEq => {
             let eq = ValType::Ref(RefType::from_parts(true, HeapType::Eq));
             for _ in 0..2 {
                 pop_expect(module, function, state, eq, offset, "ref.eq")?;
             }
-            state
-                .operands
-                .push(ValType::Num(crate::types::NumType::I32));
+            push_operand(
+                function,
+                offset,
+                state,
+                OperandType::Typed(ValType::Num(crate::types::NumType::I32)),
+            )?;
         }
         Instr::BrOnCast {
             fail,
@@ -4091,9 +4278,12 @@ fn validate_instr(
                 offset,
                 "any.convert_extern",
             )?;
-            state
-                .operands
-                .push(ValType::Ref(RefType::from_parts(nullable, HeapType::Any)));
+            push_operand(
+                function,
+                offset,
+                state,
+                OperandType::Typed(ValType::Ref(RefType::from_parts(nullable, HeapType::Any))),
+            )?;
         }
         Instr::ExternConvertAny => {
             let nullable = pop_ref_expect_heap(
@@ -4104,10 +4294,15 @@ fn validate_instr(
                 offset,
                 "extern.convert_any",
             )?;
-            state.operands.push(ValType::Ref(RefType::from_parts(
-                nullable,
-                HeapType::Extern,
-            )));
+            push_operand(
+                function,
+                offset,
+                state,
+                OperandType::Typed(ValType::Ref(RefType::from_parts(
+                    nullable,
+                    HeapType::Extern,
+                ))),
+            )?;
         }
     }
 
@@ -4248,7 +4443,12 @@ fn validate_gc_field_get(
         offset,
         "struct.get",
     )?;
-    state.operands.push(unpacked_valtype(field_type.storage));
+    push_operand(
+        function,
+        offset,
+        state,
+        OperandType::Typed(unpacked_valtype(field_type.storage)),
+    )?;
     Ok(())
 }
 
@@ -4288,7 +4488,12 @@ fn validate_array_get(
         offset,
         "array.get",
     )?;
-    state.operands.push(unpacked_valtype(field.storage));
+    push_operand(
+        function,
+        offset,
+        state,
+        OperandType::Typed(unpacked_valtype(field.storage)),
+    )?;
     Ok(())
 }
 
@@ -4302,7 +4507,7 @@ fn validate_numeric_unary(
     result: ValType,
 ) -> Result<(), ValidationError> {
     pop_expect(module, function, state, input, offset, op)?;
-    state.operands.push(result);
+    push_operand(function, offset, state, OperandType::Typed(result))?;
     Ok(())
 }
 
@@ -4317,7 +4522,7 @@ fn validate_numeric_binary(
 ) -> Result<(), ValidationError> {
     pop_expect(module, function, state, input, offset, op)?;
     pop_expect(module, function, state, input, offset, op)?;
-    state.operands.push(result);
+    push_operand(function, offset, state, OperandType::Typed(result))?;
     Ok(())
 }
 
@@ -4331,7 +4536,7 @@ fn validate_numeric_conversion(
     result: ValType,
 ) -> Result<(), ValidationError> {
     pop_expect(module, function, state, input, offset, op)?;
-    state.operands.push(result);
+    push_operand(function, offset, state, OperandType::Typed(result))?;
     Ok(())
 }
 
@@ -4341,9 +4546,12 @@ fn validate_ref_is_null(
     offset: usize,
 ) -> Result<(), ValidationError> {
     let _ = pop_ref_type(function, state, offset, "ref.is_null")?;
-    state
-        .operands
-        .push(ValType::Num(crate::types::NumType::I32));
+    push_operand(
+        function,
+        offset,
+        state,
+        OperandType::Typed(ValType::Num(crate::types::NumType::I32)),
+    )?;
     Ok(())
 }
 
@@ -4354,8 +4562,13 @@ fn validate_ref_as_non_null(
 ) -> Result<(), ValidationError> {
     let found = pop_ref_type(function, state, offset, "ref.as_non_null")?;
     match found {
-        Some(found) => state.operands.push(ValType::Ref(found.as_non_null())),
-        None => state.operands.push_bottom(),
+        Some(found) => push_operand(
+            function,
+            offset,
+            state,
+            OperandType::Typed(ValType::Ref(found.as_non_null())),
+        )?,
+        None => push_operand(function, offset, state, OperandType::Bottom)?,
     }
     Ok(())
 }
@@ -4426,7 +4639,7 @@ fn validate_load(
         offset,
         load.op,
     )?;
-    state.operands.push(load.result);
+    push_operand(function, offset, state, OperandType::Typed(load.result))?;
     Ok(())
 }
 
@@ -4485,9 +4698,12 @@ fn validate_simd_load_lane(
         offset,
         lane.op,
     )?;
-    state
-        .operands
-        .push(ValType::Vec(crate::types::VecType::V128));
+    push_operand(
+        function,
+        offset,
+        state,
+        OperandType::Typed(ValType::Vec(crate::types::VecType::V128)),
+    )?;
     Ok(())
 }
 
@@ -4572,7 +4788,12 @@ fn resolve_block_type(
             validate_valtype_type_indices(module, val, Some(function), offset)?;
             Ok(FuncType {
                 params: Vec::new(),
-                results: vec![normalize_valtype(module, val)],
+                results: single_valtype(
+                    function,
+                    offset,
+                    "block type",
+                    normalize_valtype(module, val),
+                )?,
             })
         }
         BlockType::TypeIdx(idx) => {
@@ -4997,7 +5218,12 @@ fn validate_catch(
     offset: usize,
 ) -> Result<(), ValidationError> {
     let label = crate::types::LabelIdx(catch.label);
-    let label_types = validate_label(function, state, label, offset)?.to_vec();
+    let label_types = copy_valtypes_fallible(
+        function,
+        offset,
+        "catch label types",
+        validate_label(function, state, label, offset)?,
+    )?;
     let expected: Vec<ValType> = match catch.kind {
         TryTableCatchKind::Catch | TryTableCatchKind::CatchRef => {
             let tag = catch
@@ -5006,14 +5232,26 @@ fn validate_catch(
             let (params, _results) = resolve_tag_type(module, function, tag, offset)?;
             let mut expected = params;
             if matches!(catch.kind, TryTableCatchKind::CatchRef) {
+                // The appended `exnref` is reserved fallibly rather than left
+                // to an infallible `Vec` growth (resource discipline).
+                expected.try_reserve(1).map_err(|_| ValidationError {
+                    offset: ByteOffset(offset),
+                    function: Some(function),
+                    kind: ValidationErrorKind::ResourceLimitExceeded {
+                        what: "catch clause types",
+                    },
+                })?;
                 expected.push(ValType::Ref(RefType::from_parts(false, HeapType::Exn)));
             }
             expected
         }
         TryTableCatchKind::CatchAll => Vec::new(),
-        TryTableCatchKind::CatchAllRef => {
-            vec![ValType::Ref(RefType::from_parts(false, HeapType::Exn))]
-        }
+        TryTableCatchKind::CatchAllRef => single_valtype(
+            function,
+            offset,
+            "catch clause types",
+            ValType::Ref(RefType::from_parts(false, HeapType::Exn)),
+        )?,
     };
 
     if label_types.len() != expected.len()
@@ -5140,7 +5378,7 @@ fn finish_frame(
         });
     }
     for ty in end_types {
-        state.operands.push(ty);
+        push_operand(function, offset, state, OperandType::Typed(ty))?;
     }
     // Restore the ENCLOSING frame's reachability: a block that ends inside
     // unreachable code leaves its parent unreachable (the parent's operand
@@ -5431,6 +5669,46 @@ fn pop_ref_expect_heap(
     })
 }
 
+/// Push an operand onto the validation operand stack, mapping a refused
+/// reservation into a clean [`ValidationErrorKind::ResourceLimitExceeded`]
+/// (resource discipline: never an allocation abort).
+fn push_operand(
+    function: FuncIdx,
+    offset: usize,
+    state: &mut ValidationState,
+    operand: OperandType,
+) -> Result<(), ValidationError> {
+    if state.operands.try_push(operand) {
+        Ok(())
+    } else {
+        Err(ValidationError {
+            offset: ByteOffset(offset),
+            function: Some(function),
+            kind: ValidationErrorKind::ResourceLimitExceeded {
+                what: "operand stack",
+            },
+        })
+    }
+}
+
+/// Fallibly build a single-element value-type vector (a `vec![ty]` bootstrap is
+/// an infallible allocation that aborts on allocator refusal).
+fn single_valtype(
+    function: FuncIdx,
+    offset: usize,
+    what: &'static str,
+    ty: ValType,
+) -> Result<Vec<ValType>, ValidationError> {
+    let mut out = Vec::new();
+    out.try_reserve(1).map_err(|_| ValidationError {
+        offset: ByteOffset(offset),
+        function: Some(function),
+        kind: ValidationErrorKind::ResourceLimitExceeded { what },
+    })?;
+    out.push(ty);
+    Ok(out)
+}
+
 /// Fallibly copy a slice of value types (mirrors the runtime's
 /// try_reserve-then-fill discipline). A refused reservation is a clean
 /// [`ValidationErrorKind::ResourceLimitExceeded`], never a process abort.
@@ -5530,10 +5808,15 @@ fn validate_br_on_cast(
     }
     pop_branch_types(module, function, state, label, &leading, offset)?;
     for ty in leading {
-        state.operands.push(ty);
+        push_operand(function, offset, state, OperandType::Typed(ty))?;
     }
     let fall = if fail { tgt } else { diff_reftype(src, tgt) };
-    state.operands.push(ValType::Ref(fall));
+    push_operand(
+        function,
+        offset,
+        state,
+        OperandType::Typed(ValType::Ref(fall)),
+    )?;
     Ok(())
 }
 

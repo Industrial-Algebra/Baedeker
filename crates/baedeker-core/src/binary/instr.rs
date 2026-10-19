@@ -674,6 +674,25 @@ pub fn decode_instr_sequence(bytes: &[u8], base_offset: usize) -> Result<Vec<Ins
         .map(|instrs| instrs.into_iter().map(|decoded| decoded.instr).collect())
 }
 
+/// Reserve room for one more element of `values`, growing the backing store
+/// fallibly in geometric chunks.
+///
+/// Resource discipline: a refused growth is a clean [`DecodeErrorKind::
+/// ResourceLimitExceeded`] anchored at `at`, never an allocation abort (the
+/// U3 declining-allocator sweep aborts on any infallible `Vec` growth).
+fn try_grow_for_push<T>(values: &mut Vec<T>, at: usize) -> Result<(), DecodeError> {
+    if values.len() < values.capacity() {
+        return Ok(());
+    }
+    values
+        .try_reserve(values.len().max(8))
+        .map_err(|_| DecodeError {
+            offset: ByteOffset(at),
+            context: DecodeContext::CodeSection,
+            kind: DecodeErrorKind::ResourceLimitExceeded,
+        })
+}
+
 /// Decode a function-body instruction sequence until its terminating `end`, preserving offsets.
 pub fn decode_instr_sequence_with_offsets(
     bytes: &[u8],
@@ -691,6 +710,7 @@ pub fn decode_instr_sequence_with_offsets(
             }
             Instr::End => {
                 if block_depth == 0 {
+                    try_grow_for_push(&mut instrs, base_offset + cursor.position())?;
                     instrs.push(decoded);
                     return Ok(instrs);
                 }
@@ -699,6 +719,7 @@ pub fn decode_instr_sequence_with_offsets(
             _ => {}
         }
 
+        try_grow_for_push(&mut instrs, base_offset + cursor.position())?;
         instrs.push(decoded);
 
         if cursor.is_empty() {
@@ -1637,6 +1658,7 @@ fn parse_try_table(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<TryTab
             e.offset = ByteOffset(base_offset + label_pos);
             e
         })?;
+        try_grow_for_push(&mut catches, base_offset + cursor.position())?;
         catches.push(TryTableCatch { kind, tag, label });
     }
     Ok(TryTable {

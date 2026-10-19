@@ -31,12 +31,20 @@
 //! refusal (56 bytes for the reviewer's probe at both arities). The
 //! single-clause `try_table` modules below cover the changed catch paths.
 //!
+//! The 2026-10-19 follow-up sweep (below) fallibilized every remaining
+//! allocation on the `Module::validate` + `Module::lower` path — operand,
+//! control, and register stacks grow in try-reserved geometric chunks;
+//! block/frame bootstraps use fallible constructors; every module-scaled
+//! vector reserves before it is filled. Every refusal index in every config
+//! this file pins now clean-refuses.
+//!
 //! This file owns a failing global allocator, so it contains only these
 //! tests. The refusal sweep runs each allocation index in a child process so
 //! a regression that aborts is observed as a failed child rather than killing
 //! the parent.
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::ops::RangeInclusive;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -295,82 +303,60 @@ fn run_try_lower_child(target: usize, level: &str) -> String {
 
 // ── pinned refusal windows ──────────────────────────────────────────
 //
-// Each window covers the former clone allocation and the module-scaled
-// bookkeeping that replaced it. Indices are 1-based offsets from the first
-// allocation after decoding, pinned empirically for these exact modules: the
-// windows shift with result arity because decoding a larger result list
-// allocates more.
+// Indices are 1-based offsets from the first allocation after decoding,
+// pinned empirically for these exact modules: the windows shift with result
+// arity because decoding a larger result list allocates more.
 //
-// Every index in a window is asserted not to abort. Indices listed as
-// `clean` additionally must surface a `ResourceLimitExceeded` (the fallible
-// reservation that now replaces the clone); indices listed only in the
-// window were consumed by the fix (`mem::take` / moved data) and therefore no
-// longer exist, so refusing them is a clean no-op.
+// The 2026-10-19 sweep fallibilized *every* allocation on the
+// `Module::validate` + `Module::lower` path (operand/control/register stacks
+// grow in try-reserved geometric chunks, block and frame bootstraps use
+// fallible constructors, every module-scaled vector reserves before filling).
+// Each config below therefore clean-refuses at *every* allocation index, so
+// the windows are the full contiguous index range and the `clean` list is the
+// same range: every index in a window must surface a `ResourceLimitExceeded`
+// and none may abort. `M` is the number of allocations the config performs —
+// larger refused indices are past the allocation count and are a clean no-op.
 
-/// Validation window for the reviewer's arity-1 module: the fallible
-/// `br_on_cast` copies plus the former `finish_frame` clone index (19).
-const VALIDATE_WINDOW_ARITY1: &[usize] = &[16, 17, 18, 19];
-const VALIDATE_CLEAN_ARITY1: &[usize] = &[16, 17];
+/// Validation window for the reviewer's arity-1 module.
+const VALIDATE_WINDOW_ARITY1: RangeInclusive<usize> = 1..=14;
+const VALIDATE_CLEAN_ARITY1: RangeInclusive<usize> = VALIDATE_WINDOW_ARITY1;
 
-/// Validation window for arity 512: the fallible copies plus the former
-/// `finish_frame` clone index (42).
-const VALIDATE_WINDOW_ARITY512: &[usize] = &[38, 39, 40, 41, 42];
-const VALIDATE_CLEAN_ARITY512: &[usize] = &[38, 39, 40];
+/// Validation window for arity 512.
+const VALIDATE_WINDOW_ARITY512: RangeInclusive<usize> = 1..=35;
+const VALIDATE_CLEAN_ARITY512: RangeInclusive<usize> = VALIDATE_WINDOW_ARITY512;
 
-/// Lowering window for arity 1: the function-setup copies, the
-/// `br_on_cast` lowering copies, the block result registers, the
-/// function-end result copies, the control-block / lowered-function
-/// reservations, and the fallible `register type table` reservation. The
-/// block-close `pending_branches` replacement vector (former index 37) is
-/// now eliminated in place, so refusing that index rolls to the `function
-/// result types` reservation; every window index at or after 37 shifted
-/// down by one relative to the pre-elimination pinning.
-const LOWER_WINDOW_ARITY1: &[usize] = &[
-    21, 22, 23, 24, 25, 26, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41,
-];
-const LOWER_CLEAN_ARITY1: &[usize] = LOWER_WINDOW_ARITY1;
-
-/// Lowering window for arity 512: the validation `br_on_cast` copies, the
-/// function-setup copies, the lowering `br_on_cast` copies, the block result
+/// Lowering window for arity 1: validation's reservations plus the
+/// function-setup copies, the `br_on_cast` lowering copies, the block result
 /// registers, the function-end result copies, the control-block /
-/// lowered-function reservations, the fallible `register type table`
-/// reservation, and the former block-close clone index (now beyond the
-/// allocation count, so refusing it is a clean no-op). The block-close
-/// `pending_branches` replacement vector (former index 91) is now
-/// eliminated in place, so refusing that index rolls to the `function
-/// result types` reservation; every window index at or after 91 shifted
-/// down by one relative to the pre-elimination pinning.
-const LOWER_WINDOW_ARITY512: &[usize] = &[
-    38, 39, 40, 51, 52, 53, 54, 55, 56, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 111,
-];
-const LOWER_CLEAN_ARITY512: &[usize] = &[
-    38, 39, 40, 51, 52, 53, 54, 55, 56, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94,
-];
+/// lowered-function reservations, and the `register type table` reservation.
+const LOWER_WINDOW_ARITY1: RangeInclusive<usize> = 1..=44;
+const LOWER_CLEAN_ARITY1: RangeInclusive<usize> = LOWER_WINDOW_ARITY1;
+
+/// Lowering window for arity 512: the same sites, with the result-list sizes
+/// (and therefore the number of allocations) scaled by the arity.
+const LOWER_WINDOW_ARITY512: RangeInclusive<usize> = 1..=93;
+const LOWER_CLEAN_ARITY512: RangeInclusive<usize> = LOWER_WINDOW_ARITY512;
 
 /// `try_table` catch window. Each single-clause module exercises one of the
-/// block-close / function-end `pending_catches` processing paths that were
-/// changed from a module-sized replacement vector to in-place processing.
-/// Indices are the post-elimination positions of the removed vectors (which
-/// now fall on fallible reservations):
-///
-/// * `block` module: index 39 is the `try_table` frame's `end` (where the
-///   pending catch does not yet match the frame and is retained) and index
-///   42 is the targeted block's `end` (where it matches and is processed);
-///   both now land on the fallible `control blocks` / `catch landing
-///   registers` reservations.
-/// * `func` module: index 41 is the function-end path; it now lands on the
-///   fallible `catch landing registers` reservation.
-const TRY_TABLE_BLOCK_WINDOW: &[usize] = &[39, 42];
-const TRY_TABLE_FUNC_WINDOW: &[usize] = &[41];
+/// block-close / function-end `pending_catches` processing paths, including
+/// the fallible `catch landing registers` / `catch value types` reservations.
+const TRY_TABLE_BLOCK_WINDOW: RangeInclusive<usize> = 1..=51;
+const TRY_TABLE_FUNC_WINDOW: RangeInclusive<usize> = 1..=47;
 
-/// Local-heavy `local_inits` window: the `local-init flags` flag vector and
-/// the two `block frame` reservations (the frame's local-init snapshot).
-const LOCAL_WINDOW: &[usize] = &[10, 14, 15];
+/// Local-heavy `local_inits` window: the `local-init flags` flag vector, the
+/// `block frame` reservations (the frame's local-init snapshot), and the
+/// operand-stack chunk growth.
+const LOCAL_WINDOW: RangeInclusive<usize> = 1..=15;
 
 /// Sweep `window` for `form`, asserting no index aborts; additionally assert
 /// every index in `clean` clean-refuses.
-fn assert_validate_window(arity: usize, form: &str, window: &[usize], clean: &[usize]) {
-    for &target in window {
+fn assert_validate_window(
+    arity: usize,
+    form: &str,
+    window: &RangeInclusive<usize>,
+    clean: &RangeInclusive<usize>,
+) {
+    for target in window.clone() {
         let stderr = run_validate_child(target, arity, form, 0);
         if clean.contains(&target) {
             assert!(
@@ -382,8 +368,13 @@ fn assert_validate_window(arity: usize, form: &str, window: &[usize], clean: &[u
     }
 }
 
-fn assert_lower_window(arity: usize, form: &str, window: &[usize], clean: &[usize]) {
-    for &target in window {
+fn assert_lower_window(
+    arity: usize,
+    form: &str,
+    window: &RangeInclusive<usize>,
+    clean: &RangeInclusive<usize>,
+) {
+    for target in window.clone() {
         let stderr = run_lower_child(target, arity, form);
         if clean.contains(&target) {
             assert!(
@@ -396,47 +387,52 @@ fn assert_lower_window(arity: usize, form: &str, window: &[usize], clean: &[usiz
 }
 
 /// `finish_frame` no longer clones the module-sized `ControlFrame`: refusing
-/// either the fallible copies or the clone's former index (arity 1 index 19,
-/// arity 512 index 42) never terminates the process.
+/// any of the validator's reservations on this module (every allocation index
+/// is fallibly reserved) never terminates the process and always surfaces a
+/// clean `ResourceLimitExceeded`.
 #[test]
 fn finish_frame_refusal_windows_are_clean() {
     for form in ["cast", "fail"] {
-        assert_validate_window(1, form, VALIDATE_WINDOW_ARITY1, VALIDATE_CLEAN_ARITY1);
-        assert_validate_window(512, form, VALIDATE_WINDOW_ARITY512, VALIDATE_CLEAN_ARITY512);
+        assert_validate_window(1, form, &VALIDATE_WINDOW_ARITY1, &VALIDATE_CLEAN_ARITY1);
+        assert_validate_window(
+            512,
+            form,
+            &VALIDATE_WINDOW_ARITY512,
+            &VALIDATE_CLEAN_ARITY512,
+        );
     }
 }
 
 /// The lowering block-close no longer clones the frame's module-sized
 /// `result_types` (r2) and no longer allocates a `pending_branches`
-/// replacement vector (r3): refusing the block result-register reservation,
-/// the control-block/func reservations, the `pending_branches` vector's
-/// former index (arity 1 index 37 -> the fallible `function result types`
-/// reservation; arity 512 index 91 -> the same reservation), or the r2
-/// clone's former position (arity 1 index 41 -> the fallible `register type
-/// table` reservation; arity 512 index 111 -> beyond the allocation count)
-/// never terminates the process.
+/// replacement vector (r3). Every allocation the validate + lower path makes
+/// for this module — validation reservations, the block result-register
+/// reservation, the control-block/func reservations, and the `register type
+/// table` reservation — is fallibly reserved, so refusing any index never
+/// terminates the process and always surfaces a clean `ResourceLimitExceeded`.
 #[test]
 fn block_close_refusal_windows_are_clean() {
     for form in ["cast", "fail"] {
-        assert_lower_window(1, form, LOWER_WINDOW_ARITY1, LOWER_CLEAN_ARITY1);
-        assert_lower_window(512, form, LOWER_WINDOW_ARITY512, LOWER_CLEAN_ARITY512);
+        assert_lower_window(1, form, &LOWER_WINDOW_ARITY1, &LOWER_CLEAN_ARITY1);
+        assert_lower_window(512, form, &LOWER_WINDOW_ARITY512, &LOWER_CLEAN_ARITY512);
     }
 }
 
 /// The `try_table` pending-catch vectors no longer allocate a replacement
-/// `Vec`: refusing the former replacement-vector indices (or the fallible
-/// reservations that now occupy those positions) never terminates the
-/// process, for both the block-close and function-end catch paths.
+/// `Vec`: refusing any allocation index on the lowering path (including the
+/// fallible `catch landing registers` and `catch value types` reservations)
+/// never terminates the process, for both the block-close and function-end
+/// catch paths.
 #[test]
 fn pending_catch_refusal_windows_are_clean() {
-    for &target in TRY_TABLE_BLOCK_WINDOW {
+    for target in TRY_TABLE_BLOCK_WINDOW.clone() {
         let stderr = run_try_lower_child(target, "block");
         assert!(
             stderr.contains("CLEAN_REFUSAL"),
             "try_table block allocation {target} should clean-refuse, saw:\n{stderr}"
         );
     }
-    for &target in TRY_TABLE_FUNC_WINDOW {
+    for target in TRY_TABLE_FUNC_WINDOW.clone() {
         let stderr = run_try_lower_child(target, "func");
         assert!(
             stderr.contains("CLEAN_REFUSAL"),
@@ -445,11 +441,12 @@ fn pending_catch_refusal_windows_are_clean() {
     }
 }
 
-/// A 1024-local module exercises the `local_inits` copies; refusing the flag
-/// vector or either block-frame reservation clean-refuses.
+/// A 1024-local module exercises the `local_inits` copies; refusing any
+/// allocation index on the validation path (the flag vector, either
+/// block-frame reservation, or the operand-stack chunk growth) clean-refuses.
 #[test]
 fn local_heavy_local_inits_refusal_window_is_clean() {
-    for &target in LOCAL_WINDOW {
+    for target in LOCAL_WINDOW.clone() {
         let stderr = run_validate_child(target, 1, "cast", 1024);
         assert!(
             stderr.contains("CLEAN_REFUSAL"),

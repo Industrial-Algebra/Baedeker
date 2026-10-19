@@ -136,6 +136,7 @@ fn validation_kind_name(kind: &ValidationErrorKind) -> &'static str {
 fn decode_kind_name(kind: &DecodeErrorKind) -> &'static str {
     match kind {
         DecodeErrorKind::UnexpectedEof => "UnexpectedEof",
+        DecodeErrorKind::ResourceLimitExceeded => "ResourceLimitExceeded",
         DecodeErrorKind::InvalidMagic => "InvalidMagic",
         DecodeErrorKind::UnsupportedVersion { .. } => "UnsupportedVersion",
         DecodeErrorKind::Leb128TooLong => "Leb128TooLong",
