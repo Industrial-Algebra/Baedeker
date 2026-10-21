@@ -183,9 +183,33 @@ pub struct GcHeap {
     /// walk them without allocating.
     ancestries: Vec<Vec<GcTypeId>>,
     allocations: u64,
+    /// Incrementally maintained logical live bytes (same formula `stats()`
+    /// reports), so the optional [`Self::byte_limit`] can be enforced in
+    /// O(1) per allocation instead of rescanning the heap.
+    live_bytes: u64,
+    /// Optional engine-level cap on LOGICAL live bytes (the articles'
+    /// structured-refusal grading; `set_byte_limit`). A request that would
+    /// exceed it refuses exactly like a platform allocation refusal —
+    /// same error kind, heap untouched — on every platform (rlimits are
+    /// not portable: macOS does not enforce RLIMIT_AS usefully, which
+    /// OOM-killed the article children on hosted MacCloud runners).
+    byte_limit: Option<u64>,
 }
 
 impl GcHeap {
+    /// Set (or clear) the engine-level cap on logical live bytes. Requests
+    /// that would exceed it refuse as `ResourceLimitExceeded` (state
+    /// untouched). See [`Self::byte_limit`].
+    pub fn set_byte_limit(&mut self, limit: Option<u64>) {
+        self.byte_limit = limit;
+    }
+
+    /// Refuse (true) when adding `request_bytes` to the live set would
+    /// exceed the configured cap. O(1); no state touched.
+    fn exceeds_byte_limit(&self, request_bytes: u64) -> bool {
+        self.byte_limit
+            .is_some_and(|limit| self.live_bytes.saturating_add(request_bytes) > limit)
+    }
     /// An empty heap with a fresh process-unique identity.
     pub fn new() -> Self {
         Self {
@@ -195,6 +219,8 @@ impl GcHeap {
             type_ids: Vec::new(),
             ancestries: Vec::new(),
             allocations: 0,
+            live_bytes: 0,
+            byte_limit: None,
         }
     }
 
@@ -425,6 +451,10 @@ impl GcHeap {
         // Try-reserve the payload BEFORE building, then fill. Borrow the
         // layout only for the duration of the fill so `kind` can move into
         // interning afterwards (no infallible clone).
+        let request_bytes = kind.logical_bytes(0);
+        if self.exceeds_byte_limit(request_bytes) {
+            return Err(alloc_failed());
+        }
         let mut stored: Vec<Value> = Vec::new();
         match &kind {
             GcTypeKind::Struct(field_types) => {
@@ -448,6 +478,7 @@ impl GcHeap {
             fields: stored,
         });
         self.allocations += 1;
+        self.live_bytes += request_bytes;
         Ok(id)
     }
 
@@ -486,6 +517,10 @@ impl GcHeap {
             GcTypeKind::Struct(_) => return Err(alloc_failed()),
         };
         let count = len as usize;
+        let request_bytes = kind.logical_bytes(len);
+        if self.exceeds_byte_limit(request_bytes) {
+            return Err(alloc_failed());
+        }
         // Count-first: a deterministic platform-independent bound, then
         // payload capacity, then the table slot; only then intern and
         // materialize. A refusal leaves everything untouched.
@@ -508,6 +543,7 @@ impl GcHeap {
             elems,
         });
         self.allocations += 1;
+        self.live_bytes += request_bytes;
         Ok(id)
     }
 
@@ -541,6 +577,10 @@ impl GcHeap {
             GcTypeKind::Array(field) => *field,
             GcTypeKind::Struct(_) => return Err(alloc_failed()),
         };
+        let request_bytes = kind.logical_bytes(elems.len() as u32);
+        if self.exceeds_byte_limit(request_bytes) {
+            return Err(alloc_failed());
+        }
         let mut stored: Vec<Value> = Vec::new();
         stored
             .try_reserve(elems.len())
@@ -561,6 +601,7 @@ impl GcHeap {
             elems: stored,
         });
         self.allocations += 1;
+        self.live_bytes += request_bytes;
         Ok(id)
     }
 
@@ -579,6 +620,14 @@ impl GcHeap {
             Some(GcTypeKind::Struct(fields)) => fields.as_slice(),
             _ => return Err(alloc_failed()),
         };
+        let request_bytes = 8u64
+            + storages
+                .iter()
+                .map(|field| storage_width(field.storage))
+                .sum::<u64>();
+        if self.exceeds_byte_limit(request_bytes) {
+            return Err(alloc_failed());
+        }
         for (slot, field) in values.iter_mut().zip(storages) {
             *slot = pack_field(field.storage, *slot);
         }
@@ -589,6 +638,7 @@ impl GcHeap {
             fields: values,
         });
         self.allocations += 1;
+        self.live_bytes += request_bytes;
         Ok(id)
     }
 
@@ -607,6 +657,10 @@ impl GcHeap {
             _ => return Err(alloc_failed()),
         };
         let count = len as usize;
+        let request_bytes = 12u64 + storage_width(storage) * count as u64;
+        if self.exceeds_byte_limit(request_bytes) {
+            return Err(alloc_failed());
+        }
         let mut elems: Vec<Value> = Vec::new();
         elems.try_reserve(count).map_err(|_| alloc_failed())?;
         self.objects.try_reserve(1).map_err(|_| alloc_failed())?;

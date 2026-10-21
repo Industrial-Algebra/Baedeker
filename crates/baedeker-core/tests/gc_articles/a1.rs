@@ -193,7 +193,7 @@ fn a1_child() {
     // killed by the platform (MacCloud runner incidents), the marker tells
     // us whether it died before or mid-work.
     child_marker("article=a1-capped started=1");
-    let capped = crate::harness::process_is_capped();
+    let capped = crate::harness::apply_engine_cap(&store);
 
     // Pressure phase: 10⁷ pairs under the cap, chunked across calls so the
     // engine's per-call backstop is never the thing that stops it. When NO

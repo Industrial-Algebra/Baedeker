@@ -20,8 +20,8 @@
 use baedeker_core::runtime::{Value, execute_export};
 
 use crate::harness::{
-    CHUNK, article_count, child_marker, child_stats, instantiate, is_child, is_refusal,
-    process_is_capped, spawn_capped_child, yes_no,
+    CHUNK, apply_engine_cap, article_count, child_marker, child_stats, instantiate, is_child,
+    is_refusal, spawn_capped_child, yes_no,
 };
 
 const SOURCE: &str = r#"
@@ -66,7 +66,7 @@ fn a2b_child() {
     // killed by the platform (MacCloud runner incidents), the marker tells
     // us whether it died before or mid-work.
     child_marker("article=a2b-capped started=1");
-    let capped = process_is_capped();
+    let capped = apply_engine_cap(&store);
 
     // Provisioned base: a real workload before the caps make themselves felt,
     // so "state untouched" is graded against non-trivial prior state. Kept

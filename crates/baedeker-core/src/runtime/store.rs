@@ -1841,6 +1841,15 @@ impl Store {
         self.gc_heap.borrow().stats()
     }
 
+    /// Set (or clear) the engine-level cap on the store's GC heap's
+    /// LOGICAL live bytes: requests that would exceed it refuse as
+    /// `ResourceLimitExceeded` with the heap untouched — portable
+    /// structured refusal, independent of platform rlimits (macOS does
+    /// not enforce RLIMIT_AS usefully).
+    pub fn set_gc_heap_byte_limit(&self, limit: Option<u64>) {
+        self.gc_heap.borrow_mut().set_byte_limit(limit);
+    }
+
     /// A GC allocation snapshot for `allocations_since`.
     pub fn gc_snapshot(&self) -> GcSnapshot {
         self.gc_heap.borrow().snapshot()

@@ -124,7 +124,14 @@ pub fn memory_pages(store: &Store, index: u32) -> u64 {
 /// The cap applied to the child process (address space, KiB). Documented at
 /// each capped article: the design's 48/64 MiB smoke, with 64 MiB used as the
 /// executable point (a Rust test binary's own address space needs headroom).
-pub const CHILD_CAP_KIB: u64 = 65_536;
+/// Engine-level GC heap byte cap for capped children (logical bytes; the
+/// A2b-style structured-refusal grading). Replaces the old `ulimit -v`
+/// approach: macOS does not enforce RLIMIT_AS usefully, which let children
+/// believe themselves capped and still get OOM-killed by the hosted
+/// MacCloud monitor (three CI incidents). The engine cap is identical on
+/// every platform.
+pub const CHILD_CAP_BYTES: u64 = 32 * 1024 * 1024;
+pub const CHILD_CAP_ENV: &str = "GC_ARTICLE_CHILD_CAP_BYTES";
 
 /// Print a child marker line.
 pub fn child_marker(line: &str) {
@@ -149,12 +156,17 @@ pub fn is_refusal(error: &RuntimeError) -> bool {
     matches!(error.kind, RuntimeErrorKind::ResourceLimitExceeded { .. })
 }
 
-/// Probe whether this process is actually memory-capped: reserve (never touch)
-/// 256 MiB on the heap. Under a 64 MiB address-space cap the reservation
-/// fails; an uncapped process succeeds and the buffer is dropped immediately.
-pub fn process_is_capped() -> bool {
-    let mut probe: Vec<u8> = Vec::new();
-    probe.try_reserve_exact(256 * 1024 * 1024).is_err()
+/// Apply the engine-level cap the parent requested (if any) to `store`.
+/// Returns whether a cap is in force.
+pub fn apply_engine_cap(store: &baedeker_core::runtime::Store) -> bool {
+    match std::env::var(CHILD_CAP_ENV) {
+        Ok(value) => {
+            let bytes: u64 = value.parse().expect("cap bytes parse");
+            store.set_gc_heap_byte_limit(Some(bytes));
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 /// What a capped child reported.
@@ -210,8 +222,8 @@ impl CappedOutcome {
         if self.capped {
             assert!(
                 self.pressure_refused,
-                "{article}: under a real {CHILD_CAP_KIB} KiB cap the pressure workload must be \
-                 refused, not completed; stdout:\n{}",
+                "{article}: under the {CHILD_CAP_BYTES}-byte engine cap the pressure workload \
+                 must be refused, not completed; stdout:\n{}",
                 self.stdout
             );
         } else {
@@ -226,22 +238,20 @@ impl CappedOutcome {
     }
 }
 
-/// Re-run this test binary as a child process for `test_name`, optionally under
-/// `ulimit -v`.
+/// Re-run this test binary as a child process for `test_name`, under the
+/// engine-level GC heap cap ([`CHILD_CAP_ENV`] — no platform rlimits).
 pub fn spawn_capped_child(article: &str, test_name: &str) -> CappedOutcome {
     let exe: PathBuf = std::env::current_exe().expect("current test binary");
     // `sh -c '<cap>; exec "$0" "$@"' <exe> --exact <test> …` — no shell
     // interpolation of the test name.
-    let script = format!(
-        "ulimit -v {CHILD_CAP_KIB} 2>/dev/null; exec \"$0\" --exact \"$1\" --nocapture \
-         --test-threads=1"
-    );
+    let script = "exec \"$0\" --exact \"$1\" --nocapture --test-threads=1";
     let output = Command::new("sh")
         .arg("-c")
         .arg(script)
         .arg(&exe)
         .arg(test_name)
         .env(CHILD_ENV, article)
+        .env(CHILD_CAP_ENV, CHILD_CAP_BYTES.to_string())
         .output()
         .expect("spawn article child");
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
