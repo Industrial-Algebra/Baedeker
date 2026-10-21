@@ -657,6 +657,15 @@ impl GcHeap {
             _ => return Err(alloc_failed()),
         };
         let count = len as usize;
+        // Deterministic per-allocation fill bound, BEFORE any reserve: the
+        // typed path is what module EXECUTION uses (array.new/new_default),
+        // and an overcommitting allocator (macOS) will happily reserve
+        // ~100 GiB for u32::MAX and then the fill gets the process killed.
+        // Found because gc_heap_resource sits alphabetically after
+        // gc_articles, so every earlier macOS CI death masked this site.
+        if !array_fill_within_bound(count) {
+            return Err(alloc_failed());
+        }
         let request_bytes = 12u64 + storage_width(storage) * count as u64;
         if self.exceeds_byte_limit(request_bytes) {
             return Err(alloc_failed());
@@ -959,6 +968,23 @@ mod tests {
         let kind = GcTypeKind::Array(f(StorageType::Val(ValType::Ref(RefType::FuncRef))));
         assert!(
             heap.alloc_array(kind, u32::MAX, Value::FuncRef(None))
+                .is_err()
+        );
+        assert_eq!(heap.stats(), before);
+    }
+
+    #[test]
+    fn huge_typed_array_fill_refuses_before_reserve() {
+        // The TYPED path (module execution: array.new/new_default) refused
+        // u32::MAX only when try_reserve failed — on overcommitting
+        // allocators that never happens and the fill kills the process
+        // (macOS CI: 42 s of writing into a ~100 GiB reservation).
+        let mut heap = GcHeap::new();
+        let kind = GcTypeKind::Array(f(StorageType::Val(ValType::Num(NumType::I32))));
+        let type_id = heap.intern_type(kind).expect("intern");
+        let before = heap.stats();
+        assert!(
+            heap.alloc_array_typed(type_id, u32::MAX, Value::I32(0))
                 .is_err()
         );
         assert_eq!(heap.stats(), before);
