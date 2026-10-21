@@ -801,8 +801,21 @@ pub fn decode_instr_with_offset(
         0x0D => Instr::BrIf(LabelIdx(decode_u32(cursor, base_offset)?)),
         0x0E => {
             let target_count = decode_u32(cursor, base_offset)?;
-            let mut targets = Vec::with_capacity(cursor.capacity_hint(target_count));
+            // Reserve the target list fallibly: instruction decoding is lazy
+            // (it runs from `validate`/`lower`), so an infallible
+            // `with_capacity` here aborts the process on allocator refusal.
+            // The hint is bounded by the remaining input because every target
+            // consumes at least one byte.
+            let mut targets = Vec::new();
+            targets
+                .try_reserve(cursor.capacity_hint(target_count))
+                .map_err(|_| DecodeError {
+                    offset: ByteOffset(base_offset + cursor.position()),
+                    context: DecodeContext::CodeSection,
+                    kind: DecodeErrorKind::ResourceLimitExceeded,
+                })?;
             for _ in 0..target_count {
+                try_grow_for_push(&mut targets, base_offset + cursor.position())?;
                 targets.push(LabelIdx(decode_u32(cursor, base_offset)?));
             }
             let default = LabelIdx(decode_u32(cursor, base_offset)?);
@@ -1567,8 +1580,20 @@ fn parse_result_types(
     base_offset: usize,
 ) -> Result<Vec<ValType>, DecodeError> {
     let count = decode_u32(cursor, base_offset)?;
-    let mut types = Vec::with_capacity(cursor.capacity_hint(count));
+    // Reserve fallibly: typed `select` reaches this helper from lazy
+    // instruction decoding (a `validate`/`lower` path), where an infallible
+    // `with_capacity` would abort on allocator refusal. The hint is bounded by
+    // the remaining input because every value type consumes at least one byte.
+    let mut types = Vec::new();
+    types
+        .try_reserve(cursor.capacity_hint(count))
+        .map_err(|_| DecodeError {
+            offset: ByteOffset(base_offset + cursor.position()),
+            context: DecodeContext::CodeSection,
+            kind: DecodeErrorKind::ResourceLimitExceeded,
+        })?;
     for _ in 0..count {
+        try_grow_for_push(&mut types, base_offset + cursor.position())?;
         types.push(parse_binary_val_type(
             cursor,
             base_offset,

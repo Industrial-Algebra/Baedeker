@@ -2160,55 +2160,60 @@ pub fn lower_module(module: &Module<'_>) -> Result<RegModule, LowerError> {
         .count() as u32;
 
     let imported_funcs = collect_imports(module, |import| match import.desc {
-        ImportDesc::Func(type_idx) => module.func_type(type_idx).map(|ty| {
-            Ok(RegImport {
-                module: import.module.clone(),
-                name: import.name.clone(),
-                ty: ty.clone(),
+        ImportDesc::Func(type_idx) => match module.func_type(type_idx) {
+            Some(ty) => Ok(Some(RegImport {
+                module: clone_string_fallible(&import.module, "import module name")?,
+                name: clone_string_fallible(&import.name, "import name")?,
+                ty: clone_func_type_fallible(ty)?,
                 type_idx,
-            })
-        }),
-        _ => None,
+            })),
+            // Validation rejects unknown type indices, so this arm is
+            // defensive only: preserve the historical skip-the-import
+            // behaviour rather than inventing a new error.
+            None => Ok(None),
+        },
+        _ => Ok(None),
     })?;
 
     let imported_memories = collect_imports(module, |import| match import.desc {
-        ImportDesc::Mem(ty) => Some(Ok(RegMemoryImport {
-            module: import.module.clone(),
-            name: import.name.clone(),
+        ImportDesc::Mem(ty) => Ok(Some(RegMemoryImport {
+            module: clone_string_fallible(&import.module, "import module name")?,
+            name: clone_string_fallible(&import.name, "import name")?,
             ty,
         })),
-        _ => None,
+        _ => Ok(None),
     })?;
 
     let imported_globals = collect_imports(module, |import| match import.desc {
-        ImportDesc::Global(ty) => Some(Ok(RegGlobalImport {
-            module: import.module.clone(),
-            name: import.name.clone(),
+        ImportDesc::Global(ty) => Ok(Some(RegGlobalImport {
+            module: clone_string_fallible(&import.module, "import module name")?,
+            name: clone_string_fallible(&import.name, "import name")?,
             ty,
         })),
-        _ => None,
+        _ => Ok(None),
     })?;
 
     let imported_tables = collect_imports(module, |import| match &import.desc {
-        ImportDesc::Table(ty) => Some(Ok(RegTableImport {
-            module: import.module.clone(),
-            name: import.name.clone(),
-            ty: ty.clone(),
+        ImportDesc::Table(ty) => Ok(Some(RegTableImport {
+            module: clone_string_fallible(&import.module, "import module name")?,
+            name: clone_string_fallible(&import.name, "import name")?,
+            ty: clone_table_type_fallible(ty)?,
         })),
-        _ => None,
+        _ => Ok(None),
     })?;
 
     let imported_tags = collect_imports(module, |import| match import.desc {
-        ImportDesc::Tag(type_idx) => module.func_type(type_idx).map(|ty| {
-            Ok(ImportedTag {
-                module: import.module.clone(),
-                name: import.name.clone(),
-                ty: ty.clone(),
+        ImportDesc::Tag(type_idx) => match module.func_type(type_idx) {
+            Some(ty) => Ok(Some(ImportedTag {
+                module: clone_string_fallible(&import.module, "import module name")?,
+                name: clone_string_fallible(&import.name, "import name")?,
+                ty: clone_func_type_fallible(ty)?,
                 type_idx,
                 rec: rec_provenance(module, type_idx)?,
-            })
-        }),
-        _ => None,
+            })),
+            None => Ok(None),
+        },
+        _ => Ok(None),
     })?;
 
     let start = module.start();
@@ -2506,6 +2511,24 @@ fn clone_subtype_fallible(ty: &SubType) -> Result<SubType, LowerError> {
         is_final: ty.is_final,
         supertypes,
         comp,
+    })
+}
+
+/// Fallibly clone a table type: its initializer expression (module-controlled
+/// bytes, present when the table carries the `0x40` init marker) is reserved
+/// before it is filled, so a refused allocation is a clean error rather than a
+/// process abort.
+fn clone_table_type_fallible(
+    ty: &crate::types::TableType,
+) -> Result<crate::types::TableType, LowerError> {
+    let init = match &ty.init {
+        Some(expr) => Some(copy_slice_fallible(expr, "table initializer expression")?),
+        None => None,
+    };
+    Ok(crate::types::TableType {
+        elem: ty.elem,
+        limits: ty.limits,
+        init,
     })
 }
 
@@ -2974,9 +2997,14 @@ fn vec_with_capacity<T>(
 
 /// Collect the imports selected by `select`, reserving the output vector
 /// fallibly up front (one entry per import is an upper bound).
+///
+/// The selector itself is fallible: every import item carries a cloned
+/// module/name pair and a cloned type entry, and those allocations are
+/// reserved with `try_reserve` before they are filled (resource discipline —
+/// a refused allocation is a clean error, never a process abort).
 fn collect_imports<T>(
     module: &Module<'_>,
-    select: impl Fn(&crate::types::Import) -> Option<Result<T, LowerError>>,
+    select: impl Fn(&crate::types::Import) -> Result<Option<T>, LowerError>,
 ) -> Result<Vec<T>, LowerError> {
     let mut out = vec_with_capacity(
         module.imports().len(),
@@ -2985,8 +3013,8 @@ fn collect_imports<T>(
         "module imports",
     )?;
     for import in module.imports() {
-        if let Some(item) = select(import) {
-            push_fallible(&mut out, item?, ByteOffset(0), None, "module imports")?;
+        if let Some(item) = select(import)? {
+            push_fallible(&mut out, item, ByteOffset(0), None, "module imports")?;
         }
     }
     Ok(out)
@@ -3546,7 +3574,11 @@ impl<'b> FuncBuilder<'b> {
                         result_types,
                         height,
                         ..
-                    }) => (*cond_block, result_types.clone(), *height),
+                    }) => (
+                        *cond_block,
+                        self.fallible_copy(offset, "else result types", result_types)?,
+                        *height,
+                    ),
                     _ => {
                         return Err(LowerError {
                             offset,
@@ -3593,7 +3625,10 @@ impl<'b> FuncBuilder<'b> {
                 self.stack.truncate(frame_height);
                 let (param_regs, param_types) = {
                     let frame = self.label_stack.last().expect("if frame checked above");
-                    (frame.param_regs.clone(), frame.param_types.clone())
+                    (
+                        self.fallible_copy(offset, "else parameter registers", &frame.param_regs)?,
+                        self.fallible_copy(offset, "else parameter types", &frame.param_types)?,
+                    )
                 };
                 for (&reg, &ty) in param_regs.iter().zip(param_types.iter()) {
                     self.push_stack(RegValue { reg, ty })?;
@@ -3617,6 +3652,7 @@ impl<'b> FuncBuilder<'b> {
                     // return registers via copies, like any other frame.
                     self.finish_block(RegTerm::Fallthrough)?;
                     let continuation_idx = self.blocks.len() as u32;
+                    let func_idx = self.func_idx;
                     for pending in core::mem::take(&mut self.pending_branches) {
                         match &mut self.blocks[pending.block].term {
                             RegTerm::Br { target_block, .. }
@@ -3642,13 +3678,19 @@ impl<'b> FuncBuilder<'b> {
                         }
                         for (dst, src) in values.iter().zip(pending.values.iter()) {
                             if dst != src {
-                                self.blocks[pending.block].instrs.push(RegInstr {
-                                    offset,
-                                    op: RegOp::Copy {
-                                        dst: *dst,
-                                        src: *src,
+                                push_fallible(
+                                    &mut self.blocks[pending.block].instrs,
+                                    RegInstr {
+                                        offset,
+                                        op: RegOp::Copy {
+                                            dst: *dst,
+                                            src: *src,
+                                        },
                                     },
-                                });
+                                    offset,
+                                    Some(func_idx),
+                                    "block branch copies",
+                                )?;
                             }
                         }
                     }
@@ -3659,7 +3701,6 @@ impl<'b> FuncBuilder<'b> {
                     // `pending_catches.len()` was an infallible,
                     // module-scaled allocation that could abort on allocator
                     // refusal.
-                    let func_idx = self.func_idx;
                     {
                         let regions = &mut self.regions;
                         for pending in &self.pending_catches {
@@ -3753,18 +3794,28 @@ impl<'b> FuncBuilder<'b> {
                     // would otherwise fall through it).
                     let body_end_idx = self.blocks.len() - 1;
                     let trampoline_idx = self.blocks.len() as u32;
-                    let instrs = values
-                        .iter()
-                        .zip(frame.param_regs.iter())
-                        .filter(|(dst, src)| dst != src)
-                        .map(|(dst, src)| RegInstr {
-                            offset,
-                            op: RegOp::Copy {
-                                dst: *dst,
-                                src: *src,
-                            },
-                        })
-                        .collect();
+                    let mut instrs: Vec<RegInstr> = self.temp_vec(
+                        core::cmp::min(values.len(), frame.param_regs.len()),
+                        offset,
+                        "if trampoline copies",
+                    )?;
+                    for (dst, src) in values.iter().zip(frame.param_regs.iter()) {
+                        if dst != src {
+                            push_fallible(
+                                &mut instrs,
+                                RegInstr {
+                                    offset,
+                                    op: RegOp::Copy {
+                                        dst: *dst,
+                                        src: *src,
+                                    },
+                                },
+                                offset,
+                                Some(self.func_idx),
+                                "if trampoline copies",
+                            )?;
+                        }
+                    }
                     push_fallible(
                         &mut self.blocks,
                         RegBlock::new(LabelIdx(trampoline_idx), instrs, RegTerm::Fallthrough),
@@ -3779,6 +3830,7 @@ impl<'b> FuncBuilder<'b> {
                 // copies delivering each branch's values into the registers
                 // the continuation expects.
                 let continuation_idx = self.blocks.len() as u32;
+                let func_idx = self.func_idx;
                 // Process the branches targeting this frame in place and then
                 // compact the vector in place, dropping the processed
                 // branches. A replacement `Vec` sized by
@@ -3823,13 +3875,19 @@ impl<'b> FuncBuilder<'b> {
                         // per-frame copies to one block is sound.
                         for (dst, src) in values.iter().zip(pending.values.iter()) {
                             if dst != src {
-                                blocks[pending.block].instrs.push(RegInstr {
-                                    offset,
-                                    op: RegOp::Copy {
-                                        dst: *dst,
-                                        src: *src,
+                                push_fallible(
+                                    &mut blocks[pending.block].instrs,
+                                    RegInstr {
+                                        offset,
+                                        op: RegOp::Copy {
+                                            dst: *dst,
+                                            src: *src,
+                                        },
                                     },
-                                });
+                                    offset,
+                                    Some(func_idx),
+                                    "block branch copies",
+                                )?;
                             }
                         }
                     }
@@ -3849,7 +3907,6 @@ impl<'b> FuncBuilder<'b> {
                 // then compact the vector in place: a replacement `Vec` sized
                 // by `pending_catches.len()` was an infallible, module-scaled
                 // allocation that could abort on allocator refusal.
-                let func_idx = self.func_idx;
                 {
                     let regions = &mut self.regions;
                     for pending in &self.pending_catches {
@@ -4690,7 +4747,14 @@ impl<'b> FuncBuilder<'b> {
                     if self.at_frame_boundary() && self.current_frame_unreachable() {
                         break;
                     }
-                    values.push(self.pop_expect(offset, "array.new_fixed", field_ty)?.reg);
+                    let field = self.pop_expect(offset, "array.new_fixed", field_ty)?;
+                    push_fallible(
+                        &mut values,
+                        field.reg,
+                        offset,
+                        Some(self.func_idx),
+                        "array.new_fixed operands",
+                    )?;
                 }
                 values.reverse();
                 let ty = gc_ref_type(type_idx);
@@ -5720,10 +5784,19 @@ impl<'b> FuncBuilder<'b> {
             .get(type_idx.0 as usize)
             .map(|sub| &sub.comp)
         {
-            Some(crate::types::CompType::Struct(fields)) => Ok(fields
-                .iter()
-                .map(|field| gc_unpacked(field.storage))
-                .collect()),
+            Some(crate::types::CompType::Struct(fields)) => {
+                let mut out = self.temp_vec(fields.len(), offset, "struct field types")?;
+                for field in fields {
+                    push_fallible(
+                        &mut out,
+                        gc_unpacked(field.storage),
+                        offset,
+                        Some(self.func_idx),
+                        "struct field types",
+                    )?;
+                }
+                Ok(out)
+            }
             _ => Err(LowerError {
                 offset,
                 function: Some(self.func_idx),

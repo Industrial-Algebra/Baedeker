@@ -38,13 +38,36 @@
 //! vector reserves before it is filled. Every refusal index in every config
 //! this file pins now clean-refuses.
 //!
+//! The 2026-10-20 static audit closed the last remaining infallible sites on
+//! that path (import name/type clones, the `else` frame copies, the appended
+//! branch-copy instructions, `array.new_fixed` operands, struct field types,
+//! the const-expression operand stack, the function `end_types` copy, and the
+//! table-type initializer clone) and replaced the pinned refusal windows with
+//! *measured* ones: each config first runs the child once with the allocator
+//! disarmed to learn how many allocations the path performs on THIS target,
+//! then sweeps every index in `1..=count`. Allocation sequences differ per
+//! architecture (size classes and layouts), so a window pinned on x86_64 is
+//! not evidence for aarch64 — measuring the count in the same binary keeps
+//! the whole sequence covered everywhere, and an index the sweep skips can no
+//! longer exist.
+//!
 //! This file owns a failing global allocator, so it contains only these
 //! tests. The refusal sweep runs each allocation index in a child process so
 //! a regression that aborts is observed as a failed child rather than killing
 //! the parent.
+//!
+//! Counting is **scoped to the sweeping thread**. libtest runs the test body
+//! on its own thread while the harness thread keeps allocating (output
+//! formatting, event plumbing); a process-global counter let those harness
+//! allocations occupy refusal indices, which aborted the *harness* with
+//! `memory allocation of N bytes failed` at a random index — the same
+//! signature as an infallible library allocation, and the reason the sweep
+//! could flake differently on another architecture. Only the thread that arms
+//! the sweep (via `with_armed_sweep`) counts or refuses allocations, so each
+//! index names exactly one allocation on the validate/lower path.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::ops::RangeInclusive;
+use std::cell::Cell;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -52,15 +75,45 @@ use baedeker_core::binary::module::Module;
 use baedeker_core::lower::LowerErrorKind;
 use baedeker_core::validate::error::ValidationErrorKind;
 
-/// Total `alloc`/`realloc` calls observed in this process.
+/// Total `alloc`/`realloc` calls observed on the armed thread.
 static ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
 /// Absolute (1-based) allocation count that returns null. 0 disarms.
 static FAIL_AT: AtomicUsize = AtomicUsize::new(0);
+
+thread_local! {
+    /// Whether the CURRENT thread participates in the sweep. `Cell<bool>` has
+    /// no destructor, so this is a const-initialized TLS slot: reading it from
+    /// inside the allocator neither allocates nor risks a TLS-destruction
+    /// panic.
+    static ARMED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether the calling thread is running (or arming) a refusal sweep.
+fn armed() -> bool {
+    ARMED.try_with(Cell::get).unwrap_or(false)
+}
+
+/// Run `body` with this thread's allocations counted, refusing allocation
+/// `fail_at` (1-based, relative to the first allocation inside `body`).
+/// Returns the number of allocations the body performed and its result.
+fn with_armed_sweep<R>(fail_at: usize, body: impl FnOnce() -> R) -> (R, usize) {
+    ALLOC_COUNT.store(0, Ordering::SeqCst);
+    FAIL_AT.store(fail_at, Ordering::SeqCst);
+    ARMED.with(|armed| armed.set(true));
+    let result = body();
+    let count = ALLOC_COUNT.load(Ordering::SeqCst);
+    ARMED.with(|armed| armed.set(false));
+    FAIL_AT.store(0, Ordering::SeqCst);
+    (result, count)
+}
 
 struct FailAt;
 
 unsafe impl GlobalAlloc for FailAt {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if !armed() {
+            return unsafe { System.alloc(layout) };
+        }
         let n = ALLOC_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
         if FAIL_AT.load(Ordering::SeqCst) == n {
             return null_mut();
@@ -73,6 +126,9 @@ unsafe impl GlobalAlloc for FailAt {
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        if !armed() {
+            return unsafe { System.realloc(ptr, layout, new_size) };
+        }
         let n = ALLOC_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
         if FAIL_AT.load(Ordering::SeqCst) == n {
             return null_mut();
@@ -151,6 +207,37 @@ fn try_table_wat(function_level: bool) -> String {
     }
 }
 
+/// A `br_table` module: `arity` leading `i32` block results and a five-entry
+/// target list all naming the same outer block. Decoding the target list was
+/// an infallible `Vec::with_capacity` in `decode_instr` (reachable lazily from
+/// validate/lower), and lowering emits the same list into a `BrTable`
+/// terminator.
+fn br_table_wat(arity: usize) -> String {
+    let arity = arity.max(1);
+    let mut results = String::new();
+    let mut body = String::new();
+    for _ in 0..arity {
+        results.push_str("i32 ");
+        body.push_str("      i32.const 7\n");
+    }
+    format!(
+        "(module\n  (func (param i32) (result {results})\n    \
+         (block $b (result {results})\n{body}      local.get 0\n      \
+         br_table $b $b $b $b $b)))"
+    )
+}
+
+/// A typed-`select` module: the instruction's result-type list is decoded by
+/// `parse_result_types`, whose `Vec::with_capacity` was an infallible
+/// allocation reachable from validate/lower.
+fn select_typed_wat() -> String {
+    String::from(
+        "(module\n  (func (param i32) (result i32)\n    \
+         local.get 0\n    i32.const 1\n    i32.const 2\n    \
+         select (result i32)))",
+    )
+}
+
 fn decode(wat: &str) -> Module<'static> {
     // Leak the bytes so the borrowed module can outlive this helper; the
     // child process is short-lived.
@@ -177,8 +264,13 @@ fn child_module() -> Module<'static> {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(1);
-    let fail = std::env::var("GC_U3_FORM").as_deref() == Ok("fail");
-    decode(&cast_branch_wat(arity, fail))
+    let form = std::env::var("GC_U3_FORM").unwrap_or_default();
+    match form.as_str() {
+        "br_table" => decode(&br_table_wat(arity)),
+        "select_typed" => decode(&select_typed_wat()),
+        "fail" => decode(&cast_branch_wat(arity, true)),
+        _ => decode(&cast_branch_wat(arity, false)),
+    }
 }
 
 // ── validation ──────────────────────────────────────────────────────
@@ -191,11 +283,17 @@ fn validate_child() {
     };
     let target: usize = target.parse().unwrap();
 
+    // Probe the harness env BEFORE the armed window: `env::var` allocates,
+    // and those allocations must not count as part of the validate sequence.
+    let report_count = std::env::var("GC_U3_REPORT_COUNT").is_ok();
     let module = child_module();
-    let base = ALLOC_COUNT.load(Ordering::SeqCst);
-    FAIL_AT.store(base + target, Ordering::SeqCst);
-    let result = module.validate();
-    FAIL_AT.store(0, Ordering::SeqCst);
+    let (result, count) =
+        with_armed_sweep(if report_count { 0 } else { target }, || module.validate());
+
+    if report_count {
+        eprintln!("COUNT {count}");
+        return;
+    }
 
     match result {
         Ok(()) => eprintln!("OK"),
@@ -212,15 +310,28 @@ fn validate_child() {
 }
 
 fn run_validate_child(target: usize, arity: usize, form: &str, locals: usize) -> String {
+    run_validate_child_measured(target, arity, form, locals, false)
+}
+
+fn run_validate_child_measured(
+    target: usize,
+    arity: usize,
+    form: &str,
+    locals: usize,
+    report_count: bool,
+) -> String {
     let exe = std::env::current_exe().expect("test binary path");
-    let output = std::process::Command::new(exe)
+    let mut command = std::process::Command::new(exe);
+    command
         .args(["validate_child", "--exact", "--nocapture"])
         .env("GC_U3_FAIL_AT", target.to_string())
         .env("GC_U3_ARITY", arity.to_string())
         .env("GC_U3_FORM", form)
-        .env("GC_U3_LOCALS", locals.to_string())
-        .output()
-        .expect("spawn validate refusal child");
+        .env("GC_U3_LOCALS", locals.to_string());
+    if report_count {
+        command.env("GC_U3_REPORT_COUNT", "1");
+    }
+    let output = command.output().expect("spawn validate refusal child");
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert!(
         output.status.success(),
@@ -242,11 +353,17 @@ fn lower_child() {
     };
     let target: usize = target.parse().unwrap();
 
+    // Probe the harness env BEFORE the armed window: `env::var` allocates,
+    // and those allocations must not count as part of the lower sequence.
+    let report_count = std::env::var("GC_U3_REPORT_COUNT").is_ok();
     let module = child_module();
-    let base = ALLOC_COUNT.load(Ordering::SeqCst);
-    FAIL_AT.store(base + target, Ordering::SeqCst);
-    let result = module.lower();
-    FAIL_AT.store(0, Ordering::SeqCst);
+    let (result, count) =
+        with_armed_sweep(if report_count { 0 } else { target }, || module.lower());
+
+    if report_count {
+        eprintln!("COUNT {count}");
+        return;
+    }
 
     match result {
         Ok(_) => eprintln!("OK"),
@@ -263,14 +380,21 @@ fn lower_child() {
 }
 
 fn run_lower_child(target: usize, arity: usize, form: &str) -> String {
+    run_lower_child_measured(target, arity, form, false)
+}
+
+fn run_lower_child_measured(target: usize, arity: usize, form: &str, report_count: bool) -> String {
     let exe = std::env::current_exe().expect("test binary path");
-    let output = std::process::Command::new(exe)
+    let mut command = std::process::Command::new(exe);
+    command
         .args(["lower_child", "--exact", "--nocapture"])
         .env("GC_U3_LOWER_FAIL_AT", target.to_string())
         .env("GC_U3_ARITY", arity.to_string())
-        .env("GC_U3_FORM", form)
-        .output()
-        .expect("spawn lowering refusal child");
+        .env("GC_U3_FORM", form);
+    if report_count {
+        command.env("GC_U3_REPORT_COUNT", "1");
+    }
+    let output = command.output().expect("spawn lowering refusal child");
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert!(
         output.status.success(),
@@ -284,11 +408,20 @@ fn run_lower_child(target: usize, arity: usize, form: &str) -> String {
 /// Like [`run_lower_child`], but for the single-clause `try_table` module
 /// (one pending catch back-patched at the outer block's `end`).
 fn run_try_lower_child(target: usize, level: &str) -> String {
+    run_try_lower_child_measured(target, level, false)
+}
+
+fn run_try_lower_child_measured(target: usize, level: &str, report_count: bool) -> String {
     let exe = std::env::current_exe().expect("test binary path");
-    let output = std::process::Command::new(exe)
+    let mut command = std::process::Command::new(exe);
+    command
         .args(["lower_child", "--exact", "--nocapture"])
         .env("GC_U3_LOWER_FAIL_AT", target.to_string())
-        .env("GC_U3_TRY_TABLE", level)
+        .env("GC_U3_TRY_TABLE", level);
+    if report_count {
+        command.env("GC_U3_REPORT_COUNT", "1");
+    }
+    let output = command
         .output()
         .expect("spawn try_table lowering refusal child");
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -301,120 +434,132 @@ fn run_try_lower_child(target: usize, level: &str) -> String {
     stderr
 }
 
-// ── pinned refusal windows ──────────────────────────────────────────
+// ── measured refusal windows ───────────────────────────────────────
 //
-// Indices are 1-based offsets from the first allocation after decoding,
-// pinned empirically for these exact modules: the windows shift with result
-// arity because decoding a larger result list allocates more.
+// Indices are 1-based offsets from the first allocation after decoding.
+//
+// The number of allocations a config performs depends on the TARGET:
+// allocator size classes and value layouts differ per architecture, so a
+// window pinned on x86_64 is not evidence for aarch64. Each config therefore
+// MEASURES its allocation count in a child process on the running target and
+// sweeps `1..=count`: the complete contiguous sequence, with every index
+// required to surface a clean `ResourceLimitExceeded` and none permitted to
+// abort. Combined with the thread-scoped counting above, an index names
+// exactly one allocation on the validate/lower path on every target.
 //
 // The 2026-10-19 sweep fallibilized *every* allocation on the
 // `Module::validate` + `Module::lower` path (operand/control/register stacks
 // grow in try-reserved geometric chunks, block and frame bootstraps use
 // fallible constructors, every module-scaled vector reserves before filling).
-// Each config below therefore clean-refuses at *every* allocation index, so
-// the windows are the full contiguous index range and the `clean` list is the
-// same range: every index in a window must surface a `ResourceLimitExceeded`
-// and none may abort. `M` is the number of allocations the config performs —
-// larger refused indices are past the allocation count and are a clean no-op.
+// The 2026-10-20 static audit closed the remaining sites (import name/type
+// clones, the `else` frame copies, appended branch-copy instructions,
+// `array.new_fixed` operands, struct field types, the const-expression
+// operand stack, the `return` result-type copy, and the table-type
+// initializer clone); every index of every config below must clean-refuse.
 
-/// Validation window for the reviewer's arity-1 module.
-const VALIDATE_WINDOW_ARITY1: RangeInclusive<usize> = 1..=14;
-const VALIDATE_CLEAN_ARITY1: RangeInclusive<usize> = VALIDATE_WINDOW_ARITY1;
+/// The arities the sweep matrix covers.
+const SWEEP_ARITIES: [usize; 3] = [1, 64, 512];
 
-/// Validation window for arity 512.
-const VALIDATE_WINDOW_ARITY512: RangeInclusive<usize> = 1..=35;
-const VALIDATE_CLEAN_ARITY512: RangeInclusive<usize> = VALIDATE_WINDOW_ARITY512;
+/// Extract the allocation count a child reported under `GC_U3_REPORT_COUNT`.
+fn parse_count(stderr: &str) -> usize {
+    stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("COUNT "))
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or_else(|| panic!("child did not report an allocation count:\n{stderr}"))
+}
 
-/// Lowering window for arity 1: validation's reservations plus the
-/// function-setup copies, the `br_on_cast` lowering copies, the block result
-/// registers, the function-end result copies, the control-block /
-/// lowered-function reservations, and the `register type table` reservation.
-const LOWER_WINDOW_ARITY1: RangeInclusive<usize> = 1..=44;
-const LOWER_CLEAN_ARITY1: RangeInclusive<usize> = LOWER_WINDOW_ARITY1;
+fn measure_validate_allocations(arity: usize, form: &str, locals: usize) -> usize {
+    parse_count(&run_validate_child_measured(0, arity, form, locals, true))
+}
 
-/// Lowering window for arity 512: the same sites, with the result-list sizes
-/// (and therefore the number of allocations) scaled by the arity.
-const LOWER_WINDOW_ARITY512: RangeInclusive<usize> = 1..=93;
-const LOWER_CLEAN_ARITY512: RangeInclusive<usize> = LOWER_WINDOW_ARITY512;
+fn measure_lower_allocations(arity: usize, form: &str) -> usize {
+    parse_count(&run_lower_child_measured(0, arity, form, true))
+}
 
-/// `try_table` catch window. Each single-clause module exercises one of the
-/// block-close / function-end `pending_catches` processing paths, including
-/// the fallible `catch landing registers` / `catch value types` reservations.
-const TRY_TABLE_BLOCK_WINDOW: RangeInclusive<usize> = 1..=51;
-const TRY_TABLE_FUNC_WINDOW: RangeInclusive<usize> = 1..=47;
+fn measure_try_lower_allocations(level: &str) -> usize {
+    parse_count(&run_try_lower_child_measured(0, level, true))
+}
 
-/// Local-heavy `local_inits` window: the `local-init flags` flag vector, the
-/// `block frame` reservations (the frame's local-init snapshot), and the
-/// operand-stack chunk growth.
-const LOCAL_WINDOW: RangeInclusive<usize> = 1..=15;
-
-/// Sweep `window` for `form`, asserting no index aborts; additionally assert
-/// every index in `clean` clean-refuses.
-fn assert_validate_window(
-    arity: usize,
-    form: &str,
-    window: &RangeInclusive<usize>,
-    clean: &RangeInclusive<usize>,
-) {
-    for target in window.clone() {
-        let stderr = run_validate_child(target, arity, form, 0);
-        if clean.contains(&target) {
-            assert!(
-                stderr.contains("CLEAN_REFUSAL"),
-                "validate allocation {target} (arity {arity}, form {form}) \
-                 should clean-refuse, saw:\n{stderr}"
-            );
-        }
+/// Sweep every allocation index the validation path performs on this target,
+/// asserting each one clean-refuses.
+fn assert_validate_sweep(arity: usize, form: &str, locals: usize) {
+    let count = measure_validate_allocations(arity, form, locals);
+    assert!(
+        count > 0,
+        "validation path performed no allocations (arity {arity}, form {form}, \
+         locals {locals}) — the sweep would be vacuous"
+    );
+    for target in 1..=count {
+        let stderr = run_validate_child(target, arity, form, locals);
+        assert!(
+            stderr.contains("CLEAN_REFUSAL"),
+            "validate allocation {target} of {count} (arity {arity}, form {form}, \
+             locals {locals}) should clean-refuse, saw:\n{stderr}"
+        );
     }
 }
 
-fn assert_lower_window(
-    arity: usize,
-    form: &str,
-    window: &RangeInclusive<usize>,
-    clean: &RangeInclusive<usize>,
-) {
-    for target in window.clone() {
+/// Sweep every allocation index the lowering path performs on this target,
+/// asserting each one clean-refuses.
+fn assert_lower_sweep(arity: usize, form: &str) {
+    let count = measure_lower_allocations(arity, form);
+    assert!(
+        count > 0,
+        "lowering path performed no allocations (arity {arity}, form {form})"
+    );
+    for target in 1..=count {
         let stderr = run_lower_child(target, arity, form);
-        if clean.contains(&target) {
-            assert!(
-                stderr.contains("CLEAN_REFUSAL"),
-                "lowering allocation {target} (arity {arity}, form {form}) \
-                 should clean-refuse, saw:\n{stderr}"
-            );
-        }
+        assert!(
+            stderr.contains("CLEAN_REFUSAL"),
+            "lowering allocation {target} of {count} (arity {arity}, form {form}) \
+             should clean-refuse, saw:\n{stderr}"
+        );
+    }
+}
+
+fn assert_try_lower_sweep(level: &str) {
+    let count = measure_try_lower_allocations(level);
+    assert!(
+        count > 0,
+        "try_table lowering path performed no allocations ({level})"
+    );
+    for target in 1..=count {
+        let stderr = run_try_lower_child(target, level);
+        assert!(
+            stderr.contains("CLEAN_REFUSAL"),
+            "try_table {level} allocation {target} of {count} should \
+             clean-refuse, saw:\n{stderr}"
+        );
     }
 }
 
 /// `finish_frame` no longer clones the module-sized `ControlFrame`: refusing
-/// any of the validator's reservations on this module (every allocation index
-/// is fallibly reserved) never terminates the process and always surfaces a
-/// clean `ResourceLimitExceeded`.
+/// any of the validator's reservations on these modules (every allocation
+/// index is fallibly reserved) never terminates the process and always
+/// surfaces a clean `ResourceLimitExceeded`.
 #[test]
 fn finish_frame_refusal_windows_are_clean() {
     for form in ["cast", "fail"] {
-        assert_validate_window(1, form, &VALIDATE_WINDOW_ARITY1, &VALIDATE_CLEAN_ARITY1);
-        assert_validate_window(
-            512,
-            form,
-            &VALIDATE_WINDOW_ARITY512,
-            &VALIDATE_CLEAN_ARITY512,
-        );
+        for arity in SWEEP_ARITIES {
+            assert_validate_sweep(arity, form, 0);
+        }
     }
 }
 
 /// The lowering block-close no longer clones the frame's module-sized
 /// `result_types` (r2) and no longer allocates a `pending_branches`
 /// replacement vector (r3). Every allocation the validate + lower path makes
-/// for this module — validation reservations, the block result-register
+/// for these modules — validation reservations, the block result-register
 /// reservation, the control-block/func reservations, and the `register type
 /// table` reservation — is fallibly reserved, so refusing any index never
 /// terminates the process and always surfaces a clean `ResourceLimitExceeded`.
 #[test]
 fn block_close_refusal_windows_are_clean() {
     for form in ["cast", "fail"] {
-        assert_lower_window(1, form, &LOWER_WINDOW_ARITY1, &LOWER_CLEAN_ARITY1);
-        assert_lower_window(512, form, &LOWER_WINDOW_ARITY512, &LOWER_CLEAN_ARITY512);
+        for arity in SWEEP_ARITIES {
+            assert_lower_sweep(arity, form);
+        }
     }
 }
 
@@ -425,20 +570,21 @@ fn block_close_refusal_windows_are_clean() {
 /// catch paths.
 #[test]
 fn pending_catch_refusal_windows_are_clean() {
-    for target in TRY_TABLE_BLOCK_WINDOW.clone() {
-        let stderr = run_try_lower_child(target, "block");
-        assert!(
-            stderr.contains("CLEAN_REFUSAL"),
-            "try_table block allocation {target} should clean-refuse, saw:\n{stderr}"
-        );
+    assert_try_lower_sweep("block");
+    assert_try_lower_sweep("func");
+}
+
+/// The `br_table` target list and the typed-`select` result-type list are
+/// decoded lazily from validate/lower, so their reservations must be fallible
+/// on both paths: every allocation index clean-refuses and none aborts.
+#[test]
+fn br_table_and_typed_select_refusal_windows_are_clean() {
+    for arity in SWEEP_ARITIES {
+        assert_validate_sweep(arity, "br_table", 0);
+        assert_lower_sweep(arity, "br_table");
     }
-    for target in TRY_TABLE_FUNC_WINDOW.clone() {
-        let stderr = run_try_lower_child(target, "func");
-        assert!(
-            stderr.contains("CLEAN_REFUSAL"),
-            "try_table func allocation {target} should clean-refuse, saw:\n{stderr}"
-        );
-    }
+    assert_validate_sweep(1, "select_typed", 0);
+    assert_lower_sweep(1, "select_typed");
 }
 
 /// A 1024-local module exercises the `local_inits` copies; refusing any
@@ -446,11 +592,5 @@ fn pending_catch_refusal_windows_are_clean() {
 /// block-frame reservation, or the operand-stack chunk growth) clean-refuses.
 #[test]
 fn local_heavy_local_inits_refusal_window_is_clean() {
-    for target in LOCAL_WINDOW.clone() {
-        let stderr = run_validate_child(target, 1, "cast", 1024);
-        assert!(
-            stderr.contains("CLEAN_REFUSAL"),
-            "local-heavy allocation {target} should clean-refuse, saw:\n{stderr}"
-        );
-    }
+    assert_validate_sweep(1, "cast", 1024);
 }

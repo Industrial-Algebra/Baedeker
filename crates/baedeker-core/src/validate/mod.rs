@@ -548,14 +548,32 @@ fn resolve_const_global_val_type(
         });
     let defined_globals = module.globals.iter().map(|global| global.global_type);
 
-    let available_globals: Vec<_> = match scope {
+    // Enumerate the globals in scope into one vector. The vector is
+    // module-scaled (one entry per import plus defined global), so it is
+    // reserved fallibly before it is filled: a plain `collect` is an
+    // infallible allocation that aborts on allocator refusal.
+    let mut available_globals: Vec<_> = Vec::new();
+    available_globals
+        .try_reserve(module.imports.len() + module.globals.len())
+        .map_err(|_| ValidationError {
+            offset: ByteOffset(offset),
+            function: None,
+            kind: ValidationErrorKind::ResourceLimitExceeded {
+                what: "const expression global scope",
+            },
+        })?;
+    match scope {
         ConstExprGlobalScope::ImportedPlusDefined {
             defined_globals_available,
-        } => imported_globals
-            .chain(defined_globals.take(defined_globals_available))
-            .collect(),
-        ConstExprGlobalScope::All => imported_globals.chain(defined_globals).collect(),
-    };
+        } => {
+            available_globals.extend(imported_globals);
+            available_globals.extend(defined_globals.take(defined_globals_available));
+        }
+        ConstExprGlobalScope::All => {
+            available_globals.extend(imported_globals);
+            available_globals.extend(defined_globals);
+        }
+    }
 
     let available = available_globals.len() as u32;
     let global_type = available_globals
@@ -668,6 +686,21 @@ fn validate_const_expr(
     }
 
     let mut stack = Vec::new();
+    // Reserve the const-expression operand stack up front, fallibly: a const
+    // expression is a module-controlled byte string, and every instruction
+    // pushes at most one operand, so `instrs.len()` is a safe upper bound on
+    // the depth. Reserving here keeps every `stack.push` below a
+    // non-allocating push (resource discipline: a refused allocation is a
+    // clean `ResourceLimitExceeded`, never a process abort).
+    stack
+        .try_reserve(instrs.len())
+        .map_err(|_| ValidationError {
+            offset: ByteOffset(offset),
+            function: None,
+            kind: ValidationErrorKind::ResourceLimitExceeded {
+                what: "const expression operands",
+            },
+        })?;
     for decoded in &instrs[..instrs.len().saturating_sub(1)] {
         validate_const_instr(module, &mut stack, decoded, global_scope, kind)?;
     }
@@ -1585,7 +1618,12 @@ fn validate_instr(
             state.enter_unreachable();
         }
         Instr::Return => {
-            let expected = state.controls[0].end_types.clone();
+            let expected = copy_valtypes_fallible(
+                function,
+                offset,
+                "function result types",
+                &state.controls[0].end_types,
+            )?;
             pop_control_result_types(module, function, state, &expected, offset)?;
             state.enter_unreachable();
         }
@@ -5104,11 +5142,18 @@ fn resolve_table_type_with_context(
     imported
         .chain(defined)
         .nth(idx.0 as usize)
-        .map(|table| normalize_table_type(module, table.clone()))
-        .ok_or(ValidationError {
-            offset: ByteOffset(offset),
-            function,
-            kind: ValidationErrorKind::UnknownTableIdx { idx, available },
+        .map(|table| {
+            Ok(normalize_table_type(
+                module,
+                clone_table_type_fallible(table, function, offset)?,
+            ))
+        })
+        .unwrap_or_else(|| {
+            Err(ValidationError {
+                offset: ByteOffset(offset),
+                function,
+                kind: ValidationErrorKind::UnknownTableIdx { idx, available },
+            })
         })
 }
 
@@ -5605,8 +5650,41 @@ fn normalize_table_type(
     crate::types::TableType {
         elem: normalize_reftype(module, ty.elem),
         limits: ty.limits,
-        init: ty.init.clone(),
+        // The initializer expression is moved: callers obtain an owned table
+        // type through [`clone_table_type_fallible`], which reserves the
+        // expression copy fallibly.
+        init: ty.init,
     }
+}
+
+/// Fallibly clone a table type: its initializer expression (module-controlled
+/// bytes) is reserved before it is filled, so a refused allocation surfaces as
+/// a clean `ResourceLimitExceeded` rather than an abort.
+fn clone_table_type_fallible(
+    table: &crate::types::TableType,
+    function: Option<FuncIdx>,
+    offset: usize,
+) -> Result<crate::types::TableType, ValidationError> {
+    let init = match &table.init {
+        Some(expr) => {
+            let mut copy = Vec::new();
+            copy.try_reserve(expr.len()).map_err(|_| ValidationError {
+                offset: ByteOffset(offset),
+                function,
+                kind: ValidationErrorKind::ResourceLimitExceeded {
+                    what: "table initializer expression",
+                },
+            })?;
+            copy.extend_from_slice(expr);
+            Some(copy)
+        }
+        None => None,
+    };
+    Ok(crate::types::TableType {
+        elem: table.elem,
+        limits: table.limits,
+        init,
+    })
 }
 
 fn reftype_matches(module: &Module<'_>, found: RefType, expected: RefType) -> bool {

@@ -163,8 +163,14 @@ jobs:
 
       # Core suite on macOS/ARM. (The `swift` job already builds core+ffi for
       # Apple platforms and runs the Swift tests; this adds the Rust suite.)
+      # Hosted MacCloud runners have ~7 GiB and a memory monitor that culls
+      # child processes when total job usage runs high; the article suite
+      # runs at CI magnitude here (the dedicated `GC articles` job and every
+      # 16 GiB Linux runner hold the full magnitude).
       - name: Tests (core)
         run: cargo test -p baedeker-core
+        env:
+          BAEDEKER_GC_ARTICLE_DIVISOR: "100"
 
   # Android is a primary target. No native Android runner exists, so this is
   # a cross-compile build check of the embeddable surface (core + FFI `.so` +
