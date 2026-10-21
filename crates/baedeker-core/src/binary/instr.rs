@@ -17,8 +17,8 @@ use crate::binary::typeparser::{
 };
 use crate::error::{ByteOffset, DecodeContext, DecodeError, DecodeErrorKind};
 use crate::types::{
-    BlockType, CodeBody, ElemIdx, FuncIdx, GlobalIdx, LabelIdx, LocalIdx, MemArg, MemIdx, RefType,
-    TableIdx, TagIdx, TypeIdx, ValType,
+    BlockType, CodeBody, ElemIdx, FuncIdx, GlobalIdx, HeapType, LabelIdx, LocalIdx, MemArg, MemIdx,
+    RefType, TableIdx, TagIdx, TypeIdx, ValType,
 };
 
 /// A decoded instruction paired with its absolute byte offset in the module.
@@ -198,6 +198,29 @@ pub enum Instr {
     RefIsNull,
     RefFunc(FuncIdx),
     RefAsNonNull,
+    /// `ref.test (ref null? ht)` — test a reference against a heap type.
+    RefTest {
+        nullable: bool,
+        ht: HeapType,
+    },
+    /// `ref.cast (ref null? ht)` — cast a reference, trapping on failure.
+    RefCast {
+        nullable: bool,
+        ht: HeapType,
+    },
+    /// `br_on_cast` / `br_on_cast_fail` — branch on cast success/failure.
+    BrOnCast {
+        fail: bool,
+        src: RefType,
+        tgt: RefType,
+        label: LabelIdx,
+    },
+    /// `ref.eq` — equality comparison of two eq references.
+    RefEq,
+    /// `any.convert_extern` — re-tag an extern reference as an any reference.
+    AnyConvertExtern,
+    /// `extern.convert_any` — re-tag an any reference as an extern reference.
+    ExternConvertAny,
     V128Const([u8; 16]),
     I8x16Splat,
     I16x8Splat,
@@ -554,6 +577,82 @@ pub enum Instr {
     Throw(TagIdx),
     /// `throw_ref` — re-raise the exception referenced by an exnref.
     ThrowRef,
+    /// `struct.new $x` — allocate a struct from its field operands.
+    StructNew(TypeIdx),
+    /// `struct.new_default $x` — allocate a struct with default field values.
+    StructNewDefault(TypeIdx),
+    /// `struct.get $x $i` — read an unpacked struct field.
+    StructGet {
+        type_idx: TypeIdx,
+        field: u32,
+    },
+    /// `struct.get_s $x $i` — read a packed struct field, sign-extended.
+    StructGetS {
+        type_idx: TypeIdx,
+        field: u32,
+    },
+    /// `struct.get_u $x $i` — read a packed struct field, zero-extended.
+    StructGetU {
+        type_idx: TypeIdx,
+        field: u32,
+    },
+    /// `struct.set $x $i` — write a struct field.
+    StructSet {
+        type_idx: TypeIdx,
+        field: u32,
+    },
+    /// `array.new $x` — allocate an array of `len` copies of the operand.
+    ArrayNew(TypeIdx),
+    /// `array.new_default $x` — allocate an array of default elements.
+    ArrayNewDefault(TypeIdx),
+    /// `array.new_fixed $x $n` — allocate an array from `n` operands.
+    ArrayNewFixed {
+        type_idx: TypeIdx,
+        count: u32,
+    },
+    /// `array.new_data $x $y` — allocate an array from a data segment.
+    ArrayNewData {
+        type_idx: TypeIdx,
+        data: crate::types::DataIdx,
+    },
+    /// `array.new_elem $x $y` — allocate an array from an element segment.
+    ArrayNewElem {
+        type_idx: TypeIdx,
+        elem: ElemIdx,
+    },
+    /// `array.get $x` — read an unpacked array element.
+    ArrayGet(TypeIdx),
+    /// `array.get_s $x` — read a packed array element, sign-extended.
+    ArrayGetS(TypeIdx),
+    /// `array.get_u $x` — read a packed array element, zero-extended.
+    ArrayGetU(TypeIdx),
+    /// `array.set $x` — write an array element.
+    ArraySet(TypeIdx),
+    /// `array.len` — the length of an abstract array reference.
+    ArrayLen,
+    /// `array.fill $x` — fill a range with a value.
+    ArrayFill(TypeIdx),
+    /// `array.copy $x $y` — copy between arrays.
+    ArrayCopy {
+        dst: TypeIdx,
+        src: TypeIdx,
+    },
+    /// `array.init_data $x $y` — initialize from a data segment.
+    ArrayInitData {
+        type_idx: TypeIdx,
+        data: crate::types::DataIdx,
+    },
+    /// `array.init_elem $x $y` — initialize from an element segment.
+    ArrayInitElem {
+        type_idx: TypeIdx,
+        elem: ElemIdx,
+    },
+    /// `ref.i31` — box an i32 into a 31-bit immediate reference.
+    RefI31,
+    /// `i31.get_s` — sign-extended payload.
+    I31GetS,
+    /// `i31.get_u` — zero-extended payload.
+    I31GetU,
 }
 
 impl<'a> CodeBody<'a> {
@@ -575,6 +674,25 @@ pub fn decode_instr_sequence(bytes: &[u8], base_offset: usize) -> Result<Vec<Ins
         .map(|instrs| instrs.into_iter().map(|decoded| decoded.instr).collect())
 }
 
+/// Reserve room for one more element of `values`, growing the backing store
+/// fallibly in geometric chunks.
+///
+/// Resource discipline: a refused growth is a clean [`DecodeErrorKind::
+/// ResourceLimitExceeded`] anchored at `at`, never an allocation abort (the
+/// U3 declining-allocator sweep aborts on any infallible `Vec` growth).
+fn try_grow_for_push<T>(values: &mut Vec<T>, at: usize) -> Result<(), DecodeError> {
+    if values.len() < values.capacity() {
+        return Ok(());
+    }
+    values
+        .try_reserve(values.len().max(8))
+        .map_err(|_| DecodeError {
+            offset: ByteOffset(at),
+            context: DecodeContext::CodeSection,
+            kind: DecodeErrorKind::ResourceLimitExceeded,
+        })
+}
+
 /// Decode a function-body instruction sequence until its terminating `end`, preserving offsets.
 pub fn decode_instr_sequence_with_offsets(
     bytes: &[u8],
@@ -592,6 +710,7 @@ pub fn decode_instr_sequence_with_offsets(
             }
             Instr::End => {
                 if block_depth == 0 {
+                    try_grow_for_push(&mut instrs, base_offset + cursor.position())?;
                     instrs.push(decoded);
                     return Ok(instrs);
                 }
@@ -600,6 +719,7 @@ pub fn decode_instr_sequence_with_offsets(
             _ => {}
         }
 
+        try_grow_for_push(&mut instrs, base_offset + cursor.position())?;
         instrs.push(decoded);
 
         if cursor.is_empty() {
@@ -615,6 +735,43 @@ pub fn decode_instr_sequence_with_offsets(
 /// Decode a single instruction.
 pub fn decode_instr(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Instr, DecodeError> {
     decode_instr_with_offset(cursor, base_offset).map(|decoded| decoded.instr)
+}
+
+/// Decode one constant/init expression's raw bytes (including its terminating
+/// `end`) and return the slice consumed.
+///
+/// Shared by the data- and element-section decoders. The boundary is found by
+/// walking the instruction stream with real opcode + immediate consumption,
+/// never by scanning for the first `0x0B` byte: operand bytes can themselves
+/// be `0x0B` (e.g. the LEB128 funcidx 11 in `ref.func 11`, or a wide
+/// `array.new_fixed`/`struct.new` operand), which a raw scan misreads as the
+/// terminator. Every failure is a `DecodeError` with the caller's section
+/// context; the scan can never return a wrong-length slice.
+pub(crate) fn decode_const_expr_bytes<'a>(
+    cursor: &mut Cursor<'a>,
+    base_offset: usize,
+    context: DecodeContext,
+) -> Result<&'a [u8], DecodeError> {
+    let start = cursor.position();
+    let mut block_depth = 0usize;
+    loop {
+        let instr = decode_instr(cursor, base_offset).map_err(|mut error| {
+            error.context = context;
+            error
+        })?;
+        match instr {
+            Instr::Block(_) | Instr::Loop(_) | Instr::If(_) | Instr::TryTable(_) => {
+                block_depth += 1
+            }
+            Instr::End => {
+                if block_depth == 0 {
+                    return Ok(&cursor.original()[start..cursor.position()]);
+                }
+                block_depth -= 1;
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Decode a single instruction with its absolute module offset.
@@ -644,8 +801,21 @@ pub fn decode_instr_with_offset(
         0x0D => Instr::BrIf(LabelIdx(decode_u32(cursor, base_offset)?)),
         0x0E => {
             let target_count = decode_u32(cursor, base_offset)?;
-            let mut targets = Vec::with_capacity(cursor.capacity_hint(target_count));
+            // Reserve the target list fallibly: instruction decoding is lazy
+            // (it runs from `validate`/`lower`), so an infallible
+            // `with_capacity` here aborts the process on allocator refusal.
+            // The hint is bounded by the remaining input because every target
+            // consumes at least one byte.
+            let mut targets = Vec::new();
+            targets
+                .try_reserve(cursor.capacity_hint(target_count))
+                .map_err(|_| DecodeError {
+                    offset: ByteOffset(base_offset + cursor.position()),
+                    context: DecodeContext::CodeSection,
+                    kind: DecodeErrorKind::ResourceLimitExceeded,
+                })?;
             for _ in 0..target_count {
+                try_grow_for_push(&mut targets, base_offset + cursor.position())?;
                 targets.push(LabelIdx(decode_u32(cursor, base_offset)?));
             }
             let default = LabelIdx(decode_u32(cursor, base_offset)?);
@@ -676,6 +846,7 @@ pub fn decode_instr_with_offset(
         0x26 => Instr::TableSet(parse_table_idx(cursor, base_offset)?),
         0xFC => decode_bulk_memory_instr(cursor, base_offset)?,
         0xFD => decode_simd_instr(cursor, base_offset)?,
+        0xFB => decode_gc_instr(cursor, base_offset)?,
         0x28 => Instr::I32Load(parse_memarg(cursor, base_offset)?),
         0x29 => Instr::I64Load(parse_memarg(cursor, base_offset)?),
         0x2A => Instr::F32Load(parse_memarg(cursor, base_offset)?),
@@ -711,6 +882,7 @@ pub fn decode_instr_with_offset(
         )),
         0xD1 => Instr::RefIsNull,
         0xD2 => Instr::RefFunc(FuncIdx(decode_u32(cursor, base_offset)?)),
+        0xD3 => Instr::RefEq,
         0xD4 => Instr::RefAsNonNull,
         0xD5 => Instr::BrOnNull(LabelIdx(decode_u32(cursor, base_offset)?)),
         0xD6 => Instr::BrOnNonNull(LabelIdx(decode_u32(cursor, base_offset)?)),
@@ -855,6 +1027,127 @@ pub fn decode_instr_with_offset(
         offset: ByteOffset(base_offset + opcode_offset),
         instr,
     })
+}
+
+fn decode_gc_instr(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Instr, DecodeError> {
+    let opcode = decode_u32(cursor, base_offset)?;
+    match opcode {
+        0x00 => Ok(Instr::StructNew(TypeIdx(decode_u32(cursor, base_offset)?))),
+        0x01 => Ok(Instr::StructNewDefault(TypeIdx(decode_u32(
+            cursor,
+            base_offset,
+        )?))),
+        0x02 => Ok(Instr::StructGet {
+            type_idx: TypeIdx(decode_u32(cursor, base_offset)?),
+            field: decode_u32(cursor, base_offset)?,
+        }),
+        0x03 => Ok(Instr::StructGetS {
+            type_idx: TypeIdx(decode_u32(cursor, base_offset)?),
+            field: decode_u32(cursor, base_offset)?,
+        }),
+        0x04 => Ok(Instr::StructGetU {
+            type_idx: TypeIdx(decode_u32(cursor, base_offset)?),
+            field: decode_u32(cursor, base_offset)?,
+        }),
+        0x05 => Ok(Instr::StructSet {
+            type_idx: TypeIdx(decode_u32(cursor, base_offset)?),
+            field: decode_u32(cursor, base_offset)?,
+        }),
+        0x06 => Ok(Instr::ArrayNew(TypeIdx(decode_u32(cursor, base_offset)?))),
+        0x07 => Ok(Instr::ArrayNewDefault(TypeIdx(decode_u32(
+            cursor,
+            base_offset,
+        )?))),
+        0x08 => Ok(Instr::ArrayNewFixed {
+            type_idx: TypeIdx(decode_u32(cursor, base_offset)?),
+            count: decode_u32(cursor, base_offset)?,
+        }),
+        0x09 => Ok(Instr::ArrayNewData {
+            type_idx: TypeIdx(decode_u32(cursor, base_offset)?),
+            data: crate::types::DataIdx(decode_u32(cursor, base_offset)?),
+        }),
+        0x0A => Ok(Instr::ArrayNewElem {
+            type_idx: TypeIdx(decode_u32(cursor, base_offset)?),
+            elem: ElemIdx(decode_u32(cursor, base_offset)?),
+        }),
+        0x0B => Ok(Instr::ArrayGet(TypeIdx(decode_u32(cursor, base_offset)?))),
+        0x0C => Ok(Instr::ArrayGetS(TypeIdx(decode_u32(cursor, base_offset)?))),
+        0x0D => Ok(Instr::ArrayGetU(TypeIdx(decode_u32(cursor, base_offset)?))),
+        0x0E => Ok(Instr::ArraySet(TypeIdx(decode_u32(cursor, base_offset)?))),
+        0x0F => Ok(Instr::ArrayLen),
+        0x10 => Ok(Instr::ArrayFill(TypeIdx(decode_u32(cursor, base_offset)?))),
+        0x11 => Ok(Instr::ArrayCopy {
+            dst: TypeIdx(decode_u32(cursor, base_offset)?),
+            src: TypeIdx(decode_u32(cursor, base_offset)?),
+        }),
+        0x12 => Ok(Instr::ArrayInitData {
+            type_idx: TypeIdx(decode_u32(cursor, base_offset)?),
+            data: crate::types::DataIdx(decode_u32(cursor, base_offset)?),
+        }),
+        0x13 => Ok(Instr::ArrayInitElem {
+            type_idx: TypeIdx(decode_u32(cursor, base_offset)?),
+            elem: ElemIdx(decode_u32(cursor, base_offset)?),
+        }),
+        0x1C => Ok(Instr::RefI31),
+        0x1D => Ok(Instr::I31GetS),
+        0x1E => Ok(Instr::I31GetU),
+        // 0x14–0x17: cast/test identity checks; 0x18/0x19: br_on_cast(_fail);
+        // 0x1a/0x1b: extern/any conversions. Shapes and operand order follow
+        // `interpreter/binary/decode.ml`.
+        0x14..=0x17 => {
+            let ht = parse_heap_type(cursor, base_offset, DecodeContext::CodeSection)?;
+            match opcode {
+                0x14 => Ok(Instr::RefTest {
+                    nullable: false,
+                    ht,
+                }),
+                0x15 => Ok(Instr::RefTest { nullable: true, ht }),
+                0x16 => Ok(Instr::RefCast {
+                    nullable: false,
+                    ht,
+                }),
+                _ => Ok(Instr::RefCast { nullable: true, ht }),
+            }
+        }
+        0x18 | 0x19 => {
+            let flags = cursor.read_byte().map_err(|_| DecodeError {
+                offset: ByteOffset(base_offset + cursor.position()),
+                context: DecodeContext::CodeSection,
+                kind: DecodeErrorKind::UnexpectedEof,
+            })?;
+            if flags & 0xfc != 0 {
+                return Err(DecodeError {
+                    offset: ByteOffset(base_offset),
+                    context: DecodeContext::CodeSection,
+                    kind: DecodeErrorKind::MalformedCastFlags { flags },
+                });
+            }
+            let label = LabelIdx(decode_u32(cursor, base_offset)?);
+            let src_null = flags & 0x01 != 0;
+            let tgt_null = flags & 0x02 != 0;
+            let src = RefType::from_parts(
+                src_null,
+                parse_heap_type(cursor, base_offset, DecodeContext::CodeSection)?,
+            );
+            let tgt = RefType::from_parts(
+                tgt_null,
+                parse_heap_type(cursor, base_offset, DecodeContext::CodeSection)?,
+            );
+            Ok(Instr::BrOnCast {
+                fail: opcode == 0x19,
+                src,
+                tgt,
+                label,
+            })
+        }
+        0x1A => Ok(Instr::AnyConvertExtern),
+        0x1B => Ok(Instr::ExternConvertAny),
+        _ => Err(DecodeError {
+            offset: ByteOffset(base_offset),
+            context: DecodeContext::CodeSection,
+            kind: DecodeErrorKind::UnknownOpcode { byte: 0xFB },
+        }),
+    }
 }
 
 fn decode_bulk_memory_instr(
@@ -1287,8 +1580,20 @@ fn parse_result_types(
     base_offset: usize,
 ) -> Result<Vec<ValType>, DecodeError> {
     let count = decode_u32(cursor, base_offset)?;
-    let mut types = Vec::with_capacity(cursor.capacity_hint(count));
+    // Reserve fallibly: typed `select` reaches this helper from lazy
+    // instruction decoding (a `validate`/`lower` path), where an infallible
+    // `with_capacity` would abort on allocator refusal. The hint is bounded by
+    // the remaining input because every value type consumes at least one byte.
+    let mut types = Vec::new();
+    types
+        .try_reserve(cursor.capacity_hint(count))
+        .map_err(|_| DecodeError {
+            offset: ByteOffset(base_offset + cursor.position()),
+            context: DecodeContext::CodeSection,
+            kind: DecodeErrorKind::ResourceLimitExceeded,
+        })?;
     for _ in 0..count {
+        try_grow_for_push(&mut types, base_offset + cursor.position())?;
         types.push(parse_binary_val_type(
             cursor,
             base_offset,
@@ -1310,7 +1615,15 @@ fn parse_block_type(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Block
         return Ok(BlockType::Empty);
     }
 
-    if matches!(first, 0x7B..=0x7F | 0x70 | 0x6F | 0x63 | 0x64 | 0x69) {
+    // A single-byte value type: numeric/vector `0x7B..=0x7F`, or any
+    // reference-type shorthand our U1 grammar accepts. The pin's `reftype`
+    // (`interpreter/binary/decode.ml:201-218`) reads `s7` values
+    // `-0x0c..=-0x17` as the Null abstract shorthands (`0x74` noexn ..
+    // `0x69` exn, covering anyref/eqref/i31ref/structref/arrayref and the
+    // abstract null forms), `-0x1c` (`0x64`) as `(ref ht)`, and `-0x1d`
+    // (`0x63`) as `(ref null ht)`. `parse_val_type_with_first_byte` owns the
+    // per-byte grammar; this discriminator only decides value-vs-index.
+    if matches!(first, 0x7B..=0x7F | 0x63 | 0x64 | 0x69..=0x74) {
         return Ok(BlockType::Val(parse_val_type_with_first_byte(
             cursor,
             first,
@@ -1370,6 +1683,7 @@ fn parse_try_table(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<TryTab
             e.offset = ByteOffset(base_offset + label_pos);
             e
         })?;
+        try_grow_for_push(&mut catches, base_offset + cursor.position())?;
         catches.push(TryTableCatch { kind, tag, label });
     }
     Ok(TryTable {

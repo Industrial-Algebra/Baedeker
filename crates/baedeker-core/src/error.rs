@@ -92,6 +92,9 @@ pub struct DecodeError {
 pub enum DecodeErrorKind {
     /// Unexpected end of input.
     UnexpectedEof,
+    /// A refused reservation while building a decoded structure (resource
+    /// discipline: clean error, never an allocation abort).
+    ResourceLimitExceeded,
     /// Invalid magic number (expected `\0asm`).
     InvalidMagic,
     /// Unsupported WASM version.
@@ -120,6 +123,8 @@ pub enum DecodeErrorKind {
     InvalidTagAttribute { byte: u8 },
     /// Invalid global mutability encoding.
     InvalidMutability { byte: u8 },
+    /// `br_on_cast` flags byte had a reserved bit set (`flags & 0xfc != 0`).
+    MalformedCastFlags { flags: u8 },
     /// Invalid UTF-8 in a name string.
     InvalidUtf8,
     /// Function and code section counts disagree.
@@ -150,6 +155,9 @@ impl fmt::Display for DecodeErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             DecodeErrorKind::UnexpectedEof => write!(f, "unexpected end of input"),
+            DecodeErrorKind::ResourceLimitExceeded => {
+                write!(f, "resource limit exceeded")
+            }
             DecodeErrorKind::InvalidMagic => write!(f, "invalid magic number (expected \\0asm)"),
             DecodeErrorKind::UnsupportedVersion { found } => {
                 write!(f, "unsupported WASM version {found} (expected 1)")
@@ -189,6 +197,9 @@ impl fmt::Display for DecodeErrorKind {
             }
             DecodeErrorKind::InvalidMutability { byte } => {
                 write!(f, "invalid mutability {byte:#04x}")
+            }
+            DecodeErrorKind::MalformedCastFlags { flags } => {
+                write!(f, "malformed br_on_cast flags {flags:#04x}")
             }
             DecodeErrorKind::InvalidUtf8 => write!(f, "invalid UTF-8 string"),
             DecodeErrorKind::FunctionCodeLengthMismatch { functions, codes } => {

@@ -221,11 +221,11 @@ mod tests {
 
     #[test]
     fn reject_unknown_ref_type() {
-        let section = raw_table_section(&[0x01, 0x6E, 0x00, 0x01]);
+        let section = raw_table_section(&[0x01, 0x68, 0x00, 0x01]);
         let err = parse_table_section(&section).unwrap_err();
         assert!(matches!(
             err.kind,
-            DecodeErrorKind::UnknownRefType { byte: 0x6E }
+            DecodeErrorKind::UnknownRefType { byte: 0x68 }
         ));
     }
 

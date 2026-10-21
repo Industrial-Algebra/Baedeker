@@ -172,6 +172,7 @@ fn cross_instance_catch_through_import() {
         binding.ty.clone(),
         binding.expanded_params.clone(),
         RecProvenance::Bare,
+        binding.closed.clone(),
     );
     let b_store = group.add(&b, &imports);
     link_export(&b_store, &a, &a_store, "a", "throw");
@@ -216,6 +217,7 @@ fn aliased_tag_imports_share_identity() {
             binding.ty.clone(),
             binding.expanded_params.clone(),
             RecProvenance::Bare,
+            binding.closed.clone(),
         )
         .tag(
             "a",
@@ -224,6 +226,7 @@ fn aliased_tag_imports_share_identity() {
             binding.ty.clone(),
             binding.expanded_params.clone(),
             RecProvenance::Bare,
+            binding.closed.clone(),
         );
     let b_store = group.add(&b, &imports);
 
@@ -304,6 +307,7 @@ fn importer_throw_caught_in_exporter() {
             binding.ty.clone(),
             binding.expanded_params.clone(),
             RecProvenance::Bare,
+            binding.closed.clone(),
         );
     let b_store = group.add(&b, &b_imports);
     link_export(&b_store, &a, &a_store, "a", "wrap");
@@ -342,6 +346,7 @@ fn incompatible_tag_type_unlinkable() {
         binding.ty.clone(),
         binding.expanded_params.clone(),
         RecProvenance::Bare,
+        binding.closed.clone(),
     );
     let error = group
         .try_add(&b, &imports)
@@ -415,6 +420,7 @@ fn exnref_across_instances() {
         binding.ty.clone(),
         binding.expanded_params.clone(),
         RecProvenance::Bare,
+        binding.closed.clone(),
     );
     let b_store = group.add(&b, &b_imports);
     // A calls B's relay, which catch_ref's A's tag into an exnref, rethrows
@@ -488,6 +494,7 @@ fn multi_instance_ids_distinct() {
             a_binding.ty,
             a_binding.expanded_params.clone(),
             RecProvenance::Bare,
+            a_binding.closed.clone(),
         )
         .tag(
             "b",
@@ -496,6 +503,7 @@ fn multi_instance_ids_distinct() {
             b_binding.ty,
             b_binding.expanded_params.clone(),
             RecProvenance::Bare,
+            b_binding.closed.clone(),
         );
     let c_store = group.add(&c, &c_imports);
     link_export(&c_store, &a, &a_store, "a", "throw_a");
@@ -546,6 +554,7 @@ fn different_concrete_ref_params_do_not_link() {
         binding.ty.clone(),
         binding.expanded_params.clone(),
         RecProvenance::Bare,
+        binding.closed.clone(),
     );
     let error = group
         .try_add(&b, &imports)
@@ -589,6 +598,7 @@ fn identical_typed_tags_at_different_indices_link() {
         binding.ty.clone(),
         binding.expanded_params.clone(),
         RecProvenance::Bare,
+        binding.closed.clone(),
     );
     group
         .try_add(&b, &imports)
@@ -625,6 +635,7 @@ fn nested_rec_reference_rejects_against_bare() {
         binding.ty,
         binding.expanded_params.clone(),
         binding.rec.clone(),
+        binding.closed.clone(),
     );
     let error = group
         .try_add(&b, &imports)
@@ -667,6 +678,7 @@ fn cyclic_sibling_group_tag_rejects_against_bare() {
         binding.ty,
         binding.expanded_params.clone(),
         binding.rec.clone(),
+        binding.closed.clone(),
     );
     let error = group
         .try_add(&b, &imports)
@@ -706,6 +718,7 @@ fn singleton_rec_group_links_against_bare() {
         binding.ty,
         binding.expanded_params.clone(),
         binding.rec.clone(),
+        binding.closed.clone(),
     );
     group
         .try_add(&b, &imports)

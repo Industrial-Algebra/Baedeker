@@ -18,10 +18,12 @@ use std::rc::Rc;
 use baedeker_core::binary::module::Module;
 use baedeker_core::lower::RegModule;
 use baedeker_core::runtime::{
-    HostFunction, Imports, RuntimeError, RuntimeErrorKind, Store, Value, execute_export, link_func,
+    HostFunction, Imports, RefPattern, RuntimeError, RuntimeErrorKind, Store, Value,
+    execute_export, link_func,
 };
 use baedeker_core::types::{
-    FuncType, GlobalType, MemType, Mutability, NumType, TableType, ValType,
+    CompType, FuncType, GlobalType, MemType, Mutability, NumType, SubType, TableType, TypeIdx,
+    ValType, defined_type_matches,
 };
 use wast::core::{WastArgCore, WastRetCore};
 use wast::parser::{ParseBuffer, parse};
@@ -30,18 +32,6 @@ use wast::{QuoteWat, Wast, WastArg, WastDirective, WastExecute, WastRet};
 /// Files deferred with a reason (feature not yet implemented). Every entry
 /// here is a known gap; keep the list honest and shrinking.
 const DEFERRED_FILES: &[(&str, &str)] = &[
-    // Function-references / GC-era references.
-    ("ref_null.wast", "GC heap types (anyref) not implemented"),
-    (
-        "type-canon.wast",
-        "GC type canonicalization not implemented",
-    ),
-    (
-        "type-equivalence.wast",
-        "GC type equivalence not implemented",
-    ),
-    ("type-rec.wast", "recursive types not implemented"),
-    ("type.wast", "recursive/GC types not implemented"),
     // Guard-page semantics are host/OS-specific.
     (
         "skip-stack-guard-page.wast",
@@ -156,6 +146,34 @@ fn instantiate(
 
     // State imports: resolve eagerly against spectest + linked instances.
     let mut imports = Imports::new();
+    // Register every provider module's type section and GC heap: concrete
+    // reference types in imported signatures are then matched structurally
+    // (rolled closed forms) instead of by raw local index, and GC references
+    // reaching this instance resolve against the heap that created them.
+    // `Imports::with_module_types` is last-wins per module name, so collect
+    // the distinct names first.
+    let mut provider_names: BTreeMap<&str, ()> = BTreeMap::new();
+    for declared in &module.imported_funcs {
+        provider_names.insert(declared.module.as_str(), ());
+    }
+    for declared in &module.imported_memories {
+        provider_names.insert(declared.module.as_str(), ());
+    }
+    for declared in &module.imported_globals {
+        provider_names.insert(declared.module.as_str(), ());
+    }
+    for declared in &module.imported_tables {
+        provider_names.insert(declared.module.as_str(), ());
+    }
+    for declared in &module.imported_tags {
+        provider_names.insert(declared.module.as_str(), ());
+    }
+    for name in provider_names.keys().copied() {
+        if let Some(source) = registry.get(Some(name)) {
+            imports = imports.with_module_types(name, &source.module);
+            imports = imports.provider_heap(source.store.borrow().gc_heap());
+        }
+    }
     for declared in &module.imported_memories {
         imports = if declared.module == "spectest" {
             imports.memory("spectest", &declared.name, spectest_memory(&declared.name)?)
@@ -222,6 +240,7 @@ fn instantiate(
             binding.ty.clone(),
             binding.expanded_params.clone(),
             binding.rec.clone(),
+            binding.closed.clone(),
         );
     }
 
@@ -238,9 +257,30 @@ fn instantiate(
     let store = &mut *store_guard;
 
     // Function imports: link lazily against spectest + registered instances.
-    for declared in &module.imported_funcs {
+    // Bound per DECLARATION: one `(module, name)` may be imported several
+    // times with different declared types (`type-subtyping.wast`), each
+    // matched against the provider's type entry by `match_deftype` above.
+    for (func_idx, declared) in module.imported_funcs.iter().enumerate() {
         let host = if declared.module == "spectest" {
-            spectest_host_func(&declared.name)?
+            let host = spectest_host_func(&declared.name)?;
+            // Spectest imports are matched like any other extern: by the
+            // PROVIDER's type entry against this DECLARATION's entry
+            // (`eval.ml:1187` runs `Match.match_externtype [] xt' xt` with
+            // `xt'` the provider). `host/spectest.ml:35` allocates each host
+            // function with `DefT (RecT [SubT (Final, [], FuncT (ts1, ts2))],
+            // 0l)`, so the check is `match_deftype` against that single final
+            // supertype-free member. Skipping it would let a mismatched
+            // declaration bind silently (e.g. `print_i32` declared `(param
+            // i64)`).
+            if !spectest_signature_matches(&host, &module, declared.type_idx) {
+                return Err(format!(
+                    "link: incompatible import type on \"spectest\".\"{}\": spectest provides {:?}, import declares type {:?}",
+                    declared.name,
+                    host.ty(),
+                    declared.type_idx
+                ));
+            }
+            host
         } else {
             let source = registry.get(Some(&declared.module)).ok_or_else(|| {
                 format!(
@@ -259,27 +299,40 @@ fn instantiate(
                     )
                 })?;
             // Type-check the linked function against the import declaration
-            // (spec: mismatched signatures are a link error).
-            let source_ty = &source
+            // (spec: a mismatched type is a link error). `eval.ml:1187` runs
+            // `Match.match_externtype [] xt' xt` with `xt'` the PROVIDER's
+            // type and `xt` the import DECLARATION; for functions
+            // `valid/match.ml:175-186` delegates to `match_deftype`, i.e. the
+            // two type ENTRIES must be canonically identical (rolled closed
+            // forms — rec-group shape and position included) or the provided
+            // one must declare a supertype chain reaching the declared one.
+            // Raw local-index comparison would reject structurally equal
+            // types; a params/results comparison would accept different
+            // rec-group shapes.
+            let Some(source_idx) = source
                 .module
                 .funcs
                 .iter()
                 .find(|func| func.idx == func_idx)
-                .map(|func| &source.module.types[func.type_idx.0 as usize]);
-            match source_ty {
-                Some(source_ty) if **source_ty == declared.ty => {}
-                Some(source_ty) => {
-                    return Err(format!(
-                        "link: type mismatch on {:?}.{:?}: source {source_ty:?} vs import {:?}",
-                        declared.module, declared.name, declared.ty
-                    ));
-                }
-                None => {
-                    return Err(format!(
-                        "link: function {func_idx:?} not found in {:?}",
-                        declared.module
-                    ));
-                }
+                .map(|func| func.type_idx)
+            else {
+                return Err(format!(
+                    "link: function {func_idx:?} not found in {:?}",
+                    declared.module
+                ));
+            };
+            if !baedeker_core::types::defined_type_matches(
+                &source.module.type_defs,
+                &source.module.rec_groups,
+                source_idx,
+                &module.type_defs,
+                &module.rec_groups,
+                declared.type_idx,
+            ) {
+                return Err(format!(
+                    "link: type mismatch on {:?}.{:?}: source type {:?} vs import type {:?}",
+                    declared.module, declared.name, source_idx, declared.type_idx
+                ));
             }
             link_func(
                 source.module.clone(),
@@ -289,7 +342,7 @@ fn instantiate(
             )
         };
         store
-            .register_host_func(&declared.module, &declared.name, host)
+            .bind_host_func(func_idx as u32, host)
             .map_err(|error| format!("register host func failed: {error:?}"))?;
     }
 
@@ -400,6 +453,31 @@ fn spectest_table(name: &str) -> Result<TableType, String> {
         }),
         other => Err(format!("unknown spectest table {other:?}")),
     }
+}
+
+/// Whether a spectest host function matches an import DECLARATION's type
+/// entry, as `match_deftype` (`valid/match.ml:145-150`, reached from
+/// `eval.ml:1187`'s `match_externtype`).
+///
+/// `host/spectest.ml:35` gives every host function the type entry
+/// `DefT (RecT [SubT (Final, [], FuncT (ts1, ts2))], 0l)`: one final member,
+/// no declared supertypes, no rec-group neighbours. That is exactly the
+/// synthetic provider section built here.
+fn spectest_signature_matches(host: &HostFunction, module: &RegModule, declared: TypeIdx) -> bool {
+    let provided = [SubType {
+        is_final: true,
+        supertypes: Vec::new(),
+        comp: CompType::Func(host.ty().clone()),
+    }];
+    let provided_recs = [(0u32, 1u32)];
+    defined_type_matches(
+        &provided,
+        &provided_recs,
+        TypeIdx(0),
+        &module.type_defs,
+        &module.rec_groups,
+        declared,
+    )
 }
 
 fn spectest_host_func(name: &str) -> Result<HostFunction, String> {
@@ -522,7 +600,7 @@ fn run_file(path: &Path, stats: &mut OfficialStats) {
                         let _ = name;
                         match instantiate(path, &mut registry, lowered) {
                             Err(msg) => {
-                                if !msg.contains(message) {
+                                if !message_matches(&msg, message) {
                                     stats.failures.push(format!(
                                         "{}: assert_trap expected {message:?}, got {msg:?}",
                                         path.display()
@@ -692,8 +770,12 @@ fn invoke_args(args: &[WastArg<'_>]) -> Vec<Value> {
                 } => Value::ExternRef(None),
                 _ => Value::FuncRef(None),
             },
-            WastArg::Core(WastArgCore::RefExtern(value))
-            | WastArg::Core(WastArgCore::RefHost(value)) => Value::ExternRef(Some(*value)),
+            // `ref.extern N` builds `ExternRef(HostRef N)`; `ref.host N`
+            // builds the any-side `HostRef N` (`script.ml:80`: its type is
+            // `AnyHT`). Keeping the zones distinct is what lets an anyref
+            // parameter accept a host reference.
+            WastArg::Core(WastArgCore::RefExtern(value)) => Value::ExternRef(Some(*value)),
+            WastArg::Core(WastArgCore::RefHost(value)) => Value::HostAny(Some(*value)),
             other => panic!("unsupported invoke argument: {other:?}"),
         })
         .collect()
@@ -781,7 +863,7 @@ fn assert_return(
                 return;
             };
             let actual = cell.get();
-            if expected.len() == 1 && result_matches(&actual, &expected[0]) {
+            if expected.len() == 1 && result_matches(&actual, &expected[0], Some(&store)) {
                 return;
             }
             stats.failures.push(format!(
@@ -809,11 +891,17 @@ fn assert_return(
     };
     match result {
         Ok(actual) => {
+            // Reference-pattern matching needs the instance's store (GC object
+            // kinds live in the heap, not in the value).
+            let store = registry
+                .get(invoke.module.map(|id| id.name()))
+                .map(|instance| instance.store.borrow());
+            let store = store.as_deref();
             if actual.len() != expected.len()
                 || !actual
                     .iter()
                     .zip(expected.iter())
-                    .all(|(actual, expected)| result_matches(actual, expected))
+                    .all(|(actual, expected)| result_matches(actual, expected, store))
             {
                 stats.failures.push(format!(
                     "{}: assert_return mismatch on {:?}: actual {actual:?}, expected {expected:?}",
@@ -827,6 +915,27 @@ fn assert_return(
             path.display(),
             invoke.name
         )),
+    }
+}
+
+/// The pin's assertion-message rule (`interpreter/script/runner.ml:498-502`,
+/// `assert_message`): the ACTUAL message must start with the EXPECTED
+/// string; the actual may be longer, but never differ inside the expected
+/// prefix (`String.sub msg 0 (String.length re) <> re` is the failure case).
+fn message_matches(actual: &str, expected: &str) -> bool {
+    actual.starts_with(expected)
+}
+
+/// The trap-shaped message for an execution error, if the error is a trap in
+/// the spec's sense. `ref.cast` failure is a runtime trap whose message
+/// starts with `"cast failure, expected "` (`interpreter/exec/eval.ml:657`);
+/// `RuntimeErrorKind::CastFailure` stays a distinct embedder-facing kind, but
+/// the script harness reports it through the trap-message channel.
+fn trap_message(error: &RuntimeError) -> Option<String> {
+    match &error.kind {
+        RuntimeErrorKind::Trap(trap) => Some(trap.wast_message().to_owned()),
+        RuntimeErrorKind::CastFailure { .. } => Some(error.kind.to_string()),
+        _ => None,
     }
 }
 
@@ -857,18 +966,17 @@ fn assert_trap(
     };
     match result {
         Err(error) => {
-            let RuntimeErrorKind::Trap(trap) = error.kind else {
+            let Some(actual) = trap_message(&error) else {
                 stats.failures.push(format!(
                     "{}: assert_trap expected {message:?}, got non-trap error: {error:?}",
                     path.display()
                 ));
                 return;
             };
-            if trap.wast_message() != message {
+            if !message_matches(&actual, message) {
                 stats.failures.push(format!(
-                    "{}: assert_trap message mismatch: got {:?}, expected {message:?}",
-                    path.display(),
-                    trap.wast_message()
+                    "{}: assert_trap message mismatch: got {actual:?}, expected {message:?}",
+                    path.display()
                 ));
             }
         }
@@ -923,12 +1031,20 @@ fn assert_exhaustion(
 }
 
 /// Whether an actual runtime value satisfies an expected WAST result,
-/// including NaN patterns and v128 lane patterns.
-fn result_matches(actual: &Value, expected: &WastRet<'_>) -> bool {
+/// including NaN patterns, v128 lane patterns, and reference patterns
+/// (`script/runner.ml:464-483` `assert_ref_pat`).
+fn result_matches(actual: &Value, expected: &WastRet<'_>, store: Option<&Store>) -> bool {
     match expected {
-        WastRet::Core(WastRetCore::I32(value)) => *actual == Value::I32(*value),
-        WastRet::Core(WastRetCore::I64(value)) => *actual == Value::I64(*value),
-        WastRet::Core(WastRetCore::F32(pattern)) => match (actual, pattern) {
+        WastRet::Core(core) => ret_core_matches(actual, core, store),
+        _ => false,
+    }
+}
+
+fn ret_core_matches(actual: &Value, expected: &WastRetCore<'_>, store: Option<&Store>) -> bool {
+    match expected {
+        WastRetCore::I32(value) => *actual == Value::I32(*value),
+        WastRetCore::I64(value) => *actual == Value::I64(*value),
+        WastRetCore::F32(pattern) => match (actual, pattern) {
             (Value::F32(actual), wast::core::NanPattern::Value(expected)) => {
                 actual.to_bits() == expected.bits
             }
@@ -938,7 +1054,7 @@ fn result_matches(actual: &Value, expected: &WastRet<'_>) -> bool {
             (Value::F32(actual), wast::core::NanPattern::ArithmeticNan) => actual.is_nan(),
             _ => false,
         },
-        WastRet::Core(WastRetCore::F64(pattern)) => match (actual, pattern) {
+        WastRetCore::F64(pattern) => match (actual, pattern) {
             (Value::F64(actual), wast::core::NanPattern::Value(expected)) => {
                 actual.to_bits() == expected.bits
             }
@@ -948,36 +1064,65 @@ fn result_matches(actual: &Value, expected: &WastRet<'_>) -> bool {
             (Value::F64(actual), wast::core::NanPattern::ArithmeticNan) => actual.is_nan(),
             _ => false,
         },
-        WastRet::Core(WastRetCore::RefNull(_)) => {
-            matches!(actual, Value::FuncRef(None) | Value::ExternRef(None))
+        // Reference patterns: the pinned `assert_ref_pat` rows live in the
+        // runtime so embedders and tests share one relation.
+        WastRetCore::RefNull(_) => {
+            baedeker_core::runtime::ref_matches_pattern(actual, RefPattern::Null, store)
         }
-        WastRet::Core(WastRetCore::RefExtern(Some(expected))) => {
-            *actual == Value::ExternRef(Some(*expected))
+        WastRetCore::RefExtern(Some(expected)) => baedeker_core::runtime::ref_matches_pattern(
+            actual,
+            RefPattern::Extern(Some(*expected)),
+            store,
+        ),
+        // Bare `(ref.extern)`: the `RefTypePat ExternHT, _` row matches every
+        // reference value, nulls included (runner.ml:475).
+        WastRetCore::RefExtern(None) => {
+            baedeker_core::runtime::ref_matches_pattern(actual, RefPattern::Extern(None), store)
         }
-        WastRet::Core(WastRetCore::RefExtern(None)) => actual == &Value::ExternRef(None),
-        // `(ref.func)` with no index: any non-null funcref.
-        WastRet::Core(WastRetCore::RefFunc(None)) => matches!(actual, Value::FuncRef(Some(_))),
-        WastRet::Core(WastRetCore::RefFunc(Some(expected))) => {
-            let expected_idx = match expected {
-                wast::token::Index::Num(idx, _) => Some(*idx),
-                wast::token::Index::Id(_) => None,
-            };
-            match (actual, expected_idx) {
-                (Value::FuncRef(Some((_, actual_idx))), Some(expected_idx)) => {
-                    actual_idx == &expected_idx
-                }
-                (Value::FuncRef(Some(_)), None) => true,
-                _ => false,
+        // `(ref.func)` / `(ref.func $f)`.
+        WastRetCore::RefFunc(None) => {
+            baedeker_core::runtime::ref_matches_pattern(actual, RefPattern::FuncAny, store)
+        }
+        WastRetCore::RefFunc(Some(index)) => match index {
+            wast::token::Index::Num(idx, _) => baedeker_core::runtime::ref_matches_pattern(
+                actual,
+                RefPattern::FuncIndex(*idx),
+                store,
+            ),
+            wast::token::Index::Id(_) => {
+                baedeker_core::runtime::ref_matches_pattern(actual, RefPattern::FuncAny, store)
             }
+        },
+        // `(ref.host n)`: eq_ref identity on the any-side host handle only
+        // (`script.ml:93` equates `HostRef` with `HostRef`).
+        WastRetCore::RefHost(expected) => {
+            baedeker_core::runtime::ref_matches_pattern(actual, RefPattern::Host(*expected), store)
         }
-        WastRet::Core(WastRetCore::RefHost(_)) => false,
-        WastRet::Core(WastRetCore::V128(pattern)) => {
+        WastRetCore::RefAny => {
+            baedeker_core::runtime::ref_matches_pattern(actual, RefPattern::Any, store)
+        }
+        WastRetCore::RefEq => {
+            baedeker_core::runtime::ref_matches_pattern(actual, RefPattern::Eq, store)
+        }
+        WastRetCore::RefStruct => {
+            baedeker_core::runtime::ref_matches_pattern(actual, RefPattern::Struct, store)
+        }
+        WastRetCore::RefArray => {
+            baedeker_core::runtime::ref_matches_pattern(actual, RefPattern::Array, store)
+        }
+        WastRetCore::RefI31 | WastRetCore::RefI31Shared => {
+            baedeker_core::runtime::ref_matches_pattern(actual, RefPattern::I31, store)
+        }
+        // `EitherResult`: any alternative may match.
+        WastRetCore::Either(cases) => cases
+            .iter()
+            .any(|case| ret_core_matches(actual, case, store)),
+        WastRetCore::V128(pattern) => {
             let Value::V128(actual) = actual else {
                 return false;
             };
             v128_pattern_matches(actual, pattern)
         }
-        _ => false,
     }
 }
 
@@ -1128,4 +1273,113 @@ fn official_spec_cases_inner() {
         panic!("{report}");
     }
     assert!(stats.files > 0, "expected official spec files to run");
+}
+
+/// `assert_message` accepts an actual message that extends the expected one
+/// (the pin's prefix rule) …
+#[test]
+fn assert_message_prefix_accepts_longer_actual() {
+    assert!(message_matches(
+        "cast failure, expected (ref null struct) but got i31",
+        "cast failure"
+    ));
+    assert!(message_matches(
+        "out of bounds memory access",
+        "out of bounds"
+    ));
+    assert!(message_matches("cast failure", "cast failure"));
+}
+
+/// … and rejects an actual message that diverges inside the expected prefix
+/// (including one that merely CONTAINS the expected text later on).
+#[test]
+fn assert_message_prefix_rejects_divergent_actual() {
+    assert!(!message_matches("cast failure", "cast failure, expected"));
+    assert!(!message_matches("expected cast failure", "cast failure"));
+    assert!(!message_matches(
+        "call stack exhausted, cast failure",
+        "cast failure"
+    ));
+}
+
+/// A `ref.cast` failure reaches the harness as the trap message the corpus
+/// asserts (`eval.ml:657`), while keeping its distinct embedder-facing kind.
+#[test]
+fn cast_failure_reports_trap_shaped_message() {
+    let error = RuntimeError {
+        kind: RuntimeErrorKind::CastFailure {
+            expected: baedeker_core::types::RefType::from_parts(
+                true,
+                baedeker_core::types::HeapType::Struct,
+            ),
+        },
+    };
+    let message = trap_message(&error).expect("cast failure is trap-shaped");
+    assert!(
+        message.starts_with("cast failure, expected "),
+        "rendered prefix must be exactly `cast failure, expected `: {message}"
+    );
+    assert!(message_matches(&message, "cast failure"));
+    assert!(message_matches(&message, "cast failure, expected"));
+}
+
+/// Lower an inline WAT module for a unit-level harness test.
+fn inline_module(source: &str) -> RegModule {
+    let buf = ParseBuffer::new(source).expect("parse buffer");
+    let mut wat = parse::<wast::Wat<'_>>(&buf).expect("parse wat");
+    let bytes = wat.encode().expect("encode wat");
+    Module::decode(&bytes)
+        .expect("decode module")
+        .lower()
+        .expect("lower module")
+}
+
+/// Link `source` against a fresh registry and return the outcome.
+fn link_inline(source: &str) -> Result<(), String> {
+    let mut registry = Registry::new();
+    instantiate(Path::new("<inline>"), &mut registry, inline_module(source)).map(|_| ())
+}
+
+/// A spectest declaration is an IMPORT DECLARATION like any other: its type
+/// entry must `match_deftype` the host function's own type entry
+/// (`host/spectest.ml:35` allocates the host function with `DefT (RecT [SubT
+/// (Final, [], FuncT (ts1, ts2))], 0)` and `eval.ml:1187` runs
+/// `Match.match_externtype [] xt' xt` on it). A mismatched declaration is a
+/// link error — never a silent binding.
+#[test]
+fn spectest_import_type_mismatch_is_a_link_error() {
+    let error = link_inline(r#"(module (import "spectest" "print_i32" (func (param i64))))"#)
+        .expect_err("a mismatched spectest declaration must not link");
+    assert!(
+        error.contains("incompatible import type"),
+        "expected an incompatible-import-type link error, got {error}"
+    );
+
+    // The matching declaration links.
+    link_inline(r#"(module (import "spectest" "print_i32" (func (param i32))))"#)
+        .expect("the matching declaration links");
+}
+
+/// The spectest check runs PER DECLARATION (the `$t0`/`$t1` shape): two
+/// declarations of one name with the same type both bind, and a mismatched
+/// declaration is rejected even when a matching one is present.
+#[test]
+fn spectest_import_type_check_is_per_declaration() {
+    link_inline(
+        r#"(module
+             (import "spectest" "print_i32" (func (param i32)))
+             (import "spectest" "print_i32" (func (param i32))))"#,
+    )
+    .expect("both matching declarations link");
+
+    let error = link_inline(
+        r#"(module
+             (import "spectest" "print_i32" (func (param i32)))
+             (import "spectest" "print_i32" (func (param i64))))"#,
+    )
+    .expect_err("the mismatched declaration must not link");
+    assert!(
+        error.contains("incompatible import type"),
+        "expected an incompatible-import-type link error, got {error}"
+    );
 }

@@ -8,7 +8,7 @@
 
 use alloc::vec::Vec;
 
-use crate::binary::instr::{Instr, decode_instr};
+use crate::binary::instr::decode_const_expr_bytes;
 use crate::binary::leb128::{self, Cursor};
 use crate::binary::section::RawSection;
 use crate::binary::typeparser::parse_ref_type as parse_binary_ref_type;
@@ -192,26 +192,7 @@ fn parse_init_expr<'a>(
     cursor: &mut Cursor<'a>,
     base_offset: usize,
 ) -> Result<&'a [u8], DecodeError> {
-    let start = cursor.position();
-    let mut block_depth = 0usize;
-    loop {
-        let instr = decode_instr(cursor, base_offset).map_err(|mut e| {
-            e.context = DecodeContext::ElementSection;
-            e
-        })?;
-        match instr {
-            Instr::Block(_) | Instr::Loop(_) | Instr::If(_) | Instr::TryTable(_) => {
-                block_depth += 1
-            }
-            Instr::End => {
-                if block_depth == 0 {
-                    return Ok(&cursor.original()[start..cursor.position()]);
-                }
-                block_depth -= 1;
-            }
-            _ => {}
-        }
-    }
+    decode_const_expr_bytes(cursor, base_offset, DecodeContext::ElementSection)
 }
 
 fn parse_elemkind(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<RefType, DecodeError> {
@@ -351,11 +332,11 @@ mod tests {
 
     #[test]
     fn reject_unknown_reference_type() {
-        let section = raw_element_section(&[0x01, 0x05, 0x6E, 0x00]);
+        let section = raw_element_section(&[0x01, 0x05, 0x68, 0x00]);
         let err = parse_element_section(&section).unwrap_err();
         assert!(matches!(
             err.kind,
-            DecodeErrorKind::UnknownRefType { byte: 0x6E }
+            DecodeErrorKind::UnknownRefType { byte: 0x68 }
         ));
     }
 
