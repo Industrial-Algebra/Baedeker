@@ -693,6 +693,7 @@ mod tests {
                 min: 0,
                 max: None,
                 is64: true,
+                shared: false,
             },
             init: None,
         };
@@ -702,6 +703,7 @@ mod tests {
                 min: DENSE_LIMIT as u64 + 16,
                 max: None,
                 is64: true,
+                shared: false,
             },
             ..ty
         };
@@ -742,6 +744,7 @@ mod tests {
                 min,
                 max,
                 is64: false,
+                shared: false,
             },
             init: None,
         }

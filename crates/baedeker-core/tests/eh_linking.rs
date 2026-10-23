@@ -287,6 +287,7 @@ fn importer_throw_caught_in_exporter() {
             min: 1,
             max: None,
             is64: false,
+            shared: false,
         },
         init: None,
     };

@@ -334,6 +334,11 @@ pub struct Limits {
     pub min: u64,
     pub max: Option<u64>,
     pub is64: bool,
+    /// Classic-threads shared flag. Only memories may be shared at the
+    /// threads pin; shared memories require a maximum (`shared ⇒ max`),
+    /// enforced at BOTH decode (memtype tag 0x02 has no max) and
+    /// validation layers.
+    pub shared: bool,
 }
 
 /// Memory types.
