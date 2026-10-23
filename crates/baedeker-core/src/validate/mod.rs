@@ -2710,6 +2710,11 @@ fn validate_instr(
                 OperandType::Typed(ValType::Num(addr_ty)),
             )?;
         }
+        Instr::AtomicFence => {
+            // `atomic.fence`: [] -> []. No memory requirement at the
+            // threads pin (valid.ml:311 checks nothing but the shape).
+        }
+        Instr::Atomic(op) => validate_atomic(module, function, state, offset, op)?,
         Instr::I32Const(_) => push_operand(
             function,
             offset,
@@ -4657,6 +4662,267 @@ fn validate_memarg_offset(
         });
     }
     Ok(())
+}
+
+/// Classic-threads atomic validation (threads U1). Rules per the pin's
+/// reference (valid.ml:151-160 `check_memop` shared by every atomic case,
+/// :295-335 shapes): the memarg's memory defined, align <= natural (the
+/// SAME rule as plain memory ops — the pin's rst text demanding equality
+/// is the contract's recorded ambiguity; its interpreter and corpus make
+/// unaligned access a RUNTIME trap, not a validation error), and NO
+/// shared-memory context requirement. Operand shapes:
+/// load [addr] -> [t]; store [addr t] -> []; rmw [addr t] -> [t];
+/// cmpxchg [addr t t] -> [t]; notify [addr i32] -> [i32];
+/// waitN [addr t i64] -> [i32]; fence [] -> [].
+#[allow(clippy::too_many_lines)]
+fn validate_atomic(
+    module: &Module<'_>,
+    function: FuncIdx,
+    state: &mut ValidationState,
+    offset: usize,
+    op: &crate::binary::instr::AtomicOp,
+) -> Result<(), ValidationError> {
+    use crate::binary::instr::AtomicOp as Op;
+    use crate::types::MemArg;
+    use crate::types::NumType::{I32, I64};
+    use crate::types::ValType::Num;
+
+    let (name, memarg): (&'static str, MemArg) = match op {
+        Op::Notify(m) => ("memory.atomic.notify", *m),
+        Op::Wait32(m) => ("memory.atomic.wait32", *m),
+        Op::Wait64(m) => ("memory.atomic.wait64", *m),
+        Op::Load(w, m) => (ATOMIC_LOAD_NAMES[width_index(*w)], *m),
+        Op::Store(w, m) => (ATOMIC_STORE_NAMES[width_index(*w)], *m),
+        Op::Rmw(kind, w, m) => {
+            let row = rmw_index(*kind);
+            debug_assert!(row < ATOMIC_RMW_NAMES.len(), "xchg handled separately");
+            // xchg lives in the 0x41..=0x47 decode range but shares the
+            // rmw table shape; map it past the 5 table rows to its own
+            // handling below.
+            let name = if row < ATOMIC_RMW_NAMES.len() {
+                ATOMIC_RMW_NAMES[row][width_index(*w)]
+            } else {
+                XCHG_NAMES[width_index(*w)]
+            };
+            (name, *m)
+        }
+        Op::Cmpxchg(w, m) => (ATOMIC_CMPXCHG_NAMES[width_index(*w)], *m),
+    };
+    let natural = match op {
+        Op::Notify(_) | Op::Wait32(_) => 2,
+        Op::Wait64(_) => 3,
+        Op::Load(w, _) | Op::Store(w, _) | Op::Rmw(_, w, _) | Op::Cmpxchg(w, _) => {
+            w.natural_align_log2()
+        }
+    };
+    validate_memarg_align(function, offset, name, memarg.align, natural)?;
+    validate_memarg_offset(module, memarg.memory, memarg.offset, function, offset)?;
+    let memory_type = resolve_memory_type(module, memarg.memory, function, offset)?;
+    let addr = addr_num_type(&memory_type.limits);
+
+    match op {
+        Op::Load(w, _) => {
+            pop_expect(
+                module,
+                function,
+                state,
+                Num(addr),
+                offset,
+                "atomic load address",
+            )?;
+            push_operand(function, offset, state, OperandType::Typed(w.val_type()))?;
+        }
+        Op::Store(w, _) => {
+            let stored = w.val_type();
+            pop_expect(
+                module,
+                function,
+                state,
+                stored,
+                offset,
+                "atomic store value",
+            )?;
+            pop_expect(
+                module,
+                function,
+                state,
+                Num(addr),
+                offset,
+                "atomic store address",
+            )?;
+        }
+        Op::Rmw(_, w, _) => {
+            let ty = w.val_type();
+            pop_expect(module, function, state, ty, offset, "atomic rmw operand")?;
+            pop_expect(
+                module,
+                function,
+                state,
+                Num(addr),
+                offset,
+                "atomic rmw address",
+            )?;
+            push_operand(function, offset, state, OperandType::Typed(ty))?;
+        }
+        Op::Cmpxchg(w, _) => {
+            let ty = w.val_type();
+            pop_expect(
+                module,
+                function,
+                state,
+                ty,
+                offset,
+                "atomic cmpxchg replacement",
+            )?;
+            pop_expect(
+                module,
+                function,
+                state,
+                ty,
+                offset,
+                "atomic cmpxchg expected",
+            )?;
+            pop_expect(
+                module,
+                function,
+                state,
+                Num(addr),
+                offset,
+                "atomic cmpxchg address",
+            )?;
+            push_operand(function, offset, state, OperandType::Typed(ty))?;
+        }
+        Op::Notify(_) => {
+            pop_expect(module, function, state, Num(I32), offset, "notify count")?;
+            pop_expect(module, function, state, Num(addr), offset, "notify address")?;
+            push_operand(function, offset, state, OperandType::Typed(Num(I32)))?;
+        }
+        Op::Wait32(_) => {
+            pop_expect(module, function, state, Num(I64), offset, "wait timeout")?;
+            pop_expect(module, function, state, Num(I32), offset, "wait expected")?;
+            pop_expect(module, function, state, Num(addr), offset, "wait address")?;
+            push_operand(function, offset, state, OperandType::Typed(Num(I32)))?;
+        }
+        Op::Wait64(_) => {
+            pop_expect(module, function, state, Num(I64), offset, "wait timeout")?;
+            pop_expect(module, function, state, Num(I64), offset, "wait expected")?;
+            pop_expect(module, function, state, Num(addr), offset, "wait address")?;
+            push_operand(function, offset, state, OperandType::Typed(Num(I32)))?;
+        }
+    }
+    Ok(())
+}
+
+/// WAT-style names for validation messages: `&'static str` (the error
+/// kinds carry 'static op names). Rows follow `width_at`'s layout:
+/// [i32, i64, i32.8u, i32.16u, i64.8u, i64.16u, i64.32u].
+const ATOMIC_LOAD_NAMES: [&str; 7] = [
+    "i32.atomic.load",
+    "i64.atomic.load",
+    "i32.atomic.load8_u",
+    "i32.atomic.load16_u",
+    "i64.atomic.load8_u",
+    "i64.atomic.load16_u",
+    "i64.atomic.load32_u",
+];
+const ATOMIC_STORE_NAMES: [&str; 7] = [
+    "i32.atomic.store",
+    "i64.atomic.store",
+    "i32.atomic.store8",
+    "i32.atomic.store16",
+    "i64.atomic.store8",
+    "i64.atomic.store16",
+    "i64.atomic.store32",
+];
+const XCHG_NAMES: [&str; 7] = [
+    "i32.atomic.rmw.xchg",
+    "i64.atomic.rmw.xchg",
+    "i32.atomic.rmw8.xchg_u",
+    "i32.atomic.rmw16.xchg_u",
+    "i64.atomic.rmw8.xchg_u",
+    "i64.atomic.rmw16.xchg_u",
+    "i64.atomic.rmw32.xchg_u",
+];
+const ATOMIC_CMPXCHG_NAMES: [&str; 7] = [
+    "i32.atomic.rmw.cmpxchg",
+    "i64.atomic.rmw.cmpxchg",
+    "i32.atomic.rmw8.cmpxchg_u",
+    "i32.atomic.rmw16.cmpxchg_u",
+    "i64.atomic.rmw8.cmpxchg_u",
+    "i64.atomic.rmw16.cmpxchg_u",
+    "i64.atomic.rmw32.cmpxchg_u",
+];
+const ATOMIC_RMW_NAMES: [[&str; 7]; 5] = [
+    [
+        "i32.atomic.rmw.add",
+        "i64.atomic.rmw.add",
+        "i32.atomic.rmw8.add_u",
+        "i32.atomic.rmw16.add_u",
+        "i64.atomic.rmw8.add_u",
+        "i64.atomic.rmw16.add_u",
+        "i64.atomic.rmw32.add_u",
+    ],
+    [
+        "i32.atomic.rmw.sub",
+        "i64.atomic.rmw.sub",
+        "i32.atomic.rmw8.sub_u",
+        "i32.atomic.rmw16.sub_u",
+        "i64.atomic.rmw8.sub_u",
+        "i64.atomic.rmw16.sub_u",
+        "i64.atomic.rmw32.sub_u",
+    ],
+    [
+        "i32.atomic.rmw.and",
+        "i64.atomic.rmw.and",
+        "i32.atomic.rmw8.and_u",
+        "i32.atomic.rmw16.and_u",
+        "i64.atomic.rmw8.and_u",
+        "i64.atomic.rmw16.and_u",
+        "i64.atomic.rmw32.and_u",
+    ],
+    [
+        "i32.atomic.rmw.or",
+        "i64.atomic.rmw.or",
+        "i32.atomic.rmw8.or_u",
+        "i32.atomic.rmw16.or_u",
+        "i64.atomic.rmw8.or_u",
+        "i64.atomic.rmw16.or_u",
+        "i64.atomic.rmw32.or_u",
+    ],
+    [
+        "i32.atomic.rmw.xor",
+        "i64.atomic.rmw.xor",
+        "i32.atomic.rmw8.xor_u",
+        "i32.atomic.rmw16.xor_u",
+        "i64.atomic.rmw8.xor_u",
+        "i64.atomic.rmw16.xor_u",
+        "i64.atomic.rmw32.xor_u",
+    ],
+];
+
+fn width_index(w: crate::binary::instr::AtomicWidth) -> usize {
+    use crate::binary::instr::AtomicWidth::*;
+    match w {
+        I32 => 0,
+        I64 => 1,
+        I32N8 => 2,
+        I32N16 => 3,
+        I64N8 => 4,
+        I64N16 => 5,
+        I64N32 => 6,
+    }
+}
+
+fn rmw_index(kind: crate::binary::instr::AtomicRmw) -> usize {
+    use crate::binary::instr::AtomicRmw::*;
+    match kind {
+        Add => 0,
+        Sub => 1,
+        And => 2,
+        Or => 3,
+        Xor => 4,
+        Xchg => ATOMIC_RMW_NAMES.len(), // out of range -> debug assert below
+    }
 }
 
 fn validate_load(

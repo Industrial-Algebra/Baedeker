@@ -8871,6 +8871,7 @@ mod tests {
                     min: 1,
                     max: Some(2),
                     is64: false,
+                    shared: false,
                 },
             },
         );
@@ -8986,6 +8987,7 @@ mod tests {
                     min: 2,
                     max: None,
                     is64: false,
+                    shared: false,
                 },
                 init: None,
             },
@@ -9051,6 +9053,7 @@ mod tests {
                         min: 1,
                         max: None,
                         is64: false,
+                        shared: false,
                     },
                 },
             )
