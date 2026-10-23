@@ -108,6 +108,7 @@ struct ModuleBuilder {
     funcs: Vec<u32>,
     exports: Vec<(String, u32)>,
     memory: Option<(bool, u32, Option<u32>)>,
+    memory64: bool,
     bodies: Vec<Vec<u8>>,
 }
 
@@ -126,6 +127,14 @@ impl ModuleBuilder {
 
     fn unshared_memory(&mut self, min: u32) -> &mut Self {
         self.memory = Some((false, min, None));
+        self
+    }
+
+    /// An unshared 64-bit memory `(memory i64 min max)` (flags 0x05) —
+    /// the only memory shape whose address arithmetic can overflow.
+    fn unshared_memory64(&mut self, min: u32, max: u32) -> &mut Self {
+        self.memory = Some((false, min, Some(max)));
+        self.memory64 = true;
         self
     }
 
@@ -179,10 +188,14 @@ impl ModuleBuilder {
         if let Some((shared, min, max)) = self.memory {
             let mut mem = Vec::new();
             uleb(1, &mut mem);
-            mem.push(match (shared, max.is_some()) {
-                (true, _) => 0x03,
-                (false, true) => 0x01,
-                (false, false) => 0x00,
+            mem.push(if self.memory64 {
+                0x05 // i64 limits, min+max
+            } else {
+                match (shared, max.is_some()) {
+                    (true, _) => 0x03,
+                    (false, true) => 0x01,
+                    (false, false) => 0x00,
+                }
             });
             uleb(min as u64, &mut mem);
             if let Some(max) = max {
@@ -1414,4 +1427,47 @@ fn shared_memory_grow_grows_normally() {
     assert_eq!(h.call("high", &[]), Ok(vec![Value::I32(7)]));
     // The shared maximum is enforced like any other maximum.
     assert_eq!(h.call("grow", &[]), Ok(vec![Value::I32(-1)]));
+}
+
+// ---------------------------------------------------------------------------
+// Review round P3 hardening: the two effective-address corners the family
+// parameterization cannot express.
+
+#[test]
+fn unaligned_base_with_offset_aligning_ea_executes() {
+    // Base 1 is unaligned for a 4-byte access, but ea = 1 + 3 = 4 is
+    // aligned: the rule-7 determination (effective address) executes
+    // cleanly where a base-only check would trap.
+    let mut b = ModuleBuilder::new();
+    b.shared_memory(1, 2);
+    let mut body = Vec::new();
+    i32_const(1, &mut body); // base
+    body.extend_from_slice(&[0xFE, 0x10, 0x02, 0x03]); // i32.atomic.load offset=3
+    body.push(0x1A);
+    let f = b.func(&[], &[], body);
+    b.export("op", f);
+    let h = Harness::new(&b);
+    assert_eq!(h.call("op", &[]), Ok(vec![]), "ea 1+3=4 aligned executes");
+}
+
+#[test]
+fn ea_wraparound_traps_out_of_bounds_not_zero() {
+    // On a 64-bit memory, addr u64::MAX + offset 1 wraps ea to 0 —
+    // ALIGNMENT passes by the wrap, and the bounds check (checked
+    // arithmetic, not wrapping) must trap OOB rather than read
+    // address 0 or panic.
+    let mut b = ModuleBuilder::new();
+    b.unshared_memory64(1, 2);
+    let mut body = Vec::new();
+    i64_const(-1, &mut body); // u64::MAX as base
+    body.extend_from_slice(&[0xFE, 0x11, 0x03, 0x01]); // i64.atomic.load offset=1
+    body.push(0x1A);
+    let f = b.func(&[], &[], body);
+    b.export("op", f);
+    let h = Harness::new(&b);
+    let trap = trap_of(h.call("op", &[]));
+    assert!(
+        matches!(trap, RuntimeTrap::OutOfBoundsMemoryAccess),
+        "wrapped ea must trap OOB, got {trap:?}"
+    );
 }

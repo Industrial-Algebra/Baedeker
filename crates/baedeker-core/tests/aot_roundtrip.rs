@@ -181,3 +181,81 @@ fn cast_conversion_opcodes_roundtrip_and_execute() {
     };
     assert_eq!(run(&module), run(&restored));
 }
+
+#[test]
+fn roundtrip_atomic_variants_execute_identically() {
+    // The six new RegOp variants (AtomicLoad/Store/Rmw/Cmpxchg/Wait/
+    // Notify) must serialize → deserialize to identical IR and execute
+    // identically. Shared memory 1..1; every op family in one module:
+    // store, load, rmw.add, cmpxchg (equal path), wait (mismatch),
+    // notify.
+    let mut body = Vec::new();
+    // (i32.const 16) (i32.const 0x2A) i32.atomic.store
+    body.extend_from_slice(&[0x41, 0x10, 0x41, 0x2A, 0xFE, 0x17, 0x02, 0x00]);
+    // (i32.const 16) i32.atomic.load drop
+    body.extend_from_slice(&[0x41, 0x10, 0xFE, 0x10, 0x02, 0x00, 0x1A]);
+    // (i32.const 16) (i32.const 1) i32.atomic.rmw.add drop
+    body.extend_from_slice(&[0x41, 0x10, 0x41, 0x01, 0xFE, 0x1E, 0x02, 0x00, 0x1A]);
+    // (i32.const 16) (i32.const 43) (i32.const 7) cmpxchg drop -> stores 7
+    body.extend_from_slice(&[
+        0x41, 0x10, 0x41, 0x2B, 0x41, 0x07, 0xFE, 0x48, 0x02, 0x00, 0x1A,
+    ]);
+    // (i32.const 16) (i32.const 0) (i64.const 0) wait32 drop -> mismatch 1
+    body.extend_from_slice(&[
+        0x41, 0x10, 0x41, 0x00, 0x42, 0x00, 0xFE, 0x01, 0x02, 0x00, 0x1A,
+    ]);
+    // (i32.const 16) (i32.const 1) notify drop -> 0
+    body.extend_from_slice(&[0x41, 0x10, 0x41, 0x01, 0xFE, 0x00, 0x02, 0x00, 0x1A]);
+    // verify: (i32.const 16) i32.atomic.load -> returns 7
+    body.extend_from_slice(&[0x41, 0x10, 0xFE, 0x10, 0x02, 0x00]);
+
+    let mut sections: Vec<Vec<u8>> = Vec::new();
+    let uleb = |v: u64, out: &mut Vec<u8>| loop {
+        let mut b = (v & 0x7f) as u8;
+        let v2 = v >> 7;
+        if v2 != 0 {
+            b |= 0x80;
+        }
+        out.push(b);
+        if v2 == 0 {
+            break;
+        }
+    };
+    let sec = |id: u8, payload: &[u8], out: &mut Vec<Vec<u8>>| {
+        let mut s = vec![id];
+        uleb(payload.len() as u64, &mut s);
+        s.extend_from_slice(payload);
+        out.push(s);
+    };
+    // type ()->(i32)
+    sec(1, &[0x01, 0x60, 0x00, 0x01, 0x7F], &mut sections);
+    sec(3, &[0x01, 0x00], &mut sections);
+    // shared memory 1..1 (flags 0x03)
+    sec(5, &[0x01, 0x03, 0x01, 0x01], &mut sections);
+    sec(7, &[0x01, 0x02, b'o', b'p', 0x00, 0x00], &mut sections);
+    let mut code = vec![0x00]; // zero locals
+    code.extend_from_slice(&body);
+    code.push(0x0B);
+    let mut entry = vec![0x01];
+    uleb(code.len() as u64, &mut entry);
+    entry.extend_from_slice(&code);
+    sec(10, &entry, &mut sections);
+
+    let mut bytes = vec![0x00, b'a', b's', b'm', 0x01, 0x00, 0x00, 0x00];
+    for s in &sections {
+        bytes.extend_from_slice(s);
+    }
+    let module = Module::decode(&bytes).expect("decodes");
+    module.validate().expect("validates");
+    let lowered = lower_module(&module).expect("lowers");
+    let artifact = serialize(&lowered);
+    let restored = deserialize(&artifact).expect("deserializes");
+    assert_eq!(restored, lowered, "atomic IR roundtrip changed the module");
+
+    let store = Store::instantiate(&lowered).unwrap();
+    let direct = execute_export(&lowered, &store, "op", &[]).expect("direct exec");
+    let store2 = Store::instantiate(&restored).unwrap();
+    let round = execute_export(&restored, &store2, "op", &[]).expect("roundtrip exec");
+    assert_eq!(direct, vec![Value::I32(7)], "store+cmpxchg left 7");
+    assert_eq!(direct, round, "roundtrip executes identically");
+}
