@@ -62,6 +62,7 @@ pub struct TryTable {
 /// Value width of an atomic access. `N*` variants are the
 /// narrow (packed) accesses that zero-/sign-extend to the parent type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum AtomicWidth {
     I32,
     I64,
@@ -83,6 +84,13 @@ impl AtomicWidth {
         }
     }
 
+    /// Bytes touched in memory: the full widths 4/8, the narrow forms
+    /// 1/2/4 (pin `runtime/memory.ml:23-28` `is_aligned`). This is both the
+    /// access width and the natural alignment the runtime checks.
+    pub fn byte_width(self) -> usize {
+        1 << self.natural_align_log2()
+    }
+
     /// The operand/result value type (post-extension for narrow forms).
     pub fn val_type(self) -> crate::types::ValType {
         match self {
@@ -98,6 +106,7 @@ impl AtomicWidth {
 
 /// Read-modify-write operation kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum AtomicRmw {
     Add,
     Sub,

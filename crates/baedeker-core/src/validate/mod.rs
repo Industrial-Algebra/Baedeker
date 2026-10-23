@@ -4695,10 +4695,10 @@ fn validate_atomic(
         Op::Store(w, m) => (ATOMIC_STORE_NAMES[width_index(*w)], *m),
         Op::Rmw(kind, w, m) => {
             let row = rmw_index(*kind);
-            debug_assert!(row < ATOMIC_RMW_NAMES.len(), "xchg handled separately");
             // xchg lives in the 0x41..=0x47 decode range but shares the
-            // rmw table shape; map it past the 5 table rows to its own
-            // handling below.
+            // rmw table shape; `rmw_index` maps it one past the 5 table
+            // rows to its own name table below (so no range assertion here:
+            // the out-of-range row is the documented xchg encoding).
             let name = if row < ATOMIC_RMW_NAMES.len() {
                 ATOMIC_RMW_NAMES[row][width_index(*w)]
             } else {
@@ -4921,7 +4921,7 @@ fn rmw_index(kind: crate::binary::instr::AtomicRmw) -> usize {
         And => 2,
         Or => 3,
         Xor => 4,
-        Xchg => ATOMIC_RMW_NAMES.len(), // out of range -> debug assert below
+        Xchg => ATOMIC_RMW_NAMES.len(), // one past the table -> XCHG_NAMES
     }
 }
 
