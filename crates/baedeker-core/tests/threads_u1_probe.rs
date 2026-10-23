@@ -31,16 +31,13 @@ fn module(sections: &[Vec<u8>]) -> Vec<u8> {
 
 #[test]
 fn probe_atomic_in_global_init_is_non_constant() {
-    // global (mut i32), init = i32.atomic.load — must NOT validate.
+    // global i32, init = (i32.const 0) i32.atomic.load — must NOT validate.
     let mut init = vec![0x41, 0x00, 0xFE, 0x10, 0x02, 0x00, 0x0B];
-    let global_payload = [0x01, 0x7F, 0x01]; // 1 global, i32, mutable
-    let bytes = module(&[section(6, &global_payload)]);
-    let mut with_code = bytes.clone();
-    // simpler: global section with explicit init: count, valtype, mut, expr
+    // global section: count, valtype, mut(0), then the init expr
     let mut g = vec![0x01, 0x7F, 0x00];
     g.append(&mut init);
-    with_code = module(&[section(6, &g)]);
-    let m = Module::decode(&with_code).expect("decodes (const-expr is bytes)");
+    let bytes = module(&[section(6, &g)]);
+    let m = Module::decode(&bytes).expect("decodes (const-expr is bytes)");
     let err = validate_module(&m).expect_err("atomic in const expr must be rejected");
     assert!(err.to_string().contains("constant"), "got: {err}");
 }
