@@ -10,10 +10,16 @@
 //!
 //! With the `gc-smith` feature the generator additionally emits GC type
 //! sections (`struct`/`array`/rec groups) and a conservative instruction
-//! subset — numeric, parametric, variable, control, reference and aggregate
-//! (struct/array/i31) instructions, no memory or vector kinds. That is the
-//! R1 rung's robustness surface: decode + validate + lower acceptance with no
-//! panic (there is no execution differential in this slice).
+//! subset — numeric, parametric, variable, control, reference, aggregate
+//! (struct/array/i31) and memory-integer instructions, no vector kinds. That is
+//! the R1 rung's robustness surface: decode + validate + lower acceptance with
+//! no panic (there is no execution differential in this slice).
+//!
+//! The threads slice (unit 3) enables `threads_enabled` and admits
+//! `InstructionKind::MemoryInt`, the bucket every atomic instruction sits in
+//! (`wasm-smith src/core/code_builder.rs:597-664`), so generated modules carry
+//! `0xFE` atomics; plain loads/stores come along with it. Nothing is executed
+//! here, so no generated `atomic.wait` can block.
 
 use baedeker_core::binary::module::Module;
 use libfuzzer_sys::fuzz_target;
@@ -24,8 +30,9 @@ fn config() -> Config {
     use wasm_smith::{InstructionKind, InstructionKinds};
 
     let mut config = Config::default();
-    // Conservative instruction subset: everything the GC surface touches,
-    // nothing that drags in memory/vector/threads pricing.
+    // Conservative instruction subset: everything the GC and threads surfaces
+    // touch, nothing that drags in vector pricing. Atomics are MemoryInt-bucketed
+    // (`code_builder.rs:597-664`); MemoryInt also admits plain loads/stores.
     config.allowed_instructions = InstructionKinds::new(&[
         InstructionKind::NumericInt,
         InstructionKind::Parametric,
@@ -33,13 +40,14 @@ fn config() -> Config {
         InstructionKind::Control,
         InstructionKind::Reference,
         InstructionKind::Aggregate,
+        InstructionKind::MemoryInt,
     ]);
     config.bulk_memory_enabled = true;
     config.multi_value_enabled = true;
     config.simd_enabled = false;
     config.reference_types_enabled = true;
     config.tail_call_enabled = false;
-    config.threads_enabled = false;
+    config.threads_enabled = true;
     config.memory64_enabled = false;
     config.max_memories = 1;
     config.relaxed_simd_enabled = false;

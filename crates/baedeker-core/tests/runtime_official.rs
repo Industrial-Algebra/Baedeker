@@ -39,6 +39,13 @@ const DEFERRED_FILES: &[(&str, &str)] = &[
     ),
     // The wast parser rejects the confusable unicode names.wast needs.
     ("names.wast", "parser rejects confusable unicode in names"),
+    // `thread.wast` is entirely multi-agent: one shared module plus
+    // `(thread …)`/`(wait …)` directives whose assertions match `(either …)`.
+    // The four-block pre-parse strip cannot make it single-agent.
+    (
+        "thread.wast",
+        "multi-agent behavioral coverage (thread/wait directives) — single-agent engine",
+    ),
 ];
 
 #[derive(Debug, Default)]
@@ -49,6 +56,148 @@ struct OfficialStats {
     modules: usize,
     assertions: usize,
     failures: Vec<String>,
+    /// Multi-agent `(thread …)` / `(wait …)` directives removed by the
+    /// pre-parse strip (the threads corpus' `atomic_wait_notify.wast`).
+    threads_directives_skipped: usize,
+}
+
+// ── threads directive strip ────────────────────────────────────────
+
+/// Remove the multi-agent directives a single-agent engine cannot execute.
+///
+/// `atomic_wait_notify.wast` at the threads pin carries exactly FOUR of them
+/// (`docs/plans/threads-unit3-contract.md`): two top-level `(thread …)`
+/// blocks (its lines 64+) and two `(wait …)` directives, which close those
+/// threads. No single-agent directive outside them references their
+/// internals, and the wast crate has no multi-agent grammar — so the harness
+/// removes the four balanced forms BEFORE parsing. Everything else is passed
+/// through untouched (`thread.wast`, whose whole body is multi-agent, is
+/// deferred instead).
+///
+/// Returns the stripped text and the number of forms removed.
+fn strip_threads_directives(text: &str) -> (String, usize) {
+    let bytes = text.as_bytes();
+    let mut stripped = String::with_capacity(text.len());
+    let mut kept_from = 0usize;
+    let mut removed = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => i = skip_string(bytes, i),
+            b';' if bytes.get(i + 1) == Some(&b';') => i = skip_line_comment(bytes, i),
+            b'(' if bytes.get(i + 1) == Some(&b';') => i = skip_block_comment(bytes, i),
+            b'(' if is_threads_directive(bytes, i) => match skip_form(bytes, i) {
+                Some(end) => {
+                    stripped.push_str(&text[kept_from..i]);
+                    kept_from = end;
+                    removed += 1;
+                    i = end;
+                }
+                // An unbalanced form is left in place so the parser reports
+                // it with its own span, rather than silently truncating text.
+                None => i += 1,
+            },
+            _ => i += 1,
+        }
+    }
+    stripped.push_str(&text[kept_from..]);
+    (stripped, removed)
+}
+
+/// Whether the form opening at `open` is one of the two multi-agent
+/// directives. The keyword must be complete — followed by a delimiter, not an
+/// identifier continuation — so `(threading …)` is not a `thread` directive.
+fn is_threads_directive(bytes: &[u8], open: usize) -> bool {
+    let mut i = open + 1;
+    while matches!(bytes.get(i), Some(b' ' | b'\t' | b'\r' | b'\n')) {
+        i += 1;
+    }
+    ["thread", "wait"].into_iter().any(|keyword| {
+        let end = i + keyword.len();
+        bytes.get(i..end) == Some(keyword.as_bytes())
+            && matches!(
+                bytes.get(end),
+                None | Some(b' ' | b'\t' | b'\r' | b'\n' | b'(' | b')' | b'"' | b';')
+            )
+    })
+}
+
+/// Index just past the string literal opening at `open` (backslash escapes
+/// hide the closing quote).
+fn skip_string(bytes: &[u8], open: usize) -> usize {
+    let mut i = open + 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2,
+            b'"' => return i + 1,
+            _ => i += 1,
+        }
+    }
+    bytes.len()
+}
+
+/// Index just past the line comment opening at `open`.
+fn skip_line_comment(bytes: &[u8], open: usize) -> usize {
+    let mut i = open + 2;
+    while i < bytes.len() && bytes[i] != b'\n' {
+        i += 1;
+    }
+    i
+}
+
+/// Index just past the block comment opening at `open` (block comments nest:
+/// `document/core/text/lexical.rst`).
+fn skip_block_comment(bytes: &[u8], open: usize) -> usize {
+    let mut depth = 1usize;
+    let mut i = open + 2;
+    while i < bytes.len() {
+        if bytes[i] == b'(' && bytes.get(i + 1) == Some(&b';') {
+            depth += 1;
+            i += 2;
+        } else if bytes[i] == b';' && bytes.get(i + 1) == Some(&b')') {
+            depth -= 1;
+            i += 2;
+            if depth == 0 {
+                return i;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    bytes.len()
+}
+
+/// Index just past the `)` closing the form opening at `open`, balancing
+/// string literals and comments (never counting a paren inside them).
+fn skip_form(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut i = open;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                i = skip_string(bytes, i);
+                continue;
+            }
+            b';' if bytes.get(i + 1) == Some(&b';') => {
+                i = skip_line_comment(bytes, i);
+                continue;
+            }
+            b'(' if bytes.get(i + 1) == Some(&b';') => {
+                i = skip_block_comment(bytes, i);
+                continue;
+            }
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
 }
 
 struct Instance {
@@ -509,6 +658,10 @@ fn spectest_host_func(name: &str) -> Result<HostFunction, String> {
 
 fn run_file(path: &Path, stats: &mut OfficialStats) {
     let text = baedeker_testdata::spec_case_text(path);
+    // Strip multi-agent directives before parsing (no-op for every file but
+    // `atomic_wait_notify.wast`).
+    let (text, threads_directives_skipped) = strip_threads_directives(&text);
+    stats.threads_directives_skipped = threads_directives_skipped;
     let buf = match ParseBuffer::new(&text) {
         Ok(buf) => buf,
         Err(error) => main_panic(path, &format!("failed to parse wast buffer: {error}")),
@@ -1205,9 +1358,13 @@ fn official_spec_cases_inner() {
     let mut stats = OfficialStats::default();
     let mut deferred: Vec<(PathBuf, &'static str)> = Vec::new();
 
+    // The filter legitimately narrows a run, so the full-count assertions
+    // below apply only to an unfiltered run; `failures=0` is unconditional.
+    let filter = std::env::var("BAEDEKER_OFFICIAL_FILTER").unwrap_or_default();
+    let filtered = !filter.is_empty();
+
     for path in baedeker_testdata::spec_wast_cases("wast-official") {
-        if let Ok(filter) = std::env::var("BAEDEKER_OFFICIAL_FILTER")
-            && !filter.is_empty()
+        if filtered
             && !path
                 .file_name()
                 .unwrap_or_default()
@@ -1250,16 +1407,19 @@ fn official_spec_cases_inner() {
         stats.directives += file_stats.directives;
         stats.modules += file_stats.modules;
         stats.assertions += file_stats.assertions;
+        stats.threads_directives_skipped += file_stats.threads_directives_skipped;
         stats.failures.extend(file_stats.failures);
     }
 
     eprintln!(
-        "official summary: files={} deferred={} directives={} modules={} assertions={} failures={}",
+        "official summary: files={} deferred={} directives={} modules={} assertions={} \
+         threads_directives_skipped={} failures={}",
         stats.files,
         stats.deferred,
         stats.directives,
         stats.modules,
         stats.assertions,
+        stats.threads_directives_skipped,
         stats.failures.len()
     );
     for (path, reason) in &deferred {
@@ -1276,6 +1436,24 @@ fn official_spec_cases_inner() {
         panic!("{report}");
     }
     assert!(stats.files > 0, "expected official spec files to run");
+
+    // The threads slice's manifest (docs/plans/threads-unit3-contract.md):
+    // the 200 pre-existing runnable files + `atomic.wast` +
+    // `atomic_wait_notify.wast` + the two pinned deltas. `thread.wast` joins
+    // the two pre-existing deferrals. A `BAEDEKER_OFFICIAL_FILTER` run is a
+    // narrowing, so these counts are asserted only when it is unset/empty.
+    if !filtered {
+        assert_eq!(
+            stats.files, 204,
+            "the threads manifest is 204 runnable files"
+        );
+        assert_eq!(stats.deferred, 3, "the threads manifest defers 3 files");
+        assert_eq!(
+            stats.threads_directives_skipped, 4,
+            "atomic_wait_notify.wast carries four multi-agent directives \
+             (two `thread` blocks, two `wait` directives)"
+        );
+    }
 }
 
 /// `assert_message` accepts an actual message that extends the expected one
@@ -1385,4 +1563,90 @@ fn spectest_import_type_check_is_per_declaration() {
         error.contains("incompatible import type"),
         "expected an incompatible-import-type link error, got {error}"
     );
+}
+
+// ── pre-parse threads-directive strip (U3) ─────────────────────────
+
+/// The strip removes whole BALANCED forms and nothing else: a paren inside a
+/// string or a comment never closes a form early, and a `thread`/`wait`
+/// token inside a comment is not a directive. The stripped text still parses
+/// — the property the harness relies on.
+#[test]
+fn strip_threads_directives_removes_whole_forms_only() {
+    let text = r#"(module (memory 1 1))
+;; (wait $T0) in a line comment is not a directive
+(thread $T1 (shared (module $M))
+  (module (func (export "f") (i32.store (i32.const 0) (i32.const 40))))
+  (invoke "f")
+)
+(; (thread $T2 (module)) ;)
+(module (data "(\"thread\" )"))
+(wait $T1)
+(thread $T3 (module $M3 (memory 1 1) (data (i32.const 0) ")")))
+(wait $T3)
+(module)
+"#;
+    let (stripped, removed) = strip_threads_directives(text);
+    assert_eq!(removed, 4, "two `thread` blocks plus two `wait` directives");
+    assert!(
+        !stripped.contains("(thread $T1") && !stripped.contains("(thread $T3"),
+        "every thread block must be removed: {stripped}"
+    );
+    assert!(
+        !stripped.contains("(wait $T1)") && !stripped.contains("(wait $T3)"),
+        "every wait directive must be removed: {stripped}"
+    );
+    // Decoys survive verbatim: the parenthesised `wait` in a line comment,
+    // the parenthesised `thread` in a block comment, and the data string
+    // whose escapes and `)` must not be counted as a form end.
+    assert!(stripped.contains(";; (wait $T0) in a line comment"));
+    assert!(stripped.contains("(; (thread $T2 (module)) ;)"));
+    assert!(stripped.contains(r#"(module (data "(\"thread\" )"))"#));
+    // Only the forms were removed: the text still parses as a Wast script.
+    let buf = ParseBuffer::new(&stripped).expect("stripped text is a valid buffer");
+    parse::<Wast<'_>>(&buf).expect("stripped text parses as a Wast script");
+}
+
+/// The vendored corpus files other than `atomic_wait_notify.wast` carry no
+/// multi-agent directives, so the strip is byte-for-byte a no-op on them.
+#[test]
+fn strip_threads_directives_is_a_noop_for_the_other_vendored_files() {
+    let root = baedeker_testdata::spec_root().join("wast-official");
+    for name in [
+        "atomic.wast",
+        "binary-threads-delta.wast",
+        "memory-threads-delta.wast",
+    ] {
+        let text = baedeker_testdata::spec_case_text(root.join(name));
+        let (stripped, removed) = strip_threads_directives(&text);
+        assert_eq!(removed, 0, "{name} carries no multi-agent directive");
+        assert_eq!(stripped, text, "{name} must be passed through unchanged");
+    }
+}
+
+/// The vendored corpus file: exactly four balanced blocks, and what is left
+/// is a single-agent script (the stock wast grammar cannot parse the four
+/// multi-agent forms, which is why the strip runs before parsing).
+#[test]
+fn strip_threads_directives_removes_the_four_corpus_blocks() {
+    let path = baedeker_testdata::spec_root()
+        .join("wast-official")
+        .join("atomic_wait_notify.wast");
+    let text = baedeker_testdata::spec_case_text(&path);
+    let (stripped, removed) = strip_threads_directives(&text);
+    assert_eq!(
+        removed, 4,
+        "atomic_wait_notify.wast carries two `thread` blocks and two `wait` directives"
+    );
+    assert!(!stripped.contains("(thread $T"));
+    assert!(!stripped.contains("(wait $T"));
+    // The single-agent directives are untouched: the wait/notify exports,
+    // the unshared-memory trap assertions, and the OOB/unaligned family.
+    assert!(stripped.contains("memory.atomic.wait32"));
+    assert!(stripped.contains("memory.atomic.notify"));
+    assert!(stripped.contains("expected shared memory"));
+    assert!(stripped.contains("unaligned atomic"));
+
+    let buf = ParseBuffer::new(&stripped).expect("stripped corpus is a valid buffer");
+    parse::<Wast<'_>>(&buf).expect("the stripped corpus parses as a single-agent script");
 }

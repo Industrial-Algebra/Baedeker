@@ -1,11 +1,17 @@
 //! Threads U1: surface — shared memory types + the 0xFE atomic family.
 //!
 //! Contract: docs/plans/threads-unit1-contract.md. Pin:
-//! WebAssembly/threads@main-legacy 33b2dcd6. All module bytes are
-//! hand-built (wast-240's wat grammar cannot express classic
-//! `(memory … shared)`; its `shared` is the shared-everything tables
-//! grammar) — byte tables below are cross-checked against the pin's
-//! `binary/instructions.rst` + wast-240 `expr.rs:791+` encoders.
+//! WebAssembly/threads@main-legacy 33b2dcd6. All module bytes here are
+//! hand-built (byte tables below are cross-checked against the pin's
+//! `binary/instructions.rst` + wast-240 `expr.rs:791+` encoders).
+//!
+//! Correction (threads U3, contract r1): an earlier version of this header
+//! claimed wast-240 could not express classic shared memories. It can —
+//! `MemoryType { shared }` (`wast-240 src/core/types.rs:649+`) parses the
+//! trailing `shared` keyword and the encoder forwards it
+//! (`src/core/binary.rs:515-524`). The hand-built bytes below stay as
+//! decoder/validator regressions independent of the text grammar; the native
+//! WAT path is pinned in `threads_u3_native_shared.rs`.
 
 use baedeker_core::binary::instr::Instr;
 use baedeker_core::binary::module::Module;
