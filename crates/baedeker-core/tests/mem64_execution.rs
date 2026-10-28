@@ -497,6 +497,7 @@ fn fill_range_set_then_default_lands_on_default() {
             min: 0,
             max: None,
             is64: true,
+            shared: false,
         },
         init: None,
     };
@@ -537,6 +538,7 @@ fn fragmented_dense_migration_is_fallible_or_exact() {
             min: 0,
             max: None,
             is64: true,
+            shared: false,
         },
         init: None,
     };
@@ -630,6 +632,7 @@ fn overwrite_fills_stays_sorted_on_adjacent_right_remainder() {
             min: 0,
             max: None,
             is64: true,
+            shared: false,
         },
         init: None,
     };

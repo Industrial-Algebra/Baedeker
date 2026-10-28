@@ -59,6 +59,75 @@ pub struct TryTable {
     pub catches: Vec<TryTableCatch>,
 }
 
+/// Value width of an atomic access. `N*` variants are the
+/// narrow (packed) accesses that zero-/sign-extend to the parent type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum AtomicWidth {
+    I32,
+    I64,
+    I32N8,
+    I32N16,
+    I64N8,
+    I64N16,
+    I64N32,
+}
+
+impl AtomicWidth {
+    /// Natural alignment as the memarg exponent (log2 of bytes).
+    pub fn natural_align_log2(self) -> u32 {
+        match self {
+            AtomicWidth::I32 | AtomicWidth::I64N32 => 2,
+            AtomicWidth::I64 => 3,
+            AtomicWidth::I32N8 | AtomicWidth::I64N8 => 0,
+            AtomicWidth::I32N16 | AtomicWidth::I64N16 => 1,
+        }
+    }
+
+    /// Bytes touched in memory: the full widths 4/8, the narrow forms
+    /// 1/2/4 (pin `runtime/memory.ml:23-28` `is_aligned`). This is both the
+    /// access width and the natural alignment the runtime checks.
+    pub fn byte_width(self) -> usize {
+        1 << self.natural_align_log2()
+    }
+
+    /// The operand/result value type (post-extension for narrow forms).
+    pub fn val_type(self) -> crate::types::ValType {
+        match self {
+            AtomicWidth::I32 | AtomicWidth::I32N8 | AtomicWidth::I32N16 => {
+                crate::types::ValType::Num(crate::types::NumType::I32)
+            }
+            AtomicWidth::I64 | AtomicWidth::I64N8 | AtomicWidth::I64N16 | AtomicWidth::I64N32 => {
+                crate::types::ValType::Num(crate::types::NumType::I64)
+            }
+        }
+    }
+}
+
+/// Read-modify-write operation kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum AtomicRmw {
+    Add,
+    Sub,
+    And,
+    Or,
+    Xor,
+    Xchg,
+}
+
+/// One decoded atomic instruction (everything but `atomic.fence`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum AtomicOp {
+    Notify(MemArg),
+    Wait32(MemArg),
+    Wait64(MemArg),
+    Load(AtomicWidth, MemArg),
+    Store(AtomicWidth, MemArg),
+    Rmw(AtomicRmw, AtomicWidth, MemArg),
+    Cmpxchg(AtomicWidth, MemArg),
+}
+
 /// A decoded WebAssembly instruction.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Instr {
@@ -190,6 +259,12 @@ pub enum Instr {
     TableFill(TableIdx),
     MemorySize(MemIdx),
     MemoryGrow(MemIdx),
+    /// Classic-threads atomic family (0xFE prefix): notify/wait + loads/
+    /// stores/rmw/cmpxchg, all with a memarg. Decoded, validated, and
+    /// linked in U1; execution semantics land in U2.
+    Atomic(AtomicOp),
+    /// `atomic.fence` — 0xFE 0x03 with one reserved 0x00 byte.
+    AtomicFence,
     I32Const(i32),
     I64Const(i64),
     F32Const(f32),
@@ -846,6 +921,7 @@ pub fn decode_instr_with_offset(
         0x26 => Instr::TableSet(parse_table_idx(cursor, base_offset)?),
         0xFC => decode_bulk_memory_instr(cursor, base_offset)?,
         0xFD => decode_simd_instr(cursor, base_offset)?,
+        0xFE => decode_atomic_instr(cursor, base_offset)?,
         0xFB => decode_gc_instr(cursor, base_offset)?,
         0x28 => Instr::I32Load(parse_memarg(cursor, base_offset)?),
         0x29 => Instr::I64Load(parse_memarg(cursor, base_offset)?),
@@ -1197,6 +1273,114 @@ fn decode_bulk_memory_instr(
             context: DecodeContext::CodeSection,
             kind: DecodeErrorKind::UnknownOpcode { byte: 0xFC },
         }),
+    }
+}
+
+/// Decode a classic-threads atomic instruction (0xFE prefix). The
+/// sub-opcode is a single byte (single-byte form at the threads pin;
+/// sub-codes 0x00-0x4e). `atomic.fence` carries one reserved byte that
+/// must be 0x00.
+fn decode_atomic_instr(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Instr, DecodeError> {
+    let sub_offset = cursor.position();
+    let sub = cursor.read_byte().map_err(|_| DecodeError {
+        offset: ByteOffset(base_offset + sub_offset),
+        context: DecodeContext::CodeSection,
+        kind: DecodeErrorKind::UnexpectedEof,
+    })?;
+    use AtomicOp::*;
+    use AtomicWidth::*;
+    let instr = match sub {
+        0x00 => Notify(parse_memarg(cursor, base_offset)?),
+        0x01 => Wait32(parse_memarg(cursor, base_offset)?),
+        0x02 => Wait64(parse_memarg(cursor, base_offset)?),
+        0x03 => {
+            let reserved_offset = cursor.position();
+            let reserved = cursor.read_byte().map_err(|_| DecodeError {
+                offset: ByteOffset(base_offset + reserved_offset),
+                context: DecodeContext::CodeSection,
+                kind: DecodeErrorKind::UnexpectedEof,
+            })?;
+            if reserved != 0x00 {
+                return Err(DecodeError {
+                    offset: ByteOffset(base_offset + reserved_offset),
+                    context: DecodeContext::CodeSection,
+                    kind: DecodeErrorKind::UnexpectedByte {
+                        expected: 0x00,
+                        found: reserved,
+                    },
+                });
+            }
+            return Ok(Instr::AtomicFence);
+        }
+        0x10 => Load(I32, parse_memarg(cursor, base_offset)?),
+        0x11 => Load(I64, parse_memarg(cursor, base_offset)?),
+        0x12 => Load(I32N8, parse_memarg(cursor, base_offset)?),
+        0x13 => Load(I32N16, parse_memarg(cursor, base_offset)?),
+        0x14 => Load(I64N8, parse_memarg(cursor, base_offset)?),
+        0x15 => Load(I64N16, parse_memarg(cursor, base_offset)?),
+        0x16 => Load(I64N32, parse_memarg(cursor, base_offset)?),
+        0x17 => Store(I32, parse_memarg(cursor, base_offset)?),
+        0x18 => Store(I64, parse_memarg(cursor, base_offset)?),
+        0x19 => Store(I32N8, parse_memarg(cursor, base_offset)?),
+        0x1a => Store(I32N16, parse_memarg(cursor, base_offset)?),
+        0x1b => Store(I64N8, parse_memarg(cursor, base_offset)?),
+        0x1c => Store(I64N16, parse_memarg(cursor, base_offset)?),
+        0x1d => Store(I64N32, parse_memarg(cursor, base_offset)?),
+        0x1e..=0x24 => Rmw(
+            AtomicRmw::Add,
+            width_at(sub - 0x1e),
+            parse_memarg(cursor, base_offset)?,
+        ),
+        0x25..=0x2b => Rmw(
+            AtomicRmw::Sub,
+            width_at(sub - 0x25),
+            parse_memarg(cursor, base_offset)?,
+        ),
+        0x2c..=0x32 => Rmw(
+            AtomicRmw::And,
+            width_at(sub - 0x2c),
+            parse_memarg(cursor, base_offset)?,
+        ),
+        0x33..=0x39 => Rmw(
+            AtomicRmw::Or,
+            width_at(sub - 0x33),
+            parse_memarg(cursor, base_offset)?,
+        ),
+        0x3a..=0x40 => Rmw(
+            AtomicRmw::Xor,
+            width_at(sub - 0x3a),
+            parse_memarg(cursor, base_offset)?,
+        ),
+        0x41..=0x47 => Rmw(
+            AtomicRmw::Xchg,
+            width_at(sub - 0x41),
+            parse_memarg(cursor, base_offset)?,
+        ),
+        0x48..=0x4e => Cmpxchg(width_at(sub - 0x48), parse_memarg(cursor, base_offset)?),
+        _ => {
+            return Err(DecodeError {
+                offset: ByteOffset(base_offset + sub_offset),
+                context: DecodeContext::CodeSection,
+                kind: DecodeErrorKind::UnknownAtomicOpcode { opcode: sub },
+            });
+        }
+    };
+    Ok(Instr::Atomic(instr))
+}
+
+/// The seven RMW/cmpxchg widths share one layout: [i32, i64, i32.8u,
+/// i32.16u, i64.8u, i64.16u, i64.32u] (threads pin binary table,
+/// cross-checked against wast-240 expr.rs:806-855).
+fn width_at(i: u8) -> AtomicWidth {
+    match i {
+        0 => AtomicWidth::I32,
+        1 => AtomicWidth::I64,
+        2 => AtomicWidth::I32N8,
+        3 => AtomicWidth::I32N16,
+        4 => AtomicWidth::I64N8,
+        5 => AtomicWidth::I64N16,
+        6 => AtomicWidth::I64N32,
+        _ => unreachable!("RMW width index 0-6"),
     }
 }
 

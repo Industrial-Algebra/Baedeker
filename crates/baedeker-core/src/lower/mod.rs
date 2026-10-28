@@ -11,7 +11,8 @@
 use alloc::{string::String, vec::Vec};
 
 use crate::binary::instr::{
-    DecodedInstr, Instr, TryTableCatch, TryTableCatchKind, decode_instr_sequence_with_offsets,
+    AtomicRmw, AtomicWidth, DecodedInstr, Instr, TryTableCatch, TryTableCatchKind,
+    decode_instr_sequence_with_offsets,
 };
 use crate::binary::module::Module;
 use crate::error::{ByteOffset, DecodeContext, DecodeErrorKind};
@@ -710,6 +711,66 @@ pub enum RegOp {
         op: StoreOp,
         addr: Reg,
         value: Reg,
+        memarg: MemArg,
+    },
+    /// Atomic load with the *natural* alignment check first:
+    /// dst = mem[ea..ea+width] zero-extended to `width`'s value type
+    /// (pin `eval.ml:271-282`).
+    AtomicLoad {
+        width: AtomicWidth,
+        dst: Reg,
+        addr: Reg,
+        memarg: MemArg,
+    },
+    /// Atomic store: alignment check, then mem[ea..ea+width] = value
+    /// truncated to `width` (`eval.ml:283-294`).
+    AtomicStore {
+        width: AtomicWidth,
+        addr: Reg,
+        value: Reg,
+        memarg: MemArg,
+    },
+    /// Atomic read-modify-write: loads the old value (narrow forms
+    /// zero-extend), computes `op(operand, old)` at full width with
+    /// wrapping arithmetic, stores the result truncated to `width`, and
+    /// writes the OLD value to `dst` (`eval.ml:295-311`).
+    AtomicRmw {
+        op: AtomicRmw,
+        width: AtomicWidth,
+        dst: Reg,
+        addr: Reg,
+        value: Reg,
+        memarg: MemArg,
+    },
+    /// Atomic compare-and-swap: stores `replacement` (truncated to `width`)
+    /// only when the zero-extended old value equals `expected`, and always
+    /// writes the old value to `dst` (`eval.ml:312-328`).
+    AtomicCmpxchg {
+        width: AtomicWidth,
+        dst: Reg,
+        addr: Reg,
+        expected: Reg,
+        replacement: Reg,
+        memarg: MemArg,
+    },
+    /// `memory.atomic.wait32`/`wait64`: alignment check, then the shared
+    /// check, then the load; returns 1 on a value mismatch and 2 on
+    /// timeout (`eval.ml:329-345`).
+    AtomicWait {
+        width: AtomicWidth,
+        dst: Reg,
+        addr: Reg,
+        expected: Reg,
+        timeout: Reg,
+        memarg: MemArg,
+    },
+    /// `memory.atomic.notify`: alignment check, a load performed only for
+    /// its out-of-bounds trap effect, then the wake count — always 0 for a
+    /// single agent (`eval.ml:347-357`).
+    AtomicNotify {
+        dst: Reg,
+        addr: Reg,
+        count: Reg,
         memarg: MemArg,
     },
     /// Read a global.
@@ -4442,6 +4503,14 @@ impl<'b> FuncBuilder<'b> {
                     },
                 )?;
             }
+            // Threads U2: the 0xFE family lowers to register ops that execute
+            // as plain accesses plus a natural-alignment check (with a single
+            // agent, sequential consistency is trivially preserved).
+            // `atomic.fence` is ELIDED here: it has no operands, no result
+            // and no runtime effect (pin `eval.ml:359-360`), so emitting an
+            // op for it would only cost dispatch.
+            Instr::AtomicFence => {}
+            Instr::Atomic(op) => self.lower_atomic(offset, &op)?,
             Instr::CallIndirect {
                 type_idx,
                 table_idx,
@@ -6869,6 +6938,148 @@ impl<'b> FuncBuilder<'b> {
         Ok(())
     }
 
+    /// Lower one `0xFE` atomic instruction. Operand order matches
+    /// validation (`validate_atomic`): the address is deepest, then the
+    /// value operands in the order they were pushed.
+    fn lower_atomic(
+        &mut self,
+        offset: ByteOffset,
+        op: &crate::binary::instr::AtomicOp,
+    ) -> Result<(), LowerError> {
+        use crate::binary::instr::AtomicOp as Op;
+        match op {
+            Op::Load(width, memarg) => {
+                let addr = self.pop_atomic_addr(offset, "atomic load", *memarg)?;
+                let ty = width.val_type();
+                let dst = self.alloc_reg(ty)?;
+                self.push_stack(RegValue { reg: dst, ty })?;
+                self.emit(
+                    offset,
+                    RegOp::AtomicLoad {
+                        width: *width,
+                        dst,
+                        addr: addr.reg,
+                        memarg: *memarg,
+                    },
+                )?;
+            }
+            Op::Store(width, memarg) => {
+                let ty = width.val_type();
+                let value = self.pop_expect(offset, "atomic store", ty)?;
+                let addr = self.pop_atomic_addr(offset, "atomic store", *memarg)?;
+                self.emit(
+                    offset,
+                    RegOp::AtomicStore {
+                        width: *width,
+                        addr: addr.reg,
+                        value: value.reg,
+                        memarg: *memarg,
+                    },
+                )?;
+            }
+            Op::Rmw(kind, width, memarg) => {
+                let ty = width.val_type();
+                let value = self.pop_expect(offset, "atomic rmw", ty)?;
+                let addr = self.pop_atomic_addr(offset, "atomic rmw", *memarg)?;
+                let dst = self.alloc_reg(ty)?;
+                self.push_stack(RegValue { reg: dst, ty })?;
+                self.emit(
+                    offset,
+                    RegOp::AtomicRmw {
+                        op: *kind,
+                        width: *width,
+                        dst,
+                        addr: addr.reg,
+                        value: value.reg,
+                        memarg: *memarg,
+                    },
+                )?;
+            }
+            Op::Cmpxchg(width, memarg) => {
+                let ty = width.val_type();
+                let replacement = self.pop_expect(offset, "atomic cmpxchg", ty)?;
+                let expected = self.pop_expect(offset, "atomic cmpxchg", ty)?;
+                let addr = self.pop_atomic_addr(offset, "atomic cmpxchg", *memarg)?;
+                let dst = self.alloc_reg(ty)?;
+                self.push_stack(RegValue { reg: dst, ty })?;
+                self.emit(
+                    offset,
+                    RegOp::AtomicCmpxchg {
+                        width: *width,
+                        dst,
+                        addr: addr.reg,
+                        expected: expected.reg,
+                        replacement: replacement.reg,
+                        memarg: *memarg,
+                    },
+                )?;
+            }
+            Op::Wait32(memarg) => self.lower_atomic_wait(offset, AtomicWidth::I32, *memarg)?,
+            Op::Wait64(memarg) => self.lower_atomic_wait(offset, AtomicWidth::I64, *memarg)?,
+            Op::Notify(memarg) => {
+                let count = self.pop_expect(offset, "atomic notify", ValType::Num(NumType::I32))?;
+                let addr = self.pop_atomic_addr(offset, "atomic notify", *memarg)?;
+                let ty = ValType::Num(NumType::I32);
+                let dst = self.alloc_reg(ty)?;
+                self.push_stack(RegValue { reg: dst, ty })?;
+                self.emit(
+                    offset,
+                    RegOp::AtomicNotify {
+                        dst,
+                        addr: addr.reg,
+                        count: count.reg,
+                        memarg: *memarg,
+                    },
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `memory.atomic.wait32`/`wait64`: `[addr, expected, timeout]` with the
+    /// expected value's type chosen by the wait width, an `i32` result.
+    fn lower_atomic_wait(
+        &mut self,
+        offset: ByteOffset,
+        width: AtomicWidth,
+        memarg: MemArg,
+    ) -> Result<(), LowerError> {
+        let timeout = self.pop_expect(offset, "atomic wait", ValType::Num(NumType::I64))?;
+        let expected = self.pop_expect(offset, "atomic wait", width.val_type())?;
+        let addr = self.pop_atomic_addr(offset, "atomic wait", memarg)?;
+        let ty = ValType::Num(NumType::I32);
+        let dst = self.alloc_reg(ty)?;
+        self.push_stack(RegValue { reg: dst, ty })?;
+        self.emit(
+            offset,
+            RegOp::AtomicWait {
+                width,
+                dst,
+                addr: addr.reg,
+                expected: expected.reg,
+                timeout: timeout.reg,
+                memarg,
+            },
+        )?;
+        Ok(())
+    }
+
+    /// Pop an atomic access's address operand: its width follows the target
+    /// memory's declared index type (32-bit for every shared memory at the
+    /// threads pin; a 64-bit unshared memory still admits atomics).
+    fn pop_atomic_addr(
+        &mut self,
+        offset: ByteOffset,
+        op: &'static str,
+        memarg: MemArg,
+    ) -> Result<RegValue, LowerError> {
+        self.pop_expect(
+            offset,
+            op,
+            ValType::Num(self.memory_num_type(memarg.memory)),
+        )
+    }
+
     fn lower_v128_load_lane(
         &mut self,
         offset: ByteOffset,
@@ -8871,6 +9082,7 @@ mod tests {
                     min: 1,
                     max: Some(2),
                     is64: false,
+                    shared: false,
                 },
             },
         );
@@ -8986,6 +9198,7 @@ mod tests {
                     min: 2,
                     max: None,
                     is64: false,
+                    shared: false,
                 },
                 init: None,
             },
@@ -9051,6 +9264,7 @@ mod tests {
                         min: 1,
                         max: None,
                         is64: false,
+                        shared: false,
                     },
                 },
             )

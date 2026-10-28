@@ -163,6 +163,7 @@ fn cross_instance_tail_call_type_check_uses_callers_declared_type() {
             min: 2,
             max: None,
             is64: false,
+            shared: false,
         },
         init: None,
     };
