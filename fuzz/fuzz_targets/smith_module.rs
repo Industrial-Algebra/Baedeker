@@ -68,13 +68,18 @@ fn config() -> Config {
 #[cfg(not(feature = "gc-smith"))]
 fn config() -> Config {
     let mut config = Config::default();
-    // Restrict to the proposal surface Baedeker supports.
+    // Restrict to the proposal surface Baedeker supports. Classic threads
+    // (shared memories + atomics) are supported since the threads slice:
+    // CI runs THIS default config, so atomics coverage lives here too.
+    // The default allowlist is `InstructionKinds::All`, which already
+    // includes the MemoryInt bucket every atomic is classified under
+    // (wasm-smith `code_builder.rs:597-664`).
     config.bulk_memory_enabled = true;
     config.multi_value_enabled = true;
     config.simd_enabled = true;
     config.reference_types_enabled = false;
     config.tail_call_enabled = false;
-    config.threads_enabled = false;
+    config.threads_enabled = true;
     config.memory64_enabled = false;
     config.max_memories = 1;
     config.relaxed_simd_enabled = false;

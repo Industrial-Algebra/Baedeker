@@ -93,9 +93,17 @@ fn strip_threads_directives(text: &str) -> (String, usize) {
                     removed += 1;
                     i = end;
                 }
-                // An unbalanced form is left in place so the parser reports
-                // it with its own span, rather than silently truncating text.
-                None => i += 1,
+                // An unbalanced form is left intact — and so is everything
+                // after it: with no closing paren, the remainder of the
+                // input is INSIDE the form, so any later "top-level"
+                // directive is nested, not top-level. Scanning its interior
+                // (e.g. stripping a nested `(wait …)` out of an unterminated
+                // `(thread …`) would silently mutate a form we promised to
+                // preserve for the parser's own span-accurate error. Stop.
+                None => {
+                    stripped.push_str(&text[kept_from..]);
+                    return (stripped, removed);
+                }
             },
             _ => i += 1,
         }
@@ -1435,7 +1443,10 @@ fn official_spec_cases_inner() {
         }
         panic!("{report}");
     }
-    assert!(stats.files > 0, "expected official spec files to run");
+    assert!(
+        stats.files > 0 || filtered,
+        "expected official spec files to run"
+    );
 
     // The threads slice's manifest (docs/plans/threads-unit3-contract.md):
     // the 200 pre-existing runnable files + `atomic.wast` +
@@ -1571,6 +1582,19 @@ fn spectest_import_type_check_is_per_declaration() {
 /// string or a comment never closes a form early, and a `thread`/`wait`
 /// token inside a comment is not a directive. The stripped text still parses
 /// — the property the harness relies on.
+#[test]
+fn strip_threads_directives_preserves_unbalanced_form_and_interior() {
+    // Review r1 P2: a form that never balances is preserved INTACT —
+    // including its interior and everything after it. The old fallback
+    // resumed scanning inside the unterminated form and stripped a
+    // nested `(wait …)`, silently mutating the form the safety path
+    // promises to hand to the parser unchanged.
+    let text = "(thread $T (wait $T)";
+    let (stripped, removed) = strip_threads_directives(text);
+    assert_eq!(stripped, "(thread $T (wait $T)");
+    assert_eq!(removed, 0);
+}
+
 #[test]
 fn strip_threads_directives_removes_whole_forms_only() {
     let text = r#"(module (memory 1 1))
