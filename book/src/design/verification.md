@@ -8,12 +8,15 @@ different class of bug.
 The WebAssembly specification ships a conformance test suite. Baedeker vendors
 it (`baedeker-testdata`) and runs it through a harness:
 
-**85 files, 12 deferred, 19,204 assertions, 993 modules, 0 failures.**
+**204 files, 3 deferred, 54,601 assertions, 1,994 modules, 0 failures.**
 
-The 12 deferred files are the WebAssembly 3.0 surface (tail calls, GC types,
-exceptions, memory64) — features on the post-release roadmap, not a 2.0 gap.
-Every conformance bug the suite exposed during development was fixed; the
-remaining green is real.
+Every proposal in the pinned WebAssembly 3.0 release is implemented and
+verified — tail calls, exception handling, fixed-width SIMD, memory64 +
+table64, and garbage collection — plus the classic threads proposal on top.
+The 3 deferred files carry recorded reasons (two parser/runner limitations and
+one multi-agent-only coverage file); none hides a semantic gap. Every
+conformance bug the suite exposed during development was fixed; the remaining
+green is real.
 
 ## Differential testing vs Wasmtime
 
