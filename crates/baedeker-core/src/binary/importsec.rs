@@ -130,6 +130,7 @@ fn parse_limits(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Limits, D
                 min: u64::from(min),
                 max: None,
                 is64: false,
+                shared: false,
             })
         }
         0x01 => {
@@ -139,6 +140,28 @@ fn parse_limits(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Limits, D
                 min: u64::from(min),
                 max: Some(u64::from(max)),
                 is64: false,
+                shared: false,
+            })
+        }
+        0x02 => {
+            // Threads pin: limits tag 0x02 = shared WITHOUT max — the
+            // memtype production requires max when shared (pin
+            // binary/types.rst _binary-memtype_; valid.ml:379).
+            let _min = decode_u32_in_section(cursor, base_offset, DecodeContext::ImportSection)?;
+            Err(DecodeError {
+                offset: ByteOffset(base_offset + tag_offset),
+                context: DecodeContext::ImportSection,
+                kind: DecodeErrorKind::SharedMemoryRequiresMax,
+            })
+        }
+        0x03 => {
+            let min = decode_u32_in_section(cursor, base_offset, DecodeContext::ImportSection)?;
+            let max = decode_u32_in_section(cursor, base_offset, DecodeContext::ImportSection)?;
+            Ok(Limits {
+                min: u64::from(min),
+                max: Some(u64::from(max)),
+                is64: false,
+                shared: true,
             })
         }
         0x04 => {
@@ -147,6 +170,7 @@ fn parse_limits(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Limits, D
                 min,
                 max: None,
                 is64: true,
+                shared: false,
             })
         }
         0x05 => {
@@ -156,6 +180,7 @@ fn parse_limits(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Limits, D
                 min,
                 max: Some(max),
                 is64: true,
+                shared: false,
             })
         }
         _ => Err(DecodeError {
@@ -282,6 +307,7 @@ mod tests {
                     min: 1,
                     max: Some(2),
                     is64: false,
+                    shared: false,
                 },
             })
         );

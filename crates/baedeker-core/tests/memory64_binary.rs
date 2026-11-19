@@ -30,6 +30,7 @@ fn memory64_min_only_decodes() {
             min: 1,
             max: None,
             is64: true,
+            shared: false,
         }
     );
 }
@@ -49,6 +50,7 @@ fn memory64_min_max_decodes() {
             min: 1,
             max: Some(10),
             is64: true,
+            shared: false,
         }
     );
 }
@@ -71,6 +73,7 @@ fn table64_decodes() {
             min: 2,
             max: None,
             is64: true,
+            shared: false,
         }
     );
 }
@@ -97,6 +100,7 @@ fn imported_memory64_decodes() {
             min: 1,
             max: None,
             is64: true,
+            shared: false,
         }
     );
 }

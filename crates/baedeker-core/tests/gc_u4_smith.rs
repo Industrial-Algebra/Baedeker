@@ -10,6 +10,16 @@
 //! generator shape for a fixed seed set so the property is enforced in CI,
 //! where the cargo-fuzz toolchain is not run.
 //!
+//! Threads slice, unit 3: the config now also enables threads (`threads_enabled`)
+//! and admits `InstructionKind::MemoryInt`, which is the bucket EVERY atomic
+//! instruction sits in (`wasm-smith-0.254 src/core/code_builder.rs:597-664`).
+//! `threads_enabled` alone generates shared memories but zero atomics under the
+//! old allowlist; `MemoryInt` also admits plain loads/stores, which is fine —
+//! they are fully supported and broaden coverage. Execution stays OUT of this
+//! gate (a generated `atomic.wait` could block), so the campaign asserts
+//! DECODE presence of `Instr::Atomic` (walked from decoded modules, never from
+//! raw `0xfe` bytes — instruction immediates contain `0xfe` incidentally).
+//!
 //! Review r1 P2-7: the campaign used to skip every VALIDATION rejection
 //! silently — `validated` and `lowered` only counted the accepts, so 54 of the
 //! 400 seeds (fresh campaigns: 56/55/58/46/56) could be false rejections of
@@ -56,6 +66,7 @@
 //! the campaign's fixed seed set.
 
 use arbitrary::Unstructured;
+use baedeker_core::binary::instr::Instr;
 use baedeker_core::binary::module::Module;
 use baedeker_core::types::{CompType, ConcreteKind};
 use baedeker_core::validate::error::ValidationErrorKind;
@@ -72,13 +83,15 @@ fn config() -> Config {
         InstructionKind::Control,
         InstructionKind::Reference,
         InstructionKind::Aggregate,
+        // Atomics are MemoryInt-bucketed; this also admits plain loads/stores.
+        InstructionKind::MemoryInt,
     ]);
     config.bulk_memory_enabled = true;
     config.multi_value_enabled = true;
     config.simd_enabled = false;
     config.reference_types_enabled = true;
     config.tail_call_enabled = false;
-    config.threads_enabled = false;
+    config.threads_enabled = true;
     config.memory64_enabled = false;
     config.max_memories = 1;
     config.relaxed_simd_enabled = false;
@@ -120,6 +133,8 @@ fn seeded_gc_smith_campaign_decodes_validates_and_lowers() {
     let mut validated = 0usize;
     let mut lowered = 0usize;
     let mut with_gc_types = 0usize;
+    let mut atomic_instructions = 0usize;
+    let mut modules_with_atomics = 0usize;
     let mut decode_failures: Vec<(u64, String)> = Vec::new();
     let mut validation_failures: Vec<(u64, String)> = Vec::new();
 
@@ -163,6 +178,20 @@ fn seeded_gc_smith_campaign_decodes_validates_and_lowers() {
             }
         }
         validated += 1;
+        // Threads presence: count DECODED `Instr::Atomic`s (an atomic's
+        // immediates contain incidental `0xfe` bytes, so raw-byte scanning
+        // would prove nothing).
+        let decoded_atomics = module
+            .codes
+            .iter()
+            .filter_map(|code| code.instructions().ok())
+            .flatten()
+            .filter(|instr| matches!(instr, Instr::Atomic(_)))
+            .count();
+        if decoded_atomics > 0 {
+            modules_with_atomics += 1;
+        }
+        atomic_instructions += decoded_atomics;
         module.lower().unwrap_or_else(|error| {
             panic!("seed {seed}: validated module failed to lower: {error:?}")
         });
@@ -182,6 +211,13 @@ fn seeded_gc_smith_campaign_decodes_validates_and_lowers() {
         "validation acceptance is total: every decoded module must validate, \
          these did not (false rejections are validator defects, not \
          unsupported generator configurations): {validation_failures:?}"
+    );
+    assert!(
+        atomic_instructions > 0 && modules_with_atomics > 0,
+        "the campaign must DECODE atomic instructions (threads_enabled + \
+         MemoryInt): presence is measured on decoded `Instr::Atomic`s, never on \
+         raw 0xfe bytes. atomic_instrs={atomic_instructions} \
+         modules_with_atomics={modules_with_atomics}"
     );
     assert_eq!(
         validated, lowered,
@@ -207,7 +243,8 @@ fn seeded_gc_smith_campaign_decodes_validates_and_lowers() {
     );
     println!(
         "gc-smith smoke: generated={generated} decoded={decoded} with_gc_types={with_gc_types} \
-         validated={validated} lowered={lowered} decode_failures={} validation_failures={}",
+         validated={validated} lowered={lowered} atomic_instrs={atomic_instructions} \
+         modules_with_atomics={modules_with_atomics} decode_failures={} validation_failures={}",
         decode_failures.len(),
         validation_failures.len()
     );

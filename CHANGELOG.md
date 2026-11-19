@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Threads (classic proposal: shared memory + atomics)
+
+Slice 6, pinned to the frozen browser-shipped state of WebAssembly/threads
+(`main-legacy`, commit `33b2dcd6`). Single-agent semantics; shared-everything
+threads (`thread.spawn`, shared GC, per-op ordering params) stays out of scope.
+
+- Shared linear memory: `Limits::shared` end to end (binary limits tags
+  `0x02`/`0x03`, import/link matching requires shared≡shared), with
+  shared-requires-maximum enforced at decode (`shared memory must have
+  maximum`) and validation.
+- The `0xFE` atomic instruction family: atomic loads/stores at i8/i16/i32/i64,
+  read-modify-write (add/sub/and/or/xor/xchg) and cmpxchg at i32/i64,
+  `memory.atomic.wait32`/`wait64`, `memory.atomic.notify`, and
+  `memory.atomic.fence`. Natural alignment is a validation requirement.
+- Execution: atomics behave as their plain access with the memory family's
+  OOB/misalignment traps; `fence` is a no-op; `wait` returns 1 on a value
+  mismatch and 2 on an epsilon timeout, `notify` returns 0 — the deterministic
+  single-agent answers the proposal specifies.
+- Official corpus: vendored `atomic.wast` and `atomic_wait_notify.wast` (the
+  file's four multi-agent directives — two `thread` blocks, two `wait`
+  directives — are balanced-form stripped before parsing), plus the pinned
+  fork deltas `binary-threads-delta.wast` (the shared-table rejection) and
+  `memory-threads-delta.wast` (two shared memory types + the shared-no-max
+  `assert_invalid`). The `linking.wast` threads delta is empty. Suite:
+  **204 files, 3 deferred, 0 failures**. `thread.wast` joins the deferral
+  ledger (`skip-stack-guard-page.wast`, `names.wast`) with the recorded reason
+  "multi-agent behavioral coverage (thread/wait directives) — single-agent
+  engine".
+- wasm-smith campaigns (the `gc_u4_smith` test and the `gc-smith` fuzz target)
+  enable threads and admit `InstructionKind::MemoryInt`, so generated modules
+  carry decoded `0xFE` atomics. On the pinned seed set the campaign stays total
+  (403 generated = decoded = validated = lowered) and decodes 148 atomic
+  instructions across 45 modules; execution stays out of the gate (a generated
+  `atomic.wait` could block).
+
 ## [0.1.0] — 2026-08-04
 
 Baedeker's first public release. A `no_std` + `alloc` WebAssembly 2.0 engine

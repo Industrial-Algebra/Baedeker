@@ -133,6 +133,13 @@ pub enum DecodeErrorKind {
     TooManyLocals,
     /// Unknown instruction opcode.
     UnknownOpcode { byte: u8 },
+    /// A shared memory type without a maximum: the threads-pin memtype
+    /// production requires `max` when shared (limits tag 0x02 carries no
+    /// max by construction). Exact corpus string: "shared memory must
+    /// have maximum".
+    SharedMemoryRequiresMax,
+    /// Unknown atomic (0xFE-prefixed) instruction opcode.
+    UnknownAtomicOpcode { opcode: u8 },
     /// Unknown SIMD-prefixed instruction opcode.
     UnknownSimdOpcode { opcode: u32 },
     /// Unexpected byte value.
@@ -216,6 +223,12 @@ impl fmt::Display for DecodeErrorKind {
             }
             DecodeErrorKind::UnexpectedByte { expected, found } => {
                 write!(f, "expected {expected:#04x}, found {found:#04x}")
+            }
+            DecodeErrorKind::SharedMemoryRequiresMax => {
+                write!(f, "shared memory must have maximum")
+            }
+            DecodeErrorKind::UnknownAtomicOpcode { opcode } => {
+                write!(f, "unknown atomic opcode {opcode:#04x}")
             }
             DecodeErrorKind::SectionSizeMismatch { expected, consumed } => {
                 write!(

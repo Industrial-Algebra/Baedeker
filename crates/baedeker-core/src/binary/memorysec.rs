@@ -53,6 +53,7 @@ fn parse_limits(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Limits, D
                 min: u64::from(min),
                 max: None,
                 is64: false,
+                shared: false,
             })
         }
         0x01 => {
@@ -62,6 +63,29 @@ fn parse_limits(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Limits, D
                 min: u64::from(min),
                 max: Some(u64::from(max)),
                 is64: false,
+                shared: false,
+            })
+        }
+        0x02 => {
+            // Threads pin: limits tag 0x02 = shared WITHOUT max — the
+            // memtype production requires max when shared, so this is a
+            // decode error (pin binary/types.rst _binary-memtype_;
+            // valid.ml:379 enforces the same invariant at validation).
+            let _min = decode_u32_in_section(cursor, base_offset)?;
+            Err(DecodeError {
+                offset: ByteOffset(base_offset + tag_offset),
+                context: DecodeContext::MemorySection,
+                kind: DecodeErrorKind::SharedMemoryRequiresMax,
+            })
+        }
+        0x03 => {
+            let min = decode_u32_in_section(cursor, base_offset)?;
+            let max = decode_u32_in_section(cursor, base_offset)?;
+            Ok(Limits {
+                min: u64::from(min),
+                max: Some(u64::from(max)),
+                is64: false,
+                shared: true,
             })
         }
         0x04 => {
@@ -70,6 +94,7 @@ fn parse_limits(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Limits, D
                 min,
                 max: None,
                 is64: true,
+                shared: false,
             })
         }
         0x05 => {
@@ -79,6 +104,7 @@ fn parse_limits(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Limits, D
                 min,
                 max: Some(max),
                 is64: true,
+                shared: false,
             })
         }
         _ => Err(DecodeError {
@@ -148,14 +174,26 @@ mod tests {
 
     #[test]
     fn reject_invalid_limits_tag() {
-        let section = raw_memory_section(&[0x01, 0x02, 0x01]);
+        // 0x06 is not a limits tag at any pin (0x00/0x01 unshared,
+        // 0x02/0x03 shared-classic, 0x04/0x05 memory64).
+        let section = raw_memory_section(&[0x01, 0x06, 0x01]);
         let err = parse_memory_section(&section).unwrap_err();
         assert!(matches!(
             err.kind,
             DecodeErrorKind::UnexpectedByte {
                 expected: 0x00,
-                found: 0x02
+                found: 0x06
             }
         ));
+    }
+
+    #[test]
+    fn shared_without_max_refused_with_dedicated_kind() {
+        // Threads pin: tag 0x02 (shared, no max) is grammatical limits
+        // but an ill-formed memtype — dedicated refusal kind, exact
+        // corpus string.
+        let section = raw_memory_section(&[0x01, 0x02, 0x01]);
+        let err = parse_memory_section(&section).unwrap_err();
+        assert!(matches!(err.kind, DecodeErrorKind::SharedMemoryRequiresMax));
     }
 }

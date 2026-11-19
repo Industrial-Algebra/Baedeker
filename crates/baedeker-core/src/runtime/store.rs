@@ -406,6 +406,11 @@ fn limits_match(provided: &Limits, declared: &Limits) -> bool {
     if provided.is64 != declared.is64 {
         return false;
     }
+    // Threads pin: shared is part of the memory type — a shared memory
+    // never links against an unshared one, in either direction.
+    if provided.shared != declared.shared {
+        return false;
+    }
     if provided.min < declared.min {
         return false;
     }
@@ -1079,6 +1084,7 @@ impl Store {
                     min: (shared.borrow().len() / PAGE_SIZE) as u64,
                     max: provider.ty.limits.max,
                     is64: provider.ty.limits.is64,
+                    shared: provider.ty.limits.shared,
                 },
                 None => provider.ty.limits,
             };
@@ -1155,6 +1161,7 @@ impl Store {
                     min: shared.borrow().len(),
                     max: provider.ty.limits.max,
                     is64: provider.ty.limits.is64,
+                    shared: provider.ty.limits.shared,
                 },
                 None => provider.ty.limits,
             };
@@ -2823,5 +2830,40 @@ mod host_reentrancy_tests {
             matches!(error.kind, RuntimeErrorKind::ReentrantStore),
             "expected ReentrantStore, got {error:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod threads_tests {
+    use super::*;
+
+    #[test]
+    fn limits_match_shared_rules() {
+        let unshared = Limits {
+            min: 1,
+            max: Some(2),
+            is64: false,
+            shared: false,
+        };
+        let shared = Limits {
+            min: 1,
+            max: Some(2),
+            is64: false,
+            shared: true,
+        };
+        // shared is part of the type: never links across, either direction
+        assert!(!limits_match(&unshared, &shared));
+        assert!(!limits_match(&shared, &unshared));
+        // shared-to-shared links under the usual min/max rules
+        assert!(limits_match(&shared, &shared));
+        assert!(limits_match(
+            &Limits {
+                min: 2,
+                max: Some(2),
+                is64: false,
+                shared: true
+            },
+            &shared
+        ));
     }
 }

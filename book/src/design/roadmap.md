@@ -16,6 +16,12 @@
 
 - **0.1.0 release** — crates.io publish of core/cli/ffi/borsalino/gpu; tag
   `v0.1.0`. (This book is part of that release polish.)
+- **Threads slice (classic proposal)** — implemented and corpus-green at the
+  frozen pin (`WebAssembly/threads@main-legacy 33b2dcd6`): shared linear memory,
+  the `0xFE` atomic family, deterministic single-agent `wait`/`notify`/`fence`.
+  The official suite runs **204 files with 3 deferrals and 0 failures**
+  (`thread.wast` is deferred: its coverage is multi-agent only). Shared-everything
+  threads remains out of scope.
 
 ## WebAssembly 3.0 proposals (the post-release track)
 
@@ -30,8 +36,13 @@ Ordered roughly by dependency and value:
    where Borsalino 0.6.0's GC-safety epoch tracking
    (`prove_quiescent` / `dispatch_verified_gc`) becomes relevant: compaction
    must defer while GPU dispatches are in flight.
-5. **Threads / shared-everything** — shared memories and atomic operations;
-   single-threaded today.
+5. **Threads** — shared memories and atomic operations. NOTE: threads is NOT
+   part of WebAssembly 3.0 (the pinned 3.0 suite contains no threads content);
+   this is the classic proposal's frozen browser-shipped state. **Implemented
+   single-agent** in the threads slice: shared linear memory + the `0xFE` atomic
+   family + `wait`/`notify`/`fence`, corpus-green. Shared-everything threads
+   (`thread.spawn`, shared GC, per-op ordering params — `main` @ `cc535ada`)
+   stays gated behind the GC collector work.
 
 Each proposal is engine-internal and does not affect the ABI shape — except
 memory64, which is why the FFI sizes are `u64` from day one.

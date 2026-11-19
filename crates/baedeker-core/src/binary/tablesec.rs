@@ -124,6 +124,7 @@ fn parse_limits(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Limits, D
                 min: u64::from(min),
                 max: None,
                 is64: false,
+                shared: false,
             })
         }
         0x01 => {
@@ -133,6 +134,7 @@ fn parse_limits(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Limits, D
                 min: u64::from(min),
                 max: Some(u64::from(max)),
                 is64: false,
+                shared: false,
             })
         }
         0x04 => {
@@ -141,6 +143,7 @@ fn parse_limits(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Limits, D
                 min,
                 max: None,
                 is64: true,
+                shared: false,
             })
         }
         0x05 => {
@@ -150,6 +153,7 @@ fn parse_limits(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Limits, D
                 min,
                 max: Some(max),
                 is64: true,
+                shared: false,
             })
         }
         _ => Err(DecodeError {

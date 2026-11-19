@@ -282,6 +282,7 @@ mod tests {
                 min: 1,
                 max: None,
                 is64: false,
+                shared: false,
             },
         });
         module

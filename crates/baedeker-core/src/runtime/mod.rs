@@ -28,6 +28,7 @@ pub use store::{
     Imports, LinkGroup, PAGE_SIZE, RecProvenance, Store, TagBinding,
 };
 
+use crate::binary::instr::AtomicRmw;
 use crate::lower::{
     BinaryOp, GcExt, LaneShape, Reg, RegFunc, RegInstr, RegModule, RegOp, RegTerm, UnaryOp,
     V128BinaryKind, V128CompareKind, V128ConvertKind, V128FloatUnaryKind, V128ShiftKind,
@@ -266,6 +267,12 @@ pub enum RuntimeTrap {
     NullI31Reference,
     /// An array index/range out of bounds (`out of bounds array access`).
     OutOfBoundsArrayAccess,
+    /// An atomic access whose effective address is not naturally aligned
+    /// (`unaligned atomic memory access`, pin `eval.ml:140-142`).
+    UnalignedAtomicMemoryAccess,
+    /// `memory.atomic.wait*` on a memory that is not shared
+    /// (`expected shared memory`, pin `eval.ml:144-147`).
+    ExpectedSharedMemory,
 }
 
 impl RuntimeTrap {
@@ -288,6 +295,8 @@ impl RuntimeTrap {
             RuntimeTrap::NullArrayReference => "null array reference",
             RuntimeTrap::NullI31Reference => "null i31 reference",
             RuntimeTrap::OutOfBoundsArrayAccess => "out of bounds array access",
+            RuntimeTrap::UnalignedAtomicMemoryAccess => "unaligned atomic memory access",
+            RuntimeTrap::ExpectedSharedMemory => "expected shared memory",
         }
     }
 }
@@ -2074,6 +2083,132 @@ fn execute_reg_op(
                 }
             }
         }
+        RegOp::AtomicLoad {
+            width,
+            dst,
+            addr,
+            memarg,
+        } => {
+            let mem = atomic_memory(store, memarg)?;
+            let addr = atomic_addr(store, registers, *addr, memarg)?;
+            let mem = mem.borrow();
+            let range = atomic_range(&mem, memarg, addr, width.byte_width())?;
+            let bits = atomic_read(&mem[range]);
+            set_reg(registers, *dst, atomic_value(bits, width.val_type()))?;
+        }
+        RegOp::AtomicStore {
+            width,
+            addr,
+            value,
+            memarg,
+        } => {
+            let mem = atomic_memory(store, memarg)?;
+            let addr = atomic_addr(store, registers, *addr, memarg)?;
+            let bits = atomic_operand_bits(get_reg(registers, *value)?, width.val_type())?;
+            let mut mem = mem.borrow_mut();
+            let range = atomic_range(&mem, memarg, addr, width.byte_width())?;
+            atomic_write(&mut mem[range], bits);
+        }
+        RegOp::AtomicRmw {
+            op,
+            width,
+            dst,
+            addr,
+            value,
+            memarg,
+        } => {
+            let mem = atomic_memory(store, memarg)?;
+            let addr = atomic_addr(store, registers, *addr, memarg)?;
+            let ty = width.val_type();
+            let operand = atomic_operand_bits(get_reg(registers, *value)?, ty)?;
+            let mut mem = mem.borrow_mut();
+            let range = atomic_range(&mem, memarg, addr, width.byte_width())?;
+            // Narrow forms zero-extend the load and truncate the store; the
+            // arithmetic itself runs at the full value width (wrapping), and
+            // the OLD value is the result (`eval.ml:295-311`).
+            let old = atomic_read(&mem[range.start..range.end]);
+            let new = atomic_rmw(*op, old, operand);
+            atomic_write(&mut mem[range], new);
+            set_reg(registers, *dst, atomic_value(old, ty))?;
+        }
+        RegOp::AtomicCmpxchg {
+            width,
+            dst,
+            addr,
+            expected,
+            replacement,
+            memarg,
+        } => {
+            let mem = atomic_memory(store, memarg)?;
+            let addr = atomic_addr(store, registers, *addr, memarg)?;
+            let ty = width.val_type();
+            let expected = atomic_operand_bits(get_reg(registers, *expected)?, ty)?;
+            let replacement = atomic_operand_bits(get_reg(registers, *replacement)?, ty)?;
+            let mut mem = mem.borrow_mut();
+            let range = atomic_range(&mem, memarg, addr, width.byte_width())?;
+            let old = atomic_read(&mem[range.start..range.end]);
+            if old == expected {
+                atomic_write(&mut mem[range], replacement);
+            }
+            set_reg(registers, *dst, atomic_value(old, ty))?;
+        }
+        RegOp::AtomicWait {
+            width,
+            dst,
+            addr,
+            expected,
+            timeout,
+            memarg,
+        } => {
+            let mem = atomic_memory(store, memarg)?;
+            let addr = atomic_addr(store, registers, *addr, memarg)?;
+            let ty = width.val_type();
+            let expected = atomic_operand_bits(get_reg(registers, *expected)?, ty)?;
+            // The timeout operand is read (and type-checked) but never slept
+            // on — see the single-agent determination below.
+            atomic_operand_bits(get_reg(registers, *timeout)?, ValType::Num(NumType::I64))?;
+            // Trap order pinned by `eval.ml:329-335`: check_align, then
+            // check_shared, then the load (whose bounds check comes last).
+            // A wait on unshared memory traps even when it would not block.
+            atomic_align(memarg, addr, width.byte_width())?;
+            if !require_store(store)?
+                .memory_type(memarg.memory.0)
+                .is_some_and(|ty| ty.limits.shared)
+            {
+                return Err(trap(RuntimeTrap::ExpectedSharedMemory));
+            }
+            let mem = mem.borrow();
+            let range = memory_bounds(&mem, memarg, addr, width.byte_width())?;
+            let old = atomic_read(&mem[range]);
+            // Single-agent determination: with no second agent there is no
+            // wake source, so a matching wait deterministically times out
+            // (`eval.ml:329-345` suspends the agent when the value matches
+            // and the timeout is outside the 1 ms epsilon band). Returning 2
+            // immediately for EVERY timeout — including negative (infinite)
+            // ones — is observationally identical for a single-agent store
+            // and is the only non-hanging choice.
+            let result = if old == expected { 2 } else { 1 };
+            set_reg(registers, *dst, Value::I32(result))?;
+        }
+        RegOp::AtomicNotify {
+            dst,
+            addr,
+            count,
+            memarg,
+        } => {
+            let mem = atomic_memory(store, memarg)?;
+            let addr = atomic_addr(store, registers, *addr, memarg)?;
+            atomic_operand_bits(get_reg(registers, *count)?, ValType::Num(NumType::I32))?;
+            let mem = mem.borrow();
+            // notify is a 32-bit access with no narrow form (`eval.ml:347`).
+            let range = atomic_range(&mem, memarg, addr, 4)?;
+            // The load exists only for its out-of-bounds trap effect; the
+            // value is discarded (`eval.ml:349`).
+            let _ = atomic_read(&mem[range]);
+            // Single-agent determination: no waiters can exist, so every
+            // count (including 0) returns 0 (`eval.ml:347-357`).
+            set_reg(registers, *dst, Value::I32(0))?;
+        }
         RegOp::V128LoadLane {
             width,
             dst,
@@ -3277,6 +3412,118 @@ fn memory_bounds(
         return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
     }
     Ok(ea as usize..end as usize)
+}
+
+/// The shared handle of an atomic access's memory (the bytes are the same
+/// handle plain loads/stores use; `memory.grow` mutates it in place).
+fn atomic_memory(
+    store: Option<&Store>,
+    memarg: &MemArg,
+) -> Result<alloc::rc::Rc<core::cell::RefCell<Vec<u8>>>, RuntimeError> {
+    require_store(store)?
+        .shared_memory(memarg.memory.0)
+        .ok_or(RuntimeError {
+            kind: RuntimeErrorKind::UnknownMemory {
+                memory: memarg.memory.0,
+            },
+        })
+}
+
+/// Read an atomic access's address operand, at the target memory's declared
+/// index width (32-bit for every shared memory at the threads pin; a 64-bit
+/// unshared memory still admits atomics in this engine).
+fn atomic_addr(
+    store: Option<&Store>,
+    registers: &[Option<Value>],
+    addr: Reg,
+    memarg: &MemArg,
+) -> Result<u64, RuntimeError> {
+    let is64 = require_store(store)?
+        .memory_type(memarg.memory.0)
+        .is_some_and(|ty| ty.limits.is64);
+    read_addr(get_reg(registers, addr)?, is64)
+}
+
+/// The natural-alignment check for an atomic access (`check_align`, pin
+/// `eval.ml:140-142` / `runtime/memory.ml:23-28`).
+///
+/// The check runs on the EFFECTIVE address `base + memarg.offset`, per the
+/// normative text (`document/core/exec/instructions.rst`, `_exec-atomic.*`:
+/// "ea = i + memarg.OFFSET … If ea modulo N/8 is not equal to 0, then:
+/// trap"). The pin's interpreter checks only the base address (`eval.ml:275`
+/// passes `addr` before `offset` is applied inside `load_value`) — a bug the
+/// corpus cannot see because no atomic test file uses `offset=`. Addition
+/// wraps modulo the address width, matching the spec's modular effective
+/// address; a genuinely out-of-range result is caught by the bounds check.
+fn atomic_align(memarg: &MemArg, addr: u64, byte_width: usize) -> Result<(), RuntimeError> {
+    let ea = addr.wrapping_add(memarg.offset);
+    if ea % byte_width as u64 != 0 {
+        return Err(trap(RuntimeTrap::UnalignedAtomicMemoryAccess));
+    }
+    Ok(())
+}
+
+/// Alignment first, then the bounds-checked byte range: the alignment trap
+/// precedes every bounds check for every atomic op (`eval.ml:271-357`).
+fn atomic_range(
+    mem: &[u8],
+    memarg: &MemArg,
+    addr: u64,
+    byte_width: usize,
+) -> Result<core::ops::Range<usize>, RuntimeError> {
+    atomic_align(memarg, addr, byte_width)?;
+    memory_bounds(mem, memarg, addr, byte_width)
+}
+
+/// Zero-extended little-endian read of `bytes.len()` (1..=8) bytes: the
+/// narrow atomic forms zero-extend to their full value width (`ZX` in the
+/// pin's `load_packed`).
+fn atomic_read(bytes: &[u8]) -> u64 {
+    let mut buf = [0u8; 8];
+    buf[..bytes.len()].copy_from_slice(bytes);
+    u64::from_le_bytes(buf)
+}
+
+/// Write the low `bytes.len()` bytes of `bits`: narrow atomic stores
+/// truncate (`store_packed` in the pin).
+fn atomic_write(bytes: &mut [u8], bits: u64) {
+    let raw = bits.to_le_bytes();
+    bytes.copy_from_slice(&raw[..bytes.len()]);
+}
+
+/// Read an atomic operand of value type `ty` as its raw bits.
+fn atomic_operand_bits(value: Value, ty: ValType) -> Result<u64, RuntimeError> {
+    match (value, ty) {
+        (Value::I32(value), ValType::Num(NumType::I32)) => Ok(value as u32 as u64),
+        (Value::I64(value), _) => Ok(value as u64),
+        (other, expected) => Err(RuntimeError {
+            kind: RuntimeErrorKind::TypeMismatch {
+                expected,
+                found: other.val_type(),
+            },
+        }),
+    }
+}
+
+/// Rebuild a value of type `ty` from raw bits.
+fn atomic_value(bits: u64, ty: ValType) -> Value {
+    match ty {
+        ValType::Num(NumType::I32) => Value::I32(bits as u32 as i32),
+        _ => Value::I64(bits as i64),
+    }
+}
+
+/// `eval_rmwop` at the full value width: wrapping add/sub, bitwise
+/// and/or/xor, and xchg returning the operand (`eval.ml:295-311`).
+fn atomic_rmw(kind: AtomicRmw, old: u64, operand: u64) -> u64 {
+    match kind {
+        AtomicRmw::Add => old.wrapping_add(operand),
+        AtomicRmw::Sub => old.wrapping_sub(operand),
+        AtomicRmw::And => old & operand,
+        AtomicRmw::Or => old | operand,
+        AtomicRmw::Xor => old ^ operand,
+        AtomicRmw::Xchg => operand,
+    }
 }
 
 /// Whether a reference value is null (`ref.null`).
