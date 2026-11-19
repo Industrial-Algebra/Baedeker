@@ -8,12 +8,28 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The profile directory containing `libbaedeker_ffi.a`
-/// (…/target/{debug,release}), derived from this test binary's location.
+/// The profile directory containing `libbaedeker_ffi.a`, derived from the
+/// workspace target directory — NOT from the test binary's location.
+///
+/// The nested `cargo build -p baedeker-ffi` (no `--release`) always emits the
+/// staticlib at `<target>/debug/libbaedeker_ffi.a`. Deriving the path by
+/// walking up from the test binary is fragile: cargo can place the test
+/// binary in a build-script out-dir
+/// (`target/<profile>/build/<pkg>/<hash>/out/`), where the
+/// two-levels-up assumption points into the out-dir and the staticlib is
+/// never found (observed on CI: the FFI `c_smoke_end_to_end` test failing
+/// with "staticlib not found at …/build/baedeker-ffi/<hash>/"). Anchor on
+/// `CARGO_TARGET_DIR` when set, else the workspace root's `target/`.
 fn profile_dir() -> PathBuf {
-    let exe = std::env::current_exe().unwrap();
-    // …/target/<profile>/deps/<test-binary>
-    exe.parent().unwrap().parent().unwrap().to_path_buf()
+    if let Some(dir) = std::env::var_os("CARGO_TARGET_DIR") {
+        return PathBuf::from(dir).join("debug");
+    }
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2) // crates/baedeker-ffi → crates → workspace root
+        .expect("workspace root above crates/baedeker-ffi")
+        .join("target")
+        .join("debug")
 }
 
 fn run(cmd: &mut Command, what: &str) {
