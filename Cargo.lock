@@ -116,7 +116,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "baedeker-borsalino"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "baedeker-core",
  "borsalino",
@@ -125,7 +125,7 @@ dependencies = [
 
 [[package]]
 name = "baedeker-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "baedeker-core",
  "baedeker-testdata",
@@ -133,7 +133,7 @@ dependencies = [
 
 [[package]]
 name = "baedeker-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arbitrary",
  "baedeker-testdata",
@@ -147,7 +147,7 @@ dependencies = [
 
 [[package]]
 name = "baedeker-ffi"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "baedeker-core",
  "cbindgen",
@@ -157,7 +157,7 @@ dependencies = [
 
 [[package]]
 name = "baedeker-gpu"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "baedeker-core",
  "wat",
@@ -165,7 +165,7 @@ dependencies = [
 
 [[package]]
 name = "baedeker-testdata"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "bit-set"

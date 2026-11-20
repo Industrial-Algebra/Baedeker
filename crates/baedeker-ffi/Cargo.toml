@@ -15,7 +15,7 @@ readme = "../../README.md"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dependencies]
-baedeker-core = { path = "../baedeker-core", version = "0.1.0", features = ["aot"] }
+baedeker-core = { path = "../baedeker-core", version = "0.2.0", features = ["aot"] }
 
 [build-dependencies]
 cbindgen = "0.29"

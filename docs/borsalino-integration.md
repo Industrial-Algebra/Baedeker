@@ -44,7 +44,7 @@ let result = gpu.read_buffer::<f32>(&gpu_buf)?;
 
 ### Level 1: Bulk SIMD Offload (~200 lines in Baedeker)
 
-Baedeker implements WASM 2.0 SIMD (`v128`). For bulk operations on large vectors,
+Baedeker implements fixed-width SIMD (`v128`). For bulk operations on large vectors,
 dispatch a pre-compiled WGSL kernel via Borsalino instead of executing element-by-element
 in the register IR.
 

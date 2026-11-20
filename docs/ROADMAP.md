@@ -1,9 +1,10 @@
 # Baedeker — Roadmap
 
-> **Status snapshot: 0.1.0 (unreleased).** WebAssembly 2.0 core is complete
-> and verified (official spec suite: 85 files, 19,204 assertions, 0 failures).
-> Platform integration (FFI, Swift, GPU offload, AOT) is done. WebAssembly 3.0
-> proposals are the post-release track. For the rendered roadmap, see the
+> **Status snapshot: 0.2.0 (release in progress).** WebAssembly 3.0 is complete
+> and verified (official spec suite: 204 files, 54,601 assertions, 1,994 modules,
+> 0 failures), plus the classic threads proposal. Platform integration (FFI,
+> Swift, GPU offload, AOT) is done. Forward work: the real GC collector and
+> shared-everything threads. For the rendered roadmap, see the
 > [Baedeker Book — Roadmap](../book/src/design/roadmap.md).
 
 > A WASM runtime built in Rust, named for the most cautious and methodical of Pierson's Puppeteers.

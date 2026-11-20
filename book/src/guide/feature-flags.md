@@ -7,14 +7,14 @@ matches your embedding target:
 
 ```toml
 # The engine itself (no_std + alloc).
-baedeker-core = "0.1"
+baedeker-core = "0.2"
 
 # C ABI for host embedding (staticlib/cdylib).
-baedeker-ffi = "0.1"
+baedeker-ffi = "0.2"
 
 # Optional GPU offload.
-baedeker-borsalino = "0.1"
-baedeker-gpu = "0.1"
+baedeker-borsalino = "0.2"
+baedeker-gpu = "0.2"
 ```
 
 Install the command-line harness with `cargo install baedeker-cli`.

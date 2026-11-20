@@ -38,10 +38,11 @@ implementation quality.
 
 ## Key features
 
-- **WASM 2.0 core complete** — full reference types, fixed-width SIMD,
-  multi-value, bulk memory, multi-module linking, and host functions.
-- **Spec-verified** — the official WebAssembly test suite runs clean: 85 files,
-  19,204 assertions, 993 modules, 0 failures.
+- **WASM 3.0 complete** — tail calls, exception handling, fixed-width SIMD,
+  memory64 + table64, garbage collection, typed function references, and
+  classic threads (shared memory + atomics), all conformance-verified.
+- **Spec-verified** — the official WebAssembly test suite runs clean: 204 files,
+  54,601 assertions, 1,994 modules, 0 failures.
 - **Differentially tested** — generated modules executed against Wasmtime with
   zero divergences.
 - **Embeddable** — `no_std` core; C ABI and Swift package for native embedding.
@@ -52,7 +53,7 @@ implementation quality.
 
 ## Status
 
-Baedeker's first public release targets WebAssembly 2.0 as a complete,
-verified milestone. WebAssembly 3.0 proposals (tail calls, exception handling,
-memory64, GC, threads) are the post-release roadmap. See
+WebAssembly 3.0 is complete and verified, with the classic threads proposal
+(shared linear memory + atomics) implemented on top. The real GC collector and
+shared-everything threads are the forward roadmap. See
 [Roadmap](./design/roadmap.md).
