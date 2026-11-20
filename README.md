@@ -27,28 +27,28 @@ cautious, methodical, but ultimately willing to venture into the unknown.
 
 ## Status
 
-**WebAssembly 2.0 core: complete and green — the first milestone on the road to 3.0.**
-The interpreter passes the official WebAssembly spec test suite: **85 files, 19,204
-assertions, 993 modules, 0 failures**. Every remaining deferred file exercises a post-2.0
-proposal — tail calls, GC, exception handling, memory64, and friends — which is precisely
-the 3.0 surface. Baedeker is meant to be a fully-general runtime: 3.0 spec support is the
-destination, both to widen what the runtime can execute and to help push WebAssembly
-adoption in general.
+**WebAssembly 3.0: complete and green — and classic threads on top.**
+The interpreter passes the official WebAssembly spec test suite: **204 files,
+54,601 assertions, 1,994 modules, 0 failures**. Every proposal in the pinned
+WASM 3.0 release is implemented and conformance-verified: tail calls, exception
+handling, fixed-width SIMD, memory64 + table64, and garbage collection. The
+classic threads proposal (shared linear memory + atomics) is implemented on top.
+Three files are deferred with recorded reasons (two parser/runner limitations,
+one multi-agent coverage) — none hides a semantic gap.
 
-- **Full 2.0 feature set** — structured control flow with multi-value, direct/indirect calls,
-  bulk memory, tables, globals, SIMD v128 core, and the reference-types + function-references
-  proposals (`call_ref`, `br_on_null`, `br_on_non_null`, `ref.as_non_null`, typed references).
+- **Full 3.0 feature set** — structured control flow with multi-value,
+  direct/indirect calls, tail calls, bulk memory, tables, globals, fixed-width
+  SIMD v128, exception handling (`try`/`catch`/`throw`), memory64 + table64,
+  typed function references and GC (`struct`/`array`, casts, recursive types),
+  and classic threads (shared memories + the full `0xFE` atomic family).
 - **Multi-module linking** — shared memories, globals, tables, and functions across
   instantiations, with host functions registered against the store.
 - **Embeddable by design** — per-instance fuel budgets for untrusted code, sparse table
   storage (a `u32::MAX`-entry table instantiates), fallible allocation on memory growth,
-  and reentrant `&Store` execution.
+  engine-level GC-heap byte caps, and reentrant `&Store` execution.
 - **Differentially tested** — wasm-smith generated modules executed against Wasmtime
-  (zero divergences across thousands of executions), plus cargo-fuzz targets for decode,
-  validation/lowering, and trap-edge semantics.
-
-**Next: Phase 5 — platform integration.** C FFI, Swift package, AOT pipeline, and the GPU
-host module, ahead of a 0.1.0 release. See [docs/ROADMAP.md](docs/ROADMAP.md).
+  (zero divergences across thousands of executions), cargo-fuzz targets for decode,
+  validation/lowering, and trap-edge semantics, and the AOT pipeline at format v12.
 
 ## Why
 
@@ -64,7 +64,8 @@ that runs across Metal, Nvidia, and AMD hardware.
 ## Goals
 
 - **Spec compliance** — full WebAssembly 3.0 core, validated against the official spec test
-  suite. *(2.0 done — see Status; 3.0 proposals tracked as
+  suite. **Done** — plus the classic threads proposal. *(Shared-everything threads and the
+  real GC collector are tracked as
   [deferred work](https://github.com/Industrial-Algebra/Baedeker/issues/15).)*
 - **Cross-platform embedding** — `no_std` + `alloc` core with no OS dependencies, designed for
   static linking into host apps via C FFI on any platform (Swift interop on Apple platforms).

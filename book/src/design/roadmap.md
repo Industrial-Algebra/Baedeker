@@ -1,40 +1,50 @@
 # Roadmap
 
-> **Status snapshot: 0.1.0 (unreleased).** WebAssembly 2.0 is complete and
-> verified; 3.0 proposals are the forward plan.
+> **Status snapshot: 0.2.0.** WebAssembly 3.0 is complete and verified; the
+> classic threads proposal is implemented on top. Forward work is the real GC
+> collector and shared-everything threads.
 
 ## Released
 
 - **WebAssembly 2.0 core** — full reference types, fixed-width SIMD,
   multi-value, bulk memory, multi-module linking, host functions.
+- **WebAssembly 3.0** (pinned spec `dfa3f32a`) — every proposal, each its own
+  reviewed slice: **tail calls**, **exception handling** (`try`/`catch`/`throw`),
+  **fixed-width SIMD**, **memory64 + table64**, **garbage collection**
+  (struct/array types, casts, recursive types). Official suite: **204 files,
+  54,601 assertions, 1,994 modules, 0 failures**.
+- **Classic threads** — shared linear memory + the full `0xFE` atomic family,
+  at the frozen browser-shipped pin (`WebAssembly/threads@main-legacy
+  33b2dcd6`), with deterministic single-agent `wait`/`notify`/`fence`
+  semantics.
 - **Platform integration (Phase 5)** — C ABI, Swift package, GPU offload
-  (Borsalino), GPU host module, AOT pipeline, interpreter fuel.
+  (Borsalino), GPU host module, AOT pipeline (format v12), interpreter fuel.
 - **Verification** — official spec suite green, differential testing vs
-  Wasmtime, cargo-fuzz targets, layered GPU verification.
+  Wasmtime, cargo-fuzz targets, smith generation at total acceptance, layered
+  GPU verification.
 
 ## In progress / next
 
-- **0.1.0 release** — crates.io publish of core/cli/ffi/borsalino/gpu; tag
-  `v0.1.0`. (This book is part of that release polish.)
+- **0.2.0 release** — crates.io publish of core/cli/ffi/borsalino/gpu; tag
+  `v0.2.0`. (This book is part of that release polish.)
+- **GC 5b — the real collector** — the staged GC slice ships a never-free heap;
+  the collecting pass is gated behind the R3/R4 payloads per the design doc.
+  Compaction must defer while GPU dispatches are in flight (Borsalino 0.6.0's
+  GC-safety epoch tracking: `prove_quiescent` / `dispatch_verified_gc`).
 
-## WebAssembly 3.0 proposals (the post-release track)
+## Forward proposals
 
-Ordered roughly by dependency and value:
+- **Shared-everything threads** (`thread.spawn`, shared GC, per-op ordering
+  params — `main` @ `cc535ada`). NOTE: threads is NOT part of WebAssembly 3.0
+  (the pinned 3.0 suite contains no threads content); the classic proposal is
+  implemented. Shared-everything collides with the single-threaded GC-heap
+  design and stays gated behind the GC collector work.
+- **wasi-threads embedder surface** — now that shared memories and single-agent
+  atomics exist, a WASI host API for multi-threaded modules is a plausible
+  integration target.
 
-1. **Tail calls** (`return_call` / `return_call_indirect` / `return_call_ref`) —
-   the deferred spec files exist; validation lowering is the work.
-2. **Exception handling** — the `try`/`catch`/`throw` proposal.
-3. **memory64** — 64-bit memories. The FFI already uses `uint64_t` sizes in
-   anticipation.
-4. **Garbage collection** — struct/array/reference types, GC compaction. This is
-   where Borsalino 0.6.0's GC-safety epoch tracking
-   (`prove_quiescent` / `dispatch_verified_gc`) becomes relevant: compaction
-   must defer while GPU dispatches are in flight.
-5. **Threads / shared-everything** — shared memories and atomic operations;
-   single-threaded today.
-
-Each proposal is engine-internal and does not affect the ABI shape — except
-memory64, which is why the FFI sizes are `u64` from day one.
+Each proposal is engine-internal and does not affect the ABI shape — memory64
+is why the FFI sizes are `u64` from day one.
 
 ## Ecosystem integration
 

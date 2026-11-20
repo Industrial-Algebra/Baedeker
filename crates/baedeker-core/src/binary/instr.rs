@@ -17,8 +17,8 @@ use crate::binary::typeparser::{
 };
 use crate::error::{ByteOffset, DecodeContext, DecodeError, DecodeErrorKind};
 use crate::types::{
-    BlockType, CodeBody, ElemIdx, FuncIdx, GlobalIdx, LabelIdx, LocalIdx, MemArg, MemIdx, RefType,
-    TableIdx, TypeIdx, ValType,
+    BlockType, CodeBody, ElemIdx, FuncIdx, GlobalIdx, HeapType, LabelIdx, LocalIdx, MemArg, MemIdx,
+    RefType, TableIdx, TagIdx, TypeIdx, ValType,
 };
 
 /// A decoded instruction paired with its absolute byte offset in the module.
@@ -26,6 +26,106 @@ use crate::types::{
 pub struct DecodedInstr {
     pub offset: ByteOffset,
     pub instr: Instr,
+}
+
+/// A catch clause of a `try_table` instruction.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TryTableCatch {
+    /// Which form of catch this clause is.
+    pub kind: TryTableCatchKind,
+    /// Tag index; `None` for `catch_all` / `catch_all_ref`.
+    pub tag: Option<TagIdx>,
+    /// Branch target label, relative like a `br` label.
+    pub label: u32,
+}
+
+/// The four catch-clause forms of `try_table`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TryTableCatchKind {
+    /// `catch $tag $label` — match tag, branch with payload.
+    Catch,
+    /// `catch_ref $tag $label` — match tag, branch with payload + exnref.
+    CatchRef,
+    /// `catch_all $label` — match anything, branch empty.
+    CatchAll,
+    /// `catch_all_ref $label` — match anything, branch with exnref.
+    CatchAllRef,
+}
+
+/// The `try_table` instruction payload.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TryTable {
+    pub block_type: BlockType,
+    pub catches: Vec<TryTableCatch>,
+}
+
+/// Value width of an atomic access. `N*` variants are the
+/// narrow (packed) accesses that zero-/sign-extend to the parent type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum AtomicWidth {
+    I32,
+    I64,
+    I32N8,
+    I32N16,
+    I64N8,
+    I64N16,
+    I64N32,
+}
+
+impl AtomicWidth {
+    /// Natural alignment as the memarg exponent (log2 of bytes).
+    pub fn natural_align_log2(self) -> u32 {
+        match self {
+            AtomicWidth::I32 | AtomicWidth::I64N32 => 2,
+            AtomicWidth::I64 => 3,
+            AtomicWidth::I32N8 | AtomicWidth::I64N8 => 0,
+            AtomicWidth::I32N16 | AtomicWidth::I64N16 => 1,
+        }
+    }
+
+    /// Bytes touched in memory: the full widths 4/8, the narrow forms
+    /// 1/2/4 (pin `runtime/memory.ml:23-28` `is_aligned`). This is both the
+    /// access width and the natural alignment the runtime checks.
+    pub fn byte_width(self) -> usize {
+        1 << self.natural_align_log2()
+    }
+
+    /// The operand/result value type (post-extension for narrow forms).
+    pub fn val_type(self) -> crate::types::ValType {
+        match self {
+            AtomicWidth::I32 | AtomicWidth::I32N8 | AtomicWidth::I32N16 => {
+                crate::types::ValType::Num(crate::types::NumType::I32)
+            }
+            AtomicWidth::I64 | AtomicWidth::I64N8 | AtomicWidth::I64N16 | AtomicWidth::I64N32 => {
+                crate::types::ValType::Num(crate::types::NumType::I64)
+            }
+        }
+    }
+}
+
+/// Read-modify-write operation kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum AtomicRmw {
+    Add,
+    Sub,
+    And,
+    Or,
+    Xor,
+    Xchg,
+}
+
+/// One decoded atomic instruction (everything but `atomic.fence`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum AtomicOp {
+    Notify(MemArg),
+    Wait32(MemArg),
+    Wait64(MemArg),
+    Load(AtomicWidth, MemArg),
+    Store(AtomicWidth, MemArg),
+    Rmw(AtomicRmw, AtomicWidth, MemArg),
+    Cmpxchg(AtomicWidth, MemArg),
 }
 
 /// A decoded WebAssembly instruction.
@@ -159,6 +259,12 @@ pub enum Instr {
     TableFill(TableIdx),
     MemorySize(MemIdx),
     MemoryGrow(MemIdx),
+    /// Classic-threads atomic family (0xFE prefix): notify/wait + loads/
+    /// stores/rmw/cmpxchg, all with a memarg. Decoded, validated, and
+    /// linked in U1; execution semantics land in U2.
+    Atomic(AtomicOp),
+    /// `atomic.fence` — 0xFE 0x03 with one reserved 0x00 byte.
+    AtomicFence,
     I32Const(i32),
     I64Const(i64),
     F32Const(f32),
@@ -167,6 +273,29 @@ pub enum Instr {
     RefIsNull,
     RefFunc(FuncIdx),
     RefAsNonNull,
+    /// `ref.test (ref null? ht)` — test a reference against a heap type.
+    RefTest {
+        nullable: bool,
+        ht: HeapType,
+    },
+    /// `ref.cast (ref null? ht)` — cast a reference, trapping on failure.
+    RefCast {
+        nullable: bool,
+        ht: HeapType,
+    },
+    /// `br_on_cast` / `br_on_cast_fail` — branch on cast success/failure.
+    BrOnCast {
+        fail: bool,
+        src: RefType,
+        tgt: RefType,
+        label: LabelIdx,
+    },
+    /// `ref.eq` — equality comparison of two eq references.
+    RefEq,
+    /// `any.convert_extern` — re-tag an extern reference as an any reference.
+    AnyConvertExtern,
+    /// `extern.convert_any` — re-tag an any reference as an extern reference.
+    ExternConvertAny,
     V128Const([u8; 16]),
     I8x16Splat,
     I16x8Splat,
@@ -185,11 +314,13 @@ pub enum Instr {
     I8x16Add,
     I8x16Sub,
     I16x8Add,
+    I16x8Mul,
     I16x8Sub,
     I32x4Add,
     I32x4Sub,
     I32x4Mul,
     I64x2Add,
+    I64x2Mul,
     I64x2Sub,
     F32x4Add,
     F32x4Sub,
@@ -199,6 +330,186 @@ pub enum Instr {
     F64x2Sub,
     F64x2Mul,
     F64x2Div,
+    V128Andnot,
+    I8x16AddSatS,
+    I8x16AddSatU,
+    I8x16SubSatS,
+    I8x16SubSatU,
+    I8x16MinS,
+    I8x16MinU,
+    I8x16MaxS,
+    I8x16MaxU,
+    I8x16AvgrU,
+    I16x8AddSatS,
+    I16x8AddSatU,
+    I16x8SubSatS,
+    I16x8SubSatU,
+    I16x8MinS,
+    I16x8MinU,
+    I16x8MaxS,
+    I16x8MaxU,
+    I16x8AvgrU,
+    I16x8Q15MulrSatS,
+    I32x4MinS,
+    I32x4MinU,
+    I32x4MaxS,
+    I32x4MaxU,
+    I8x16ExtractLaneS(u8),
+    I8x16ExtractLaneU(u8),
+    I8x16ReplaceLane(u8),
+    I16x8ExtractLaneS(u8),
+    I16x8ExtractLaneU(u8),
+    I16x8ReplaceLane(u8),
+    I64x2ExtractLane(u8),
+    I64x2ReplaceLane(u8),
+    F64x2ExtractLane(u8),
+    F64x2ReplaceLane(u8),
+    V128Bitselect,
+    V128AnyTrue,
+    I8x16Abs,
+    I8x16Neg,
+    I8x16Popcnt,
+    I8x16AllTrue,
+    I8x16Bitmask,
+    I8x16NarrowI16x8S,
+    I8x16NarrowI16x8U,
+    I16x8ExtAddPairwiseI8x16S,
+    I16x8ExtAddPairwiseI8x16U,
+    I16x8Abs,
+    I16x8Neg,
+    I16x8AllTrue,
+    I16x8Bitmask,
+    I16x8NarrowI32x4S,
+    I16x8NarrowI32x4U,
+    I16x8ExtendLowI8x16S,
+    I16x8ExtendHighI8x16S,
+    I16x8ExtendLowI8x16U,
+    I16x8ExtendHighI8x16U,
+    I16x8ExtMulLowI8x16S,
+    I16x8ExtMulHighI8x16S,
+    I16x8ExtMulLowI8x16U,
+    I16x8ExtMulHighI8x16U,
+    I32x4ExtAddPairwiseI16x8S,
+    I32x4ExtAddPairwiseI16x8U,
+    I32x4Abs,
+    I32x4Neg,
+    I32x4AllTrue,
+    I32x4Bitmask,
+    I32x4ExtendLowI16x8S,
+    I32x4ExtendHighI16x8S,
+    I32x4ExtendLowI16x8U,
+    I32x4ExtendHighI16x8U,
+    I32x4DotI16x8S,
+    I32x4ExtMulLowI16x8S,
+    I32x4ExtMulHighI16x8S,
+    I32x4ExtMulLowI16x8U,
+    I32x4ExtMulHighI16x8U,
+    I64x2Abs,
+    I64x2Neg,
+    I64x2AllTrue,
+    I64x2Bitmask,
+    I64x2ExtendLowI32x4S,
+    I64x2ExtendHighI32x4S,
+    I64x2ExtendLowI32x4U,
+    I64x2ExtendHighI32x4U,
+    I64x2ExtMulLowI32x4S,
+    I64x2ExtMulHighI32x4S,
+    I64x2ExtMulLowI32x4U,
+    I64x2ExtMulHighI32x4U,
+    I8x16Eq,
+    I8x16Ne,
+    I8x16LtS,
+    I8x16LtU,
+    I8x16GtS,
+    I8x16GtU,
+    I8x16LeS,
+    I8x16LeU,
+    I8x16GeS,
+    I8x16GeU,
+    I16x8Eq,
+    I16x8Ne,
+    I16x8LtS,
+    I16x8LtU,
+    I16x8GtS,
+    I16x8GtU,
+    I16x8LeS,
+    I16x8LeU,
+    I16x8GeS,
+    I16x8GeU,
+    I32x4Eq,
+    I32x4Ne,
+    I32x4LtS,
+    I32x4LtU,
+    I32x4GtS,
+    I32x4GtU,
+    I32x4LeS,
+    I32x4LeU,
+    I32x4GeS,
+    I32x4GeU,
+    F32x4Eq,
+    F32x4Ne,
+    F32x4Lt,
+    F32x4Gt,
+    F32x4Le,
+    F32x4Ge,
+    F64x2Eq,
+    F64x2Ne,
+    F64x2Lt,
+    F64x2Gt,
+    F64x2Le,
+    F64x2Ge,
+    I8x16Shl,
+    I8x16ShrS,
+    I8x16ShrU,
+    I16x8Shl,
+    I16x8ShrS,
+    I16x8ShrU,
+    I32x4Shl,
+    I32x4ShrS,
+    I32x4ShrU,
+    I64x2Shl,
+    I64x2ShrS,
+    I64x2ShrU,
+    I64x2Eq,
+    I64x2Ne,
+    I64x2LtS,
+    I64x2GtS,
+    I64x2LeS,
+    I64x2GeS,
+    F32x4Abs,
+    F32x4Neg,
+    F32x4Sqrt,
+    F32x4Ceil,
+    F32x4Floor,
+    F32x4Trunc,
+    F32x4Nearest,
+    F64x2Abs,
+    F64x2Neg,
+    F64x2Sqrt,
+    F64x2Ceil,
+    F64x2Floor,
+    F64x2Trunc,
+    F64x2Nearest,
+    F32x4Min,
+    F32x4Max,
+    F32x4PMin,
+    F32x4PMax,
+    F64x2Min,
+    F64x2Max,
+    F64x2PMin,
+    F64x2PMax,
+    I32x4TruncSatF32x4S,
+    I32x4TruncSatF32x4U,
+    F32x4ConvertI32x4S,
+    F32x4ConvertI32x4U,
+    I32x4TruncSatF64x2SZero,
+    I32x4TruncSatF64x2UZero,
+    F32x4DemoteF64x2Zero,
+    F64x2PromoteLowF32x4,
+    F64x2ConvertLowI32x4S,
+    F64x2ConvertLowI32x4U,
+    I8x16Swizzle,
+    I8x16Shuffle([u8; 16]),
     I32Eqz,
     I32Eq,
     I32Ne,
@@ -335,6 +646,88 @@ pub enum Instr {
     I64TruncSatF32U,
     I64TruncSatF64S,
     I64TruncSatF64U,
+    /// `try_table` — protected block with catch clauses (wasm 3.0 EH).
+    TryTable(TryTable),
+    /// `throw $tag` — raise an exception with the tag's parameters.
+    Throw(TagIdx),
+    /// `throw_ref` — re-raise the exception referenced by an exnref.
+    ThrowRef,
+    /// `struct.new $x` — allocate a struct from its field operands.
+    StructNew(TypeIdx),
+    /// `struct.new_default $x` — allocate a struct with default field values.
+    StructNewDefault(TypeIdx),
+    /// `struct.get $x $i` — read an unpacked struct field.
+    StructGet {
+        type_idx: TypeIdx,
+        field: u32,
+    },
+    /// `struct.get_s $x $i` — read a packed struct field, sign-extended.
+    StructGetS {
+        type_idx: TypeIdx,
+        field: u32,
+    },
+    /// `struct.get_u $x $i` — read a packed struct field, zero-extended.
+    StructGetU {
+        type_idx: TypeIdx,
+        field: u32,
+    },
+    /// `struct.set $x $i` — write a struct field.
+    StructSet {
+        type_idx: TypeIdx,
+        field: u32,
+    },
+    /// `array.new $x` — allocate an array of `len` copies of the operand.
+    ArrayNew(TypeIdx),
+    /// `array.new_default $x` — allocate an array of default elements.
+    ArrayNewDefault(TypeIdx),
+    /// `array.new_fixed $x $n` — allocate an array from `n` operands.
+    ArrayNewFixed {
+        type_idx: TypeIdx,
+        count: u32,
+    },
+    /// `array.new_data $x $y` — allocate an array from a data segment.
+    ArrayNewData {
+        type_idx: TypeIdx,
+        data: crate::types::DataIdx,
+    },
+    /// `array.new_elem $x $y` — allocate an array from an element segment.
+    ArrayNewElem {
+        type_idx: TypeIdx,
+        elem: ElemIdx,
+    },
+    /// `array.get $x` — read an unpacked array element.
+    ArrayGet(TypeIdx),
+    /// `array.get_s $x` — read a packed array element, sign-extended.
+    ArrayGetS(TypeIdx),
+    /// `array.get_u $x` — read a packed array element, zero-extended.
+    ArrayGetU(TypeIdx),
+    /// `array.set $x` — write an array element.
+    ArraySet(TypeIdx),
+    /// `array.len` — the length of an abstract array reference.
+    ArrayLen,
+    /// `array.fill $x` — fill a range with a value.
+    ArrayFill(TypeIdx),
+    /// `array.copy $x $y` — copy between arrays.
+    ArrayCopy {
+        dst: TypeIdx,
+        src: TypeIdx,
+    },
+    /// `array.init_data $x $y` — initialize from a data segment.
+    ArrayInitData {
+        type_idx: TypeIdx,
+        data: crate::types::DataIdx,
+    },
+    /// `array.init_elem $x $y` — initialize from an element segment.
+    ArrayInitElem {
+        type_idx: TypeIdx,
+        elem: ElemIdx,
+    },
+    /// `ref.i31` — box an i32 into a 31-bit immediate reference.
+    RefI31,
+    /// `i31.get_s` — sign-extended payload.
+    I31GetS,
+    /// `i31.get_u` — zero-extended payload.
+    I31GetU,
 }
 
 impl<'a> CodeBody<'a> {
@@ -356,6 +749,25 @@ pub fn decode_instr_sequence(bytes: &[u8], base_offset: usize) -> Result<Vec<Ins
         .map(|instrs| instrs.into_iter().map(|decoded| decoded.instr).collect())
 }
 
+/// Reserve room for one more element of `values`, growing the backing store
+/// fallibly in geometric chunks.
+///
+/// Resource discipline: a refused growth is a clean [`DecodeErrorKind::
+/// ResourceLimitExceeded`] anchored at `at`, never an allocation abort (the
+/// U3 declining-allocator sweep aborts on any infallible `Vec` growth).
+fn try_grow_for_push<T>(values: &mut Vec<T>, at: usize) -> Result<(), DecodeError> {
+    if values.len() < values.capacity() {
+        return Ok(());
+    }
+    values
+        .try_reserve(values.len().max(8))
+        .map_err(|_| DecodeError {
+            offset: ByteOffset(at),
+            context: DecodeContext::CodeSection,
+            kind: DecodeErrorKind::ResourceLimitExceeded,
+        })
+}
+
 /// Decode a function-body instruction sequence until its terminating `end`, preserving offsets.
 pub fn decode_instr_sequence_with_offsets(
     bytes: &[u8],
@@ -368,9 +780,12 @@ pub fn decode_instr_sequence_with_offsets(
     loop {
         let decoded = decode_instr_with_offset(&mut cursor, base_offset)?;
         match decoded.instr {
-            Instr::Block(_) | Instr::Loop(_) | Instr::If(_) => block_depth += 1,
+            Instr::Block(_) | Instr::Loop(_) | Instr::If(_) | Instr::TryTable(_) => {
+                block_depth += 1
+            }
             Instr::End => {
                 if block_depth == 0 {
+                    try_grow_for_push(&mut instrs, base_offset + cursor.position())?;
                     instrs.push(decoded);
                     return Ok(instrs);
                 }
@@ -379,6 +794,7 @@ pub fn decode_instr_sequence_with_offsets(
             _ => {}
         }
 
+        try_grow_for_push(&mut instrs, base_offset + cursor.position())?;
         instrs.push(decoded);
 
         if cursor.is_empty() {
@@ -394,6 +810,43 @@ pub fn decode_instr_sequence_with_offsets(
 /// Decode a single instruction.
 pub fn decode_instr(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Instr, DecodeError> {
     decode_instr_with_offset(cursor, base_offset).map(|decoded| decoded.instr)
+}
+
+/// Decode one constant/init expression's raw bytes (including its terminating
+/// `end`) and return the slice consumed.
+///
+/// Shared by the data- and element-section decoders. The boundary is found by
+/// walking the instruction stream with real opcode + immediate consumption,
+/// never by scanning for the first `0x0B` byte: operand bytes can themselves
+/// be `0x0B` (e.g. the LEB128 funcidx 11 in `ref.func 11`, or a wide
+/// `array.new_fixed`/`struct.new` operand), which a raw scan misreads as the
+/// terminator. Every failure is a `DecodeError` with the caller's section
+/// context; the scan can never return a wrong-length slice.
+pub(crate) fn decode_const_expr_bytes<'a>(
+    cursor: &mut Cursor<'a>,
+    base_offset: usize,
+    context: DecodeContext,
+) -> Result<&'a [u8], DecodeError> {
+    let start = cursor.position();
+    let mut block_depth = 0usize;
+    loop {
+        let instr = decode_instr(cursor, base_offset).map_err(|mut error| {
+            error.context = context;
+            error
+        })?;
+        match instr {
+            Instr::Block(_) | Instr::Loop(_) | Instr::If(_) | Instr::TryTable(_) => {
+                block_depth += 1
+            }
+            Instr::End => {
+                if block_depth == 0 {
+                    return Ok(&cursor.original()[start..cursor.position()]);
+                }
+                block_depth -= 1;
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Decode a single instruction with its absolute module offset.
@@ -415,13 +868,29 @@ pub fn decode_instr_with_offset(
         0x03 => Instr::Loop(parse_block_type(cursor, base_offset)?),
         0x04 => Instr::If(parse_block_type(cursor, base_offset)?),
         0x05 => Instr::Else,
+        0x1F => Instr::TryTable(parse_try_table(cursor, base_offset)?),
+        0x08 => Instr::Throw(parse_tag_idx(cursor, base_offset)?),
+        0x0A => Instr::ThrowRef,
         0x0B => Instr::End,
         0x0C => Instr::Br(LabelIdx(decode_u32(cursor, base_offset)?)),
         0x0D => Instr::BrIf(LabelIdx(decode_u32(cursor, base_offset)?)),
         0x0E => {
             let target_count = decode_u32(cursor, base_offset)?;
-            let mut targets = Vec::with_capacity(cursor.capacity_hint(target_count));
+            // Reserve the target list fallibly: instruction decoding is lazy
+            // (it runs from `validate`/`lower`), so an infallible
+            // `with_capacity` here aborts the process on allocator refusal.
+            // The hint is bounded by the remaining input because every target
+            // consumes at least one byte.
+            let mut targets = Vec::new();
+            targets
+                .try_reserve(cursor.capacity_hint(target_count))
+                .map_err(|_| DecodeError {
+                    offset: ByteOffset(base_offset + cursor.position()),
+                    context: DecodeContext::CodeSection,
+                    kind: DecodeErrorKind::ResourceLimitExceeded,
+                })?;
             for _ in 0..target_count {
+                try_grow_for_push(&mut targets, base_offset + cursor.position())?;
                 targets.push(LabelIdx(decode_u32(cursor, base_offset)?));
             }
             let default = LabelIdx(decode_u32(cursor, base_offset)?);
@@ -452,6 +921,8 @@ pub fn decode_instr_with_offset(
         0x26 => Instr::TableSet(parse_table_idx(cursor, base_offset)?),
         0xFC => decode_bulk_memory_instr(cursor, base_offset)?,
         0xFD => decode_simd_instr(cursor, base_offset)?,
+        0xFE => decode_atomic_instr(cursor, base_offset)?,
+        0xFB => decode_gc_instr(cursor, base_offset)?,
         0x28 => Instr::I32Load(parse_memarg(cursor, base_offset)?),
         0x29 => Instr::I64Load(parse_memarg(cursor, base_offset)?),
         0x2A => Instr::F32Load(parse_memarg(cursor, base_offset)?),
@@ -487,6 +958,7 @@ pub fn decode_instr_with_offset(
         )),
         0xD1 => Instr::RefIsNull,
         0xD2 => Instr::RefFunc(FuncIdx(decode_u32(cursor, base_offset)?)),
+        0xD3 => Instr::RefEq,
         0xD4 => Instr::RefAsNonNull,
         0xD5 => Instr::BrOnNull(LabelIdx(decode_u32(cursor, base_offset)?)),
         0xD6 => Instr::BrOnNonNull(LabelIdx(decode_u32(cursor, base_offset)?)),
@@ -633,6 +1105,127 @@ pub fn decode_instr_with_offset(
     })
 }
 
+fn decode_gc_instr(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Instr, DecodeError> {
+    let opcode = decode_u32(cursor, base_offset)?;
+    match opcode {
+        0x00 => Ok(Instr::StructNew(TypeIdx(decode_u32(cursor, base_offset)?))),
+        0x01 => Ok(Instr::StructNewDefault(TypeIdx(decode_u32(
+            cursor,
+            base_offset,
+        )?))),
+        0x02 => Ok(Instr::StructGet {
+            type_idx: TypeIdx(decode_u32(cursor, base_offset)?),
+            field: decode_u32(cursor, base_offset)?,
+        }),
+        0x03 => Ok(Instr::StructGetS {
+            type_idx: TypeIdx(decode_u32(cursor, base_offset)?),
+            field: decode_u32(cursor, base_offset)?,
+        }),
+        0x04 => Ok(Instr::StructGetU {
+            type_idx: TypeIdx(decode_u32(cursor, base_offset)?),
+            field: decode_u32(cursor, base_offset)?,
+        }),
+        0x05 => Ok(Instr::StructSet {
+            type_idx: TypeIdx(decode_u32(cursor, base_offset)?),
+            field: decode_u32(cursor, base_offset)?,
+        }),
+        0x06 => Ok(Instr::ArrayNew(TypeIdx(decode_u32(cursor, base_offset)?))),
+        0x07 => Ok(Instr::ArrayNewDefault(TypeIdx(decode_u32(
+            cursor,
+            base_offset,
+        )?))),
+        0x08 => Ok(Instr::ArrayNewFixed {
+            type_idx: TypeIdx(decode_u32(cursor, base_offset)?),
+            count: decode_u32(cursor, base_offset)?,
+        }),
+        0x09 => Ok(Instr::ArrayNewData {
+            type_idx: TypeIdx(decode_u32(cursor, base_offset)?),
+            data: crate::types::DataIdx(decode_u32(cursor, base_offset)?),
+        }),
+        0x0A => Ok(Instr::ArrayNewElem {
+            type_idx: TypeIdx(decode_u32(cursor, base_offset)?),
+            elem: ElemIdx(decode_u32(cursor, base_offset)?),
+        }),
+        0x0B => Ok(Instr::ArrayGet(TypeIdx(decode_u32(cursor, base_offset)?))),
+        0x0C => Ok(Instr::ArrayGetS(TypeIdx(decode_u32(cursor, base_offset)?))),
+        0x0D => Ok(Instr::ArrayGetU(TypeIdx(decode_u32(cursor, base_offset)?))),
+        0x0E => Ok(Instr::ArraySet(TypeIdx(decode_u32(cursor, base_offset)?))),
+        0x0F => Ok(Instr::ArrayLen),
+        0x10 => Ok(Instr::ArrayFill(TypeIdx(decode_u32(cursor, base_offset)?))),
+        0x11 => Ok(Instr::ArrayCopy {
+            dst: TypeIdx(decode_u32(cursor, base_offset)?),
+            src: TypeIdx(decode_u32(cursor, base_offset)?),
+        }),
+        0x12 => Ok(Instr::ArrayInitData {
+            type_idx: TypeIdx(decode_u32(cursor, base_offset)?),
+            data: crate::types::DataIdx(decode_u32(cursor, base_offset)?),
+        }),
+        0x13 => Ok(Instr::ArrayInitElem {
+            type_idx: TypeIdx(decode_u32(cursor, base_offset)?),
+            elem: ElemIdx(decode_u32(cursor, base_offset)?),
+        }),
+        0x1C => Ok(Instr::RefI31),
+        0x1D => Ok(Instr::I31GetS),
+        0x1E => Ok(Instr::I31GetU),
+        // 0x14–0x17: cast/test identity checks; 0x18/0x19: br_on_cast(_fail);
+        // 0x1a/0x1b: extern/any conversions. Shapes and operand order follow
+        // `interpreter/binary/decode.ml`.
+        0x14..=0x17 => {
+            let ht = parse_heap_type(cursor, base_offset, DecodeContext::CodeSection)?;
+            match opcode {
+                0x14 => Ok(Instr::RefTest {
+                    nullable: false,
+                    ht,
+                }),
+                0x15 => Ok(Instr::RefTest { nullable: true, ht }),
+                0x16 => Ok(Instr::RefCast {
+                    nullable: false,
+                    ht,
+                }),
+                _ => Ok(Instr::RefCast { nullable: true, ht }),
+            }
+        }
+        0x18 | 0x19 => {
+            let flags = cursor.read_byte().map_err(|_| DecodeError {
+                offset: ByteOffset(base_offset + cursor.position()),
+                context: DecodeContext::CodeSection,
+                kind: DecodeErrorKind::UnexpectedEof,
+            })?;
+            if flags & 0xfc != 0 {
+                return Err(DecodeError {
+                    offset: ByteOffset(base_offset),
+                    context: DecodeContext::CodeSection,
+                    kind: DecodeErrorKind::MalformedCastFlags { flags },
+                });
+            }
+            let label = LabelIdx(decode_u32(cursor, base_offset)?);
+            let src_null = flags & 0x01 != 0;
+            let tgt_null = flags & 0x02 != 0;
+            let src = RefType::from_parts(
+                src_null,
+                parse_heap_type(cursor, base_offset, DecodeContext::CodeSection)?,
+            );
+            let tgt = RefType::from_parts(
+                tgt_null,
+                parse_heap_type(cursor, base_offset, DecodeContext::CodeSection)?,
+            );
+            Ok(Instr::BrOnCast {
+                fail: opcode == 0x19,
+                src,
+                tgt,
+                label,
+            })
+        }
+        0x1A => Ok(Instr::AnyConvertExtern),
+        0x1B => Ok(Instr::ExternConvertAny),
+        _ => Err(DecodeError {
+            offset: ByteOffset(base_offset),
+            context: DecodeContext::CodeSection,
+            kind: DecodeErrorKind::UnknownOpcode { byte: 0xFB },
+        }),
+    }
+}
+
 fn decode_bulk_memory_instr(
     cursor: &mut Cursor<'_>,
     base_offset: usize,
@@ -683,6 +1276,114 @@ fn decode_bulk_memory_instr(
     }
 }
 
+/// Decode a classic-threads atomic instruction (0xFE prefix). The
+/// sub-opcode is a single byte (single-byte form at the threads pin;
+/// sub-codes 0x00-0x4e). `atomic.fence` carries one reserved byte that
+/// must be 0x00.
+fn decode_atomic_instr(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Instr, DecodeError> {
+    let sub_offset = cursor.position();
+    let sub = cursor.read_byte().map_err(|_| DecodeError {
+        offset: ByteOffset(base_offset + sub_offset),
+        context: DecodeContext::CodeSection,
+        kind: DecodeErrorKind::UnexpectedEof,
+    })?;
+    use AtomicOp::*;
+    use AtomicWidth::*;
+    let instr = match sub {
+        0x00 => Notify(parse_memarg(cursor, base_offset)?),
+        0x01 => Wait32(parse_memarg(cursor, base_offset)?),
+        0x02 => Wait64(parse_memarg(cursor, base_offset)?),
+        0x03 => {
+            let reserved_offset = cursor.position();
+            let reserved = cursor.read_byte().map_err(|_| DecodeError {
+                offset: ByteOffset(base_offset + reserved_offset),
+                context: DecodeContext::CodeSection,
+                kind: DecodeErrorKind::UnexpectedEof,
+            })?;
+            if reserved != 0x00 {
+                return Err(DecodeError {
+                    offset: ByteOffset(base_offset + reserved_offset),
+                    context: DecodeContext::CodeSection,
+                    kind: DecodeErrorKind::UnexpectedByte {
+                        expected: 0x00,
+                        found: reserved,
+                    },
+                });
+            }
+            return Ok(Instr::AtomicFence);
+        }
+        0x10 => Load(I32, parse_memarg(cursor, base_offset)?),
+        0x11 => Load(I64, parse_memarg(cursor, base_offset)?),
+        0x12 => Load(I32N8, parse_memarg(cursor, base_offset)?),
+        0x13 => Load(I32N16, parse_memarg(cursor, base_offset)?),
+        0x14 => Load(I64N8, parse_memarg(cursor, base_offset)?),
+        0x15 => Load(I64N16, parse_memarg(cursor, base_offset)?),
+        0x16 => Load(I64N32, parse_memarg(cursor, base_offset)?),
+        0x17 => Store(I32, parse_memarg(cursor, base_offset)?),
+        0x18 => Store(I64, parse_memarg(cursor, base_offset)?),
+        0x19 => Store(I32N8, parse_memarg(cursor, base_offset)?),
+        0x1a => Store(I32N16, parse_memarg(cursor, base_offset)?),
+        0x1b => Store(I64N8, parse_memarg(cursor, base_offset)?),
+        0x1c => Store(I64N16, parse_memarg(cursor, base_offset)?),
+        0x1d => Store(I64N32, parse_memarg(cursor, base_offset)?),
+        0x1e..=0x24 => Rmw(
+            AtomicRmw::Add,
+            width_at(sub - 0x1e),
+            parse_memarg(cursor, base_offset)?,
+        ),
+        0x25..=0x2b => Rmw(
+            AtomicRmw::Sub,
+            width_at(sub - 0x25),
+            parse_memarg(cursor, base_offset)?,
+        ),
+        0x2c..=0x32 => Rmw(
+            AtomicRmw::And,
+            width_at(sub - 0x2c),
+            parse_memarg(cursor, base_offset)?,
+        ),
+        0x33..=0x39 => Rmw(
+            AtomicRmw::Or,
+            width_at(sub - 0x33),
+            parse_memarg(cursor, base_offset)?,
+        ),
+        0x3a..=0x40 => Rmw(
+            AtomicRmw::Xor,
+            width_at(sub - 0x3a),
+            parse_memarg(cursor, base_offset)?,
+        ),
+        0x41..=0x47 => Rmw(
+            AtomicRmw::Xchg,
+            width_at(sub - 0x41),
+            parse_memarg(cursor, base_offset)?,
+        ),
+        0x48..=0x4e => Cmpxchg(width_at(sub - 0x48), parse_memarg(cursor, base_offset)?),
+        _ => {
+            return Err(DecodeError {
+                offset: ByteOffset(base_offset + sub_offset),
+                context: DecodeContext::CodeSection,
+                kind: DecodeErrorKind::UnknownAtomicOpcode { opcode: sub },
+            });
+        }
+    };
+    Ok(Instr::Atomic(instr))
+}
+
+/// The seven RMW/cmpxchg widths share one layout: [i32, i64, i32.8u,
+/// i32.16u, i64.8u, i64.16u, i64.32u] (threads pin binary table,
+/// cross-checked against wast-240 expr.rs:806-855).
+fn width_at(i: u8) -> AtomicWidth {
+    match i {
+        0 => AtomicWidth::I32,
+        1 => AtomicWidth::I64,
+        2 => AtomicWidth::I32N8,
+        3 => AtomicWidth::I32N16,
+        4 => AtomicWidth::I64N8,
+        5 => AtomicWidth::I64N16,
+        6 => AtomicWidth::I64N32,
+        _ => unreachable!("RMW width index 0-6"),
+    }
+}
+
 fn decode_simd_instr(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Instr, DecodeError> {
     let opcode = decode_u32(cursor, base_offset)?;
     match opcode {
@@ -721,6 +1422,71 @@ fn decode_simd_instr(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Inst
             cursor,
             base_offset,
         )?)),
+        21 => Ok(Instr::I8x16ExtractLaneS(parse_lane_idx(
+            cursor,
+            base_offset,
+        )?)),
+        22 => Ok(Instr::I8x16ExtractLaneU(parse_lane_idx(
+            cursor,
+            base_offset,
+        )?)),
+        23 => Ok(Instr::I8x16ReplaceLane(parse_lane_idx(
+            cursor,
+            base_offset,
+        )?)),
+        24 => Ok(Instr::I16x8ExtractLaneS(parse_lane_idx(
+            cursor,
+            base_offset,
+        )?)),
+        25 => Ok(Instr::I16x8ExtractLaneU(parse_lane_idx(
+            cursor,
+            base_offset,
+        )?)),
+        26 => Ok(Instr::I16x8ReplaceLane(parse_lane_idx(
+            cursor,
+            base_offset,
+        )?)),
+        29 => Ok(Instr::I64x2ExtractLane(parse_lane_idx(
+            cursor,
+            base_offset,
+        )?)),
+        30 => Ok(Instr::I64x2ReplaceLane(parse_lane_idx(
+            cursor,
+            base_offset,
+        )?)),
+        33 => Ok(Instr::F64x2ExtractLane(parse_lane_idx(
+            cursor,
+            base_offset,
+        )?)),
+        34 => Ok(Instr::F64x2ReplaceLane(parse_lane_idx(
+            cursor,
+            base_offset,
+        )?)),
+        79 => Ok(Instr::V128Andnot),
+        111 => Ok(Instr::I8x16AddSatS),
+        112 => Ok(Instr::I8x16AddSatU),
+        114 => Ok(Instr::I8x16SubSatS),
+        115 => Ok(Instr::I8x16SubSatU),
+        118 => Ok(Instr::I8x16MinS),
+        119 => Ok(Instr::I8x16MinU),
+        120 => Ok(Instr::I8x16MaxS),
+        121 => Ok(Instr::I8x16MaxU),
+        123 => Ok(Instr::I8x16AvgrU),
+        130 => Ok(Instr::I16x8Q15MulrSatS),
+        143 => Ok(Instr::I16x8AddSatS),
+        144 => Ok(Instr::I16x8AddSatU),
+        146 => Ok(Instr::I16x8SubSatS),
+        147 => Ok(Instr::I16x8SubSatU),
+        149 => Ok(Instr::I16x8Mul),
+        150 => Ok(Instr::I16x8MinS),
+        151 => Ok(Instr::I16x8MinU),
+        152 => Ok(Instr::I16x8MaxS),
+        153 => Ok(Instr::I16x8MaxU),
+        155 => Ok(Instr::I16x8AvgrU),
+        182 => Ok(Instr::I32x4MinS),
+        183 => Ok(Instr::I32x4MinU),
+        184 => Ok(Instr::I32x4MaxS),
+        185 => Ok(Instr::I32x4MaxU),
         77 => Ok(Instr::V128Not),
         78 => Ok(Instr::V128And),
         80 => Ok(Instr::V128Or),
@@ -733,6 +1499,7 @@ fn decode_simd_instr(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Inst
         177 => Ok(Instr::I32x4Sub),
         181 => Ok(Instr::I32x4Mul),
         206 => Ok(Instr::I64x2Add),
+        213 => Ok(Instr::I64x2Mul),
         209 => Ok(Instr::I64x2Sub),
         228 => Ok(Instr::F32x4Add),
         229 => Ok(Instr::F32x4Sub),
@@ -742,6 +1509,58 @@ fn decode_simd_instr(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Inst
         241 => Ok(Instr::F64x2Sub),
         242 => Ok(Instr::F64x2Mul),
         243 => Ok(Instr::F64x2Div),
+        82 => Ok(Instr::V128Bitselect),
+        83 => Ok(Instr::V128AnyTrue),
+        96 => Ok(Instr::I8x16Abs),
+        97 => Ok(Instr::I8x16Neg),
+        98 => Ok(Instr::I8x16Popcnt),
+        99 => Ok(Instr::I8x16AllTrue),
+        100 => Ok(Instr::I8x16Bitmask),
+        101 => Ok(Instr::I8x16NarrowI16x8S),
+        102 => Ok(Instr::I8x16NarrowI16x8U),
+        124 => Ok(Instr::I16x8ExtAddPairwiseI8x16S),
+        125 => Ok(Instr::I16x8ExtAddPairwiseI8x16U),
+        128 => Ok(Instr::I16x8Abs),
+        129 => Ok(Instr::I16x8Neg),
+        131 => Ok(Instr::I16x8AllTrue),
+        132 => Ok(Instr::I16x8Bitmask),
+        133 => Ok(Instr::I16x8NarrowI32x4S),
+        134 => Ok(Instr::I16x8NarrowI32x4U),
+        135 => Ok(Instr::I16x8ExtendLowI8x16S),
+        136 => Ok(Instr::I16x8ExtendHighI8x16S),
+        137 => Ok(Instr::I16x8ExtendLowI8x16U),
+        138 => Ok(Instr::I16x8ExtendHighI8x16U),
+        156 => Ok(Instr::I16x8ExtMulLowI8x16S),
+        157 => Ok(Instr::I16x8ExtMulHighI8x16S),
+        158 => Ok(Instr::I16x8ExtMulLowI8x16U),
+        159 => Ok(Instr::I16x8ExtMulHighI8x16U),
+        126 => Ok(Instr::I32x4ExtAddPairwiseI16x8S),
+        127 => Ok(Instr::I32x4ExtAddPairwiseI16x8U),
+        160 => Ok(Instr::I32x4Abs),
+        161 => Ok(Instr::I32x4Neg),
+        163 => Ok(Instr::I32x4AllTrue),
+        164 => Ok(Instr::I32x4Bitmask),
+        167 => Ok(Instr::I32x4ExtendLowI16x8S),
+        168 => Ok(Instr::I32x4ExtendHighI16x8S),
+        169 => Ok(Instr::I32x4ExtendLowI16x8U),
+        170 => Ok(Instr::I32x4ExtendHighI16x8U),
+        186 => Ok(Instr::I32x4DotI16x8S),
+        188 => Ok(Instr::I32x4ExtMulLowI16x8S),
+        189 => Ok(Instr::I32x4ExtMulHighI16x8S),
+        190 => Ok(Instr::I32x4ExtMulLowI16x8U),
+        191 => Ok(Instr::I32x4ExtMulHighI16x8U),
+        192 => Ok(Instr::I64x2Abs),
+        193 => Ok(Instr::I64x2Neg),
+        195 => Ok(Instr::I64x2AllTrue),
+        196 => Ok(Instr::I64x2Bitmask),
+        199 => Ok(Instr::I64x2ExtendLowI32x4S),
+        200 => Ok(Instr::I64x2ExtendHighI32x4S),
+        201 => Ok(Instr::I64x2ExtendLowI32x4U),
+        202 => Ok(Instr::I64x2ExtendHighI32x4U),
+        220 => Ok(Instr::I64x2ExtMulLowI32x4S),
+        221 => Ok(Instr::I64x2ExtMulHighI32x4S),
+        222 => Ok(Instr::I64x2ExtMulLowI32x4U),
+        223 => Ok(Instr::I64x2ExtMulHighI32x4U),
         84 => {
             let (memarg, lane) = parse_memarg_lane(cursor, base_offset)?;
             Ok(Instr::V128Load8Lane { memarg, lane })
@@ -776,6 +1595,106 @@ fn decode_simd_instr(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Inst
         }
         92 => Ok(Instr::V128Load32Zero(parse_memarg(cursor, base_offset)?)),
         93 => Ok(Instr::V128Load64Zero(parse_memarg(cursor, base_offset)?)),
+        35 => Ok(Instr::I8x16Eq),
+        36 => Ok(Instr::I8x16Ne),
+        37 => Ok(Instr::I8x16LtS),
+        38 => Ok(Instr::I8x16LtU),
+        39 => Ok(Instr::I8x16GtS),
+        40 => Ok(Instr::I8x16GtU),
+        41 => Ok(Instr::I8x16LeS),
+        42 => Ok(Instr::I8x16LeU),
+        43 => Ok(Instr::I8x16GeS),
+        44 => Ok(Instr::I8x16GeU),
+        45 => Ok(Instr::I16x8Eq),
+        46 => Ok(Instr::I16x8Ne),
+        47 => Ok(Instr::I16x8LtS),
+        48 => Ok(Instr::I16x8LtU),
+        49 => Ok(Instr::I16x8GtS),
+        50 => Ok(Instr::I16x8GtU),
+        51 => Ok(Instr::I16x8LeS),
+        52 => Ok(Instr::I16x8LeU),
+        53 => Ok(Instr::I16x8GeS),
+        54 => Ok(Instr::I16x8GeU),
+        55 => Ok(Instr::I32x4Eq),
+        56 => Ok(Instr::I32x4Ne),
+        57 => Ok(Instr::I32x4LtS),
+        58 => Ok(Instr::I32x4LtU),
+        59 => Ok(Instr::I32x4GtS),
+        60 => Ok(Instr::I32x4GtU),
+        61 => Ok(Instr::I32x4LeS),
+        62 => Ok(Instr::I32x4LeU),
+        63 => Ok(Instr::I32x4GeS),
+        64 => Ok(Instr::I32x4GeU),
+        65 => Ok(Instr::F32x4Eq),
+        66 => Ok(Instr::F32x4Ne),
+        67 => Ok(Instr::F32x4Lt),
+        68 => Ok(Instr::F32x4Gt),
+        69 => Ok(Instr::F32x4Le),
+        70 => Ok(Instr::F32x4Ge),
+        71 => Ok(Instr::F64x2Eq),
+        72 => Ok(Instr::F64x2Ne),
+        73 => Ok(Instr::F64x2Lt),
+        74 => Ok(Instr::F64x2Gt),
+        75 => Ok(Instr::F64x2Le),
+        76 => Ok(Instr::F64x2Ge),
+        107 => Ok(Instr::I8x16Shl),
+        108 => Ok(Instr::I8x16ShrS),
+        109 => Ok(Instr::I8x16ShrU),
+        139 => Ok(Instr::I16x8Shl),
+        140 => Ok(Instr::I16x8ShrS),
+        141 => Ok(Instr::I16x8ShrU),
+        171 => Ok(Instr::I32x4Shl),
+        172 => Ok(Instr::I32x4ShrS),
+        173 => Ok(Instr::I32x4ShrU),
+        203 => Ok(Instr::I64x2Shl),
+        204 => Ok(Instr::I64x2ShrS),
+        205 => Ok(Instr::I64x2ShrU),
+        214 => Ok(Instr::I64x2Eq),
+        215 => Ok(Instr::I64x2Ne),
+        216 => Ok(Instr::I64x2LtS),
+        217 => Ok(Instr::I64x2GtS),
+        218 => Ok(Instr::I64x2LeS),
+        219 => Ok(Instr::I64x2GeS),
+        13 => {
+            let mut lanes = [0u8; 16];
+            for lane in lanes.iter_mut() {
+                *lane = parse_lane_idx(cursor, base_offset)?;
+            }
+            Ok(Instr::I8x16Shuffle(lanes))
+        }
+        14 => Ok(Instr::I8x16Swizzle),
+        94 => Ok(Instr::F32x4DemoteF64x2Zero),
+        95 => Ok(Instr::F64x2PromoteLowF32x4),
+        103 => Ok(Instr::F32x4Ceil),
+        104 => Ok(Instr::F32x4Floor),
+        105 => Ok(Instr::F32x4Trunc),
+        106 => Ok(Instr::F32x4Nearest),
+        116 => Ok(Instr::F64x2Ceil),
+        117 => Ok(Instr::F64x2Floor),
+        122 => Ok(Instr::F64x2Trunc),
+        148 => Ok(Instr::F64x2Nearest),
+        224 => Ok(Instr::F32x4Abs),
+        225 => Ok(Instr::F32x4Neg),
+        227 => Ok(Instr::F32x4Sqrt),
+        232 => Ok(Instr::F32x4Min),
+        233 => Ok(Instr::F32x4Max),
+        234 => Ok(Instr::F32x4PMin),
+        235 => Ok(Instr::F32x4PMax),
+        236 => Ok(Instr::F64x2Abs),
+        237 => Ok(Instr::F64x2Neg),
+        239 => Ok(Instr::F64x2Sqrt),
+        244 => Ok(Instr::F64x2Min),
+        245 => Ok(Instr::F64x2Max),
+        246 => Ok(Instr::F64x2PMin),
+        247 => Ok(Instr::F64x2PMax),
+        248 => Ok(Instr::I32x4TruncSatF32x4S),
+        249 => Ok(Instr::I32x4TruncSatF32x4U),
+        250 => Ok(Instr::F32x4ConvertI32x4S),
+        251 => Ok(Instr::F32x4ConvertI32x4U),
+        252 => Ok(Instr::I32x4TruncSatF64x2SZero),
+        253 => Ok(Instr::I32x4TruncSatF64x2UZero),
+        254 => Ok(Instr::F64x2ConvertLowI32x4S),
+        255 => Ok(Instr::F64x2ConvertLowI32x4U),
         _ => Err(DecodeError {
             offset: ByteOffset(base_offset),
             context: DecodeContext::CodeSection,
@@ -791,7 +1710,7 @@ fn parse_memarg(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<MemArg, D
     } else {
         (flags, MemIdx(0))
     };
-    let offset = decode_u32(cursor, base_offset)?;
+    let offset = decode_u64(cursor, base_offset)?;
     Ok(MemArg {
         align,
         offset,
@@ -845,8 +1764,20 @@ fn parse_result_types(
     base_offset: usize,
 ) -> Result<Vec<ValType>, DecodeError> {
     let count = decode_u32(cursor, base_offset)?;
-    let mut types = Vec::with_capacity(cursor.capacity_hint(count));
+    // Reserve fallibly: typed `select` reaches this helper from lazy
+    // instruction decoding (a `validate`/`lower` path), where an infallible
+    // `with_capacity` would abort on allocator refusal. The hint is bounded by
+    // the remaining input because every value type consumes at least one byte.
+    let mut types = Vec::new();
+    types
+        .try_reserve(cursor.capacity_hint(count))
+        .map_err(|_| DecodeError {
+            offset: ByteOffset(base_offset + cursor.position()),
+            context: DecodeContext::CodeSection,
+            kind: DecodeErrorKind::ResourceLimitExceeded,
+        })?;
     for _ in 0..count {
+        try_grow_for_push(&mut types, base_offset + cursor.position())?;
         types.push(parse_binary_val_type(
             cursor,
             base_offset,
@@ -868,7 +1799,15 @@ fn parse_block_type(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Block
         return Ok(BlockType::Empty);
     }
 
-    if matches!(first, 0x7B..=0x7F | 0x70 | 0x6F | 0x63 | 0x64) {
+    // A single-byte value type: numeric/vector `0x7B..=0x7F`, or any
+    // reference-type shorthand our U1 grammar accepts. The pin's `reftype`
+    // (`interpreter/binary/decode.ml:201-218`) reads `s7` values
+    // `-0x0c..=-0x17` as the Null abstract shorthands (`0x74` noexn ..
+    // `0x69` exn, covering anyref/eqref/i31ref/structref/arrayref and the
+    // abstract null forms), `-0x1c` (`0x64`) as `(ref ht)`, and `-0x1d`
+    // (`0x63`) as `(ref null ht)`. `parse_val_type_with_first_byte` owns the
+    // per-byte grammar; this discriminator only decides value-vs-index.
+    if matches!(first, 0x7B..=0x7F | 0x63 | 0x64 | 0x69..=0x74) {
         return Ok(BlockType::Val(parse_val_type_with_first_byte(
             cursor,
             first,
@@ -879,6 +1818,62 @@ fn parse_block_type(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Block
 
     let type_idx = decode_block_type_idx(cursor, first, base_offset + start)?;
     Ok(BlockType::TypeIdx(type_idx))
+}
+
+fn parse_tag_idx(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<TagIdx, DecodeError> {
+    let pos = cursor.position();
+    let idx = leb128::decode_u32(cursor).map_err(|mut e| {
+        e.offset = ByteOffset(base_offset + pos);
+        e
+    })?;
+    Ok(TagIdx(idx))
+}
+
+fn parse_try_table(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<TryTable, DecodeError> {
+    let block_type = parse_block_type(cursor, base_offset)?;
+    let pos = cursor.position();
+    let count = leb128::decode_u32(cursor).map_err(|mut e| {
+        e.offset = ByteOffset(base_offset + pos);
+        e
+    })?;
+    let mut catches = Vec::new();
+    for _ in 0..count {
+        let clause_pos = cursor.position();
+        let kind_byte = cursor.read_byte().map_err(|_| DecodeError {
+            offset: ByteOffset(base_offset + clause_pos),
+            context: DecodeContext::CodeSection,
+            kind: DecodeErrorKind::UnexpectedEof,
+        })?;
+        let (kind, has_tag) = match kind_byte {
+            0x00 => (TryTableCatchKind::Catch, true),
+            0x01 => (TryTableCatchKind::CatchRef, true),
+            0x02 => (TryTableCatchKind::CatchAll, false),
+            0x03 => (TryTableCatchKind::CatchAllRef, false),
+            byte => {
+                return Err(DecodeError {
+                    offset: ByteOffset(base_offset + clause_pos),
+                    context: DecodeContext::CodeSection,
+                    kind: DecodeErrorKind::UnknownOpcode { byte },
+                });
+            }
+        };
+        let tag = if has_tag {
+            Some(parse_tag_idx(cursor, base_offset)?)
+        } else {
+            None
+        };
+        let label_pos = cursor.position();
+        let label = leb128::decode_u32(cursor).map_err(|mut e| {
+            e.offset = ByteOffset(base_offset + label_pos);
+            e
+        })?;
+        try_grow_for_push(&mut catches, base_offset + cursor.position())?;
+        catches.push(TryTableCatch { kind, tag, label });
+    }
+    Ok(TryTable {
+        block_type,
+        catches,
+    })
 }
 
 fn decode_block_type_idx(
@@ -927,6 +1922,14 @@ fn decode_block_type_idx(
 
 fn decode_u32(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<u32, DecodeError> {
     leb128::decode_u32(cursor).map_err(|mut e| {
+        e.context = DecodeContext::CodeSection;
+        e.offset = ByteOffset(base_offset + e.offset.0);
+        e
+    })
+}
+
+fn decode_u64(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<u64, DecodeError> {
+    leb128::decode_u64(cursor).map_err(|mut e| {
         e.context = DecodeContext::CodeSection;
         e.offset = ByteOffset(base_offset + e.offset.0);
         e
@@ -1434,8 +2437,8 @@ mod tests {
 
     #[test]
     fn reject_unknown_simd_opcode() {
-        let err = decode_instr_sequence(&[0xFD, 0xC8, 0x01, 0x0B], 410).unwrap_err();
-        assert_eq!(err.kind, DecodeErrorKind::UnknownSimdOpcode { opcode: 200 });
+        let err = decode_instr_sequence(&[0xFD, 0xE2, 0x01, 0x0B], 410).unwrap_err();
+        assert_eq!(err.kind, DecodeErrorKind::UnknownSimdOpcode { opcode: 226 });
     }
 
     #[test]

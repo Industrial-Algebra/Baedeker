@@ -11,7 +11,7 @@ use alloc::{borrow::ToOwned, string::String, vec::Vec};
 use crate::binary::leb128::{self, Cursor};
 use crate::binary::section::RawSection;
 use crate::error::{ByteOffset, DecodeContext, DecodeError, DecodeErrorKind};
-use crate::types::{Export, ExportDesc, FuncIdx, GlobalIdx, MemIdx, TableIdx};
+use crate::types::{Export, ExportDesc, FuncIdx, GlobalIdx, MemIdx, TableIdx, TagIdx};
 
 pub fn parse_export_section(section: &RawSection<'_>) -> Result<Vec<Export>, DecodeError> {
     let mut cursor = Cursor::new(section.data);
@@ -73,6 +73,7 @@ fn parse_export_desc(
         0x01 => Ok(ExportDesc::Table(TableIdx(idx))),
         0x02 => Ok(ExportDesc::Mem(MemIdx(idx))),
         0x03 => Ok(ExportDesc::Global(GlobalIdx(idx))),
+        0x04 => Ok(ExportDesc::Tag(TagIdx(idx))),
         _ => Err(DecodeError {
             offset: ByteOffset(base_offset + offset),
             context: DecodeContext::ExportSection,
@@ -125,11 +126,11 @@ mod tests {
 
     #[test]
     fn reject_unknown_export_descriptor() {
-        let section = raw_export_section(&[0x01, 0x01, b'x', 0x04, 0x00]);
+        let section = raw_export_section(&[0x01, 0x01, b'x', 0x05, 0x00]);
         let err = parse_export_section(&section).unwrap_err();
         assert!(matches!(
             err.kind,
-            DecodeErrorKind::UnknownExportDesc { byte: 0x04 }
+            DecodeErrorKind::UnknownExportDesc { byte: 0x05 }
         ));
     }
 }

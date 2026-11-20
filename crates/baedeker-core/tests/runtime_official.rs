@@ -18,10 +18,12 @@ use std::rc::Rc;
 use baedeker_core::binary::module::Module;
 use baedeker_core::lower::RegModule;
 use baedeker_core::runtime::{
-    HostFunction, Imports, RuntimeError, RuntimeErrorKind, Store, Value, execute_export, link_func,
+    HostFunction, Imports, RefPattern, RuntimeError, RuntimeErrorKind, Store, Value,
+    execute_export, link_func,
 };
 use baedeker_core::types::{
-    FuncType, GlobalType, MemType, Mutability, NumType, TableType, ValType,
+    CompType, FuncType, GlobalType, MemType, Mutability, NumType, SubType, TableType, TypeIdx,
+    ValType, defined_type_matches,
 };
 use wast::core::{WastArgCore, WastRetCore};
 use wast::parser::{ParseBuffer, parse};
@@ -30,35 +32,20 @@ use wast::{QuoteWat, Wast, WastArg, WastDirective, WastExecute, WastRet};
 /// Files deferred with a reason (feature not yet implemented). Every entry
 /// here is a known gap; keep the list honest and shrinking.
 const DEFERRED_FILES: &[(&str, &str)] = &[
-    // Tail calls: return_call/return_call_indirect not lowered.
-    ("return_call.wast", "tail calls not implemented"),
-    ("return_call_indirect.wast", "tail calls not implemented"),
-    ("return_call_ref.wast", "tail calls not implemented"),
-    // Function-references / GC-era references.
-    ("ref_null.wast", "GC heap types (anyref) not implemented"),
-    (
-        "type-canon.wast",
-        "GC type canonicalization not implemented",
-    ),
-    (
-        "type-equivalence.wast",
-        "GC type equivalence not implemented",
-    ),
-    ("type-rec.wast", "recursive types not implemented"),
-    ("type.wast", "recursive/GC types not implemented"),
-    ("exceptions", "exception handling not implemented"),
     // Guard-page semantics are host/OS-specific.
     (
         "skip-stack-guard-page.wast",
         "stack guard pages not applicable",
     ),
-    // Exception handling (tag section).
-    ("instance.wast", "tag section (exceptions) not implemented"),
-    ("imports.wast", "tag section (exceptions) not implemented"),
     // The wast parser rejects the confusable unicode names.wast needs.
     ("names.wast", "parser rejects confusable unicode in names"),
-    // Full SIMD surface beyond the current core subset.
-    ("simd", "full SIMD surface not implemented"),
+    // `thread.wast` is entirely multi-agent: one shared module plus
+    // `(thread …)`/`(wait …)` directives whose assertions match `(either …)`.
+    // The four-block pre-parse strip cannot make it single-agent.
+    (
+        "thread.wast",
+        "multi-agent behavioral coverage (thread/wait directives) — single-agent engine",
+    ),
 ];
 
 #[derive(Debug, Default)]
@@ -69,6 +56,156 @@ struct OfficialStats {
     modules: usize,
     assertions: usize,
     failures: Vec<String>,
+    /// Multi-agent `(thread …)` / `(wait …)` directives removed by the
+    /// pre-parse strip (the threads corpus' `atomic_wait_notify.wast`).
+    threads_directives_skipped: usize,
+}
+
+// ── threads directive strip ────────────────────────────────────────
+
+/// Remove the multi-agent directives a single-agent engine cannot execute.
+///
+/// `atomic_wait_notify.wast` at the threads pin carries exactly FOUR of them
+/// (`docs/plans/threads-unit3-contract.md`): two top-level `(thread …)`
+/// blocks (its lines 64+) and two `(wait …)` directives, which close those
+/// threads. No single-agent directive outside them references their
+/// internals, and the wast crate has no multi-agent grammar — so the harness
+/// removes the four balanced forms BEFORE parsing. Everything else is passed
+/// through untouched (`thread.wast`, whose whole body is multi-agent, is
+/// deferred instead).
+///
+/// Returns the stripped text and the number of forms removed.
+fn strip_threads_directives(text: &str) -> (String, usize) {
+    let bytes = text.as_bytes();
+    let mut stripped = String::with_capacity(text.len());
+    let mut kept_from = 0usize;
+    let mut removed = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => i = skip_string(bytes, i),
+            b';' if bytes.get(i + 1) == Some(&b';') => i = skip_line_comment(bytes, i),
+            b'(' if bytes.get(i + 1) == Some(&b';') => i = skip_block_comment(bytes, i),
+            b'(' if is_threads_directive(bytes, i) => match skip_form(bytes, i) {
+                Some(end) => {
+                    stripped.push_str(&text[kept_from..i]);
+                    kept_from = end;
+                    removed += 1;
+                    i = end;
+                }
+                // An unbalanced form is left intact — and so is everything
+                // after it: with no closing paren, the remainder of the
+                // input is INSIDE the form, so any later "top-level"
+                // directive is nested, not top-level. Scanning its interior
+                // (e.g. stripping a nested `(wait …)` out of an unterminated
+                // `(thread …`) would silently mutate a form we promised to
+                // preserve for the parser's own span-accurate error. Stop.
+                None => {
+                    stripped.push_str(&text[kept_from..]);
+                    return (stripped, removed);
+                }
+            },
+            _ => i += 1,
+        }
+    }
+    stripped.push_str(&text[kept_from..]);
+    (stripped, removed)
+}
+
+/// Whether the form opening at `open` is one of the two multi-agent
+/// directives. The keyword must be complete — followed by a delimiter, not an
+/// identifier continuation — so `(threading …)` is not a `thread` directive.
+fn is_threads_directive(bytes: &[u8], open: usize) -> bool {
+    let mut i = open + 1;
+    while matches!(bytes.get(i), Some(b' ' | b'\t' | b'\r' | b'\n')) {
+        i += 1;
+    }
+    ["thread", "wait"].into_iter().any(|keyword| {
+        let end = i + keyword.len();
+        bytes.get(i..end) == Some(keyword.as_bytes())
+            && matches!(
+                bytes.get(end),
+                None | Some(b' ' | b'\t' | b'\r' | b'\n' | b'(' | b')' | b'"' | b';')
+            )
+    })
+}
+
+/// Index just past the string literal opening at `open` (backslash escapes
+/// hide the closing quote).
+fn skip_string(bytes: &[u8], open: usize) -> usize {
+    let mut i = open + 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2,
+            b'"' => return i + 1,
+            _ => i += 1,
+        }
+    }
+    bytes.len()
+}
+
+/// Index just past the line comment opening at `open`.
+fn skip_line_comment(bytes: &[u8], open: usize) -> usize {
+    let mut i = open + 2;
+    while i < bytes.len() && bytes[i] != b'\n' {
+        i += 1;
+    }
+    i
+}
+
+/// Index just past the block comment opening at `open` (block comments nest:
+/// `document/core/text/lexical.rst`).
+fn skip_block_comment(bytes: &[u8], open: usize) -> usize {
+    let mut depth = 1usize;
+    let mut i = open + 2;
+    while i < bytes.len() {
+        if bytes[i] == b'(' && bytes.get(i + 1) == Some(&b';') {
+            depth += 1;
+            i += 2;
+        } else if bytes[i] == b';' && bytes.get(i + 1) == Some(&b')') {
+            depth -= 1;
+            i += 2;
+            if depth == 0 {
+                return i;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    bytes.len()
+}
+
+/// Index just past the `)` closing the form opening at `open`, balancing
+/// string literals and comments (never counting a paren inside them).
+fn skip_form(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut i = open;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                i = skip_string(bytes, i);
+                continue;
+            }
+            b';' if bytes.get(i + 1) == Some(&b';') => {
+                i = skip_line_comment(bytes, i);
+                continue;
+            }
+            b'(' if bytes.get(i + 1) == Some(&b';') => {
+                i = skip_block_comment(bytes, i);
+                continue;
+            }
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
 }
 
 struct Instance {
@@ -79,9 +216,15 @@ struct Instance {
 struct Registry {
     /// Instances by explicit name (`$id`) and by registered string.
     named: BTreeMap<String, Instance>,
+    /// Module definitions from `(module definition $id …)` — lowered but
+    /// NOT instantiated; `(module instance $i $id)` re-instantiates them
+    /// with fresh state.
+    definitions: BTreeMap<String, Rc<RegModule>>,
     last: Option<Instance>,
     /// The link group all instances in this file share.
     group: Rc<RefCell<baedeker_core::runtime::LinkGroup>>,
+    /// The exception arena all instances in this file share.
+    arena: Rc<RefCell<Vec<baedeker_core::runtime::ExceptionRecord>>>,
     next_instance_id: u32,
 }
 
@@ -89,8 +232,10 @@ impl Registry {
     fn new() -> Self {
         Self {
             named: BTreeMap::new(),
+            definitions: BTreeMap::new(),
             last: None,
             group: Rc::new(RefCell::new(BTreeMap::new())),
+            arena: Rc::new(RefCell::new(Vec::new())),
             next_instance_id: 1,
         }
     }
@@ -158,6 +303,34 @@ fn instantiate(
 
     // State imports: resolve eagerly against spectest + linked instances.
     let mut imports = Imports::new();
+    // Register every provider module's type section and GC heap: concrete
+    // reference types in imported signatures are then matched structurally
+    // (rolled closed forms) instead of by raw local index, and GC references
+    // reaching this instance resolve against the heap that created them.
+    // `Imports::with_module_types` is last-wins per module name, so collect
+    // the distinct names first.
+    let mut provider_names: BTreeMap<&str, ()> = BTreeMap::new();
+    for declared in &module.imported_funcs {
+        provider_names.insert(declared.module.as_str(), ());
+    }
+    for declared in &module.imported_memories {
+        provider_names.insert(declared.module.as_str(), ());
+    }
+    for declared in &module.imported_globals {
+        provider_names.insert(declared.module.as_str(), ());
+    }
+    for declared in &module.imported_tables {
+        provider_names.insert(declared.module.as_str(), ());
+    }
+    for declared in &module.imported_tags {
+        provider_names.insert(declared.module.as_str(), ());
+    }
+    for name in provider_names.keys().copied() {
+        if let Some(source) = registry.get(Some(name)) {
+            imports = imports.with_module_types(name, &source.module);
+            imports = imports.provider_heap(source.store.borrow().gc_heap());
+        }
+    }
     for declared in &module.imported_memories {
         imports = if declared.module == "spectest" {
             imports.memory("spectest", &declared.name, spectest_memory(&declared.name)?)
@@ -183,17 +356,88 @@ fn instantiate(
             imports.shared_table(&declared.module, &declared.name, ty, shared)
         };
     }
+    // Tag imports: resolve eagerly against registered instances
+    // (spectest defines no tags). Binding type mismatches and unknown
+    // names are link failures, like the state imports above.
+    for declared in &module.imported_tags {
+        if declared.module == "spectest" {
+            return Err(format!(
+                "link: spectest defines no tag export {:?}",
+                declared.name
+            ));
+        }
+        let source = registry.get(Some(&declared.module)).ok_or_else(|| {
+            format!(
+                "link: module {:?} not registered for tag import {:?}",
+                declared.module, declared.name
+            )
+        })?;
+        let binding = {
+            let store = source.store.borrow();
+            store
+                .export_tag(&declared.name)
+                .and_then(|idx| store.tag_binding(idx).cloned())
+        };
+        let binding = binding.ok_or_else(|| {
+            format!(
+                "link: no tag export {:?} on {:?}",
+                declared.name, declared.module
+            )
+        })?;
+        if binding.ty.params != declared.ty.params {
+            return Err(format!(
+                "link: tag type mismatch on {:?}.{:?}: source {:?} vs import {:?}",
+                declared.module, declared.name, binding.ty.params, declared.ty.params
+            ));
+        }
+        imports = imports.tag(
+            &declared.module,
+            &declared.name,
+            binding.identity,
+            binding.ty.clone(),
+            binding.expanded_params.clone(),
+            binding.rec.clone(),
+            binding.closed.clone(),
+        );
+    }
 
     let instance_id = registry.fresh_instance_id();
-    let store_rc = Store::instantiate_linked(&module, &imports, &registry.group, instance_id)
-        .map_err(|error| format_runtime_error(&error))?;
+    let store_rc = Store::instantiate_linked(
+        &module,
+        &imports,
+        &registry.group,
+        instance_id,
+        &registry.arena,
+    )
+    .map_err(|error| format_runtime_error(&error))?;
     let mut store_guard = store_rc.borrow_mut();
     let store = &mut *store_guard;
 
     // Function imports: link lazily against spectest + registered instances.
-    for declared in &module.imported_funcs {
+    // Bound per DECLARATION: one `(module, name)` may be imported several
+    // times with different declared types (`type-subtyping.wast`), each
+    // matched against the provider's type entry by `match_deftype` above.
+    for (func_idx, declared) in module.imported_funcs.iter().enumerate() {
         let host = if declared.module == "spectest" {
-            spectest_host_func(&declared.name)?
+            let host = spectest_host_func(&declared.name)?;
+            // Spectest imports are matched like any other extern: by the
+            // PROVIDER's type entry against this DECLARATION's entry
+            // (`eval.ml:1187` runs `Match.match_externtype [] xt' xt` with
+            // `xt'` the provider). `host/spectest.ml:35` allocates each host
+            // function with `DefT (RecT [SubT (Final, [], FuncT (ts1, ts2))],
+            // 0l)`, so the check is `match_deftype` against that single final
+            // supertype-free member. Skipping it would let a mismatched
+            // declaration bind silently (e.g. `print_i32` declared `(param
+            // i64)`).
+            if !spectest_signature_matches(&host, &module, declared.type_idx) {
+                return Err(format!(
+                    "link: incompatible import type on \"spectest\".\"{}\": spectest provides {:?}, import declares type {:?}",
+                    declared.name,
+                    host.ty(),
+                    declared.type_idx
+                ));
+            }
+            host
         } else {
             let source = registry.get(Some(&declared.module)).ok_or_else(|| {
                 format!(
@@ -212,27 +456,40 @@ fn instantiate(
                     )
                 })?;
             // Type-check the linked function against the import declaration
-            // (spec: mismatched signatures are a link error).
-            let source_ty = &source
+            // (spec: a mismatched type is a link error). `eval.ml:1187` runs
+            // `Match.match_externtype [] xt' xt` with `xt'` the PROVIDER's
+            // type and `xt` the import DECLARATION; for functions
+            // `valid/match.ml:175-186` delegates to `match_deftype`, i.e. the
+            // two type ENTRIES must be canonically identical (rolled closed
+            // forms — rec-group shape and position included) or the provided
+            // one must declare a supertype chain reaching the declared one.
+            // Raw local-index comparison would reject structurally equal
+            // types; a params/results comparison would accept different
+            // rec-group shapes.
+            let Some(source_idx) = source
                 .module
                 .funcs
                 .iter()
                 .find(|func| func.idx == func_idx)
-                .map(|func| &source.module.types[func.type_idx.0 as usize]);
-            match source_ty {
-                Some(source_ty) if **source_ty == declared.ty => {}
-                Some(source_ty) => {
-                    return Err(format!(
-                        "link: type mismatch on {:?}.{:?}: source {source_ty:?} vs import {:?}",
-                        declared.module, declared.name, declared.ty
-                    ));
-                }
-                None => {
-                    return Err(format!(
-                        "link: function {func_idx:?} not found in {:?}",
-                        declared.module
-                    ));
-                }
+                .map(|func| func.type_idx)
+            else {
+                return Err(format!(
+                    "link: function {func_idx:?} not found in {:?}",
+                    declared.module
+                ));
+            };
+            if !baedeker_core::types::defined_type_matches(
+                &source.module.type_defs,
+                &source.module.rec_groups,
+                source_idx,
+                &module.type_defs,
+                &module.rec_groups,
+                declared.type_idx,
+            ) {
+                return Err(format!(
+                    "link: type mismatch on {:?}.{:?}: source type {:?} vs import type {:?}",
+                    declared.module, declared.name, source_idx, declared.type_idx
+                ));
             }
             link_func(
                 source.module.clone(),
@@ -242,7 +499,7 @@ fn instantiate(
             )
         };
         store
-            .register_host_func(&declared.module, &declared.name, host)
+            .bind_host_func(func_idx as u32, host)
             .map_err(|error| format!("register host func failed: {error:?}"))?;
     }
 
@@ -307,6 +564,8 @@ fn spectest_memory(name: &str) -> Result<MemType, String> {
             limits: baedeker_core::types::Limits {
                 min: 1,
                 max: Some(2),
+                is64: false,
+                shared: false,
             },
         }),
         other => Err(format!("unknown spectest memory {other:?}")),
@@ -332,16 +591,53 @@ fn spectest_global(name: &str) -> Result<(GlobalType, Value), String> {
 
 fn spectest_table(name: &str) -> Result<TableType, String> {
     match name {
+        "table64" => Ok(TableType {
+            elem: baedeker_core::types::RefType::FuncRef,
+            limits: baedeker_core::types::Limits {
+                min: 10,
+                max: Some(20),
+                is64: true,
+                shared: false,
+            },
+            init: None,
+        }),
         "table" => Ok(TableType {
             elem: baedeker_core::types::RefType::FuncRef,
             limits: baedeker_core::types::Limits {
                 min: 10,
                 max: Some(20),
+                is64: false,
+                shared: false,
             },
             init: None,
         }),
         other => Err(format!("unknown spectest table {other:?}")),
     }
+}
+
+/// Whether a spectest host function matches an import DECLARATION's type
+/// entry, as `match_deftype` (`valid/match.ml:145-150`, reached from
+/// `eval.ml:1187`'s `match_externtype`).
+///
+/// `host/spectest.ml:35` gives every host function the type entry
+/// `DefT (RecT [SubT (Final, [], FuncT (ts1, ts2))], 0l)`: one final member,
+/// no declared supertypes, no rec-group neighbours. That is exactly the
+/// synthetic provider section built here.
+fn spectest_signature_matches(host: &HostFunction, module: &RegModule, declared: TypeIdx) -> bool {
+    let provided = [SubType {
+        is_final: true,
+        supertypes: Vec::new(),
+        comp: CompType::Func(host.ty().clone()),
+    }];
+    let provided_recs = [(0u32, 1u32)];
+    defined_type_matches(
+        &provided,
+        &provided_recs,
+        TypeIdx(0),
+        &module.type_defs,
+        &module.rec_groups,
+        declared,
+    )
 }
 
 fn spectest_host_func(name: &str) -> Result<HostFunction, String> {
@@ -370,6 +666,10 @@ fn spectest_host_func(name: &str) -> Result<HostFunction, String> {
 
 fn run_file(path: &Path, stats: &mut OfficialStats) {
     let text = baedeker_testdata::spec_case_text(path);
+    // Strip multi-agent directives before parsing (no-op for every file but
+    // `atomic_wait_notify.wast`).
+    let (text, threads_directives_skipped) = strip_threads_directives(&text);
+    stats.threads_directives_skipped = threads_directives_skipped;
     let buf = match ParseBuffer::new(&text) {
         Ok(buf) => buf,
         Err(error) => main_panic(path, &format!("failed to parse wast buffer: {error}")),
@@ -384,7 +684,7 @@ fn run_file(path: &Path, stats: &mut OfficialStats) {
     for directive in wast.directives {
         stats.directives += 1;
         match directive {
-            WastDirective::Module(wat) | WastDirective::ModuleDefinition(wat) => {
+            WastDirective::Module(wat) => {
                 stats.modules += 1;
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let (name, module) = lower_wat(path, wat);
@@ -405,6 +705,51 @@ fn run_file(path: &Path, stats: &mut OfficialStats) {
                     }
                 }
             }
+            WastDirective::ModuleDefinition(wat) => {
+                stats.modules += 1;
+                // A definition is lowered and stored, never instantiated.
+                // Anonymous definitions are decode/validate exercises only.
+                let outcome =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lower_wat(path, wat)));
+                match outcome {
+                    Ok((Some(name), module)) => {
+                        registry.definitions.insert(name, Rc::new(module));
+                    }
+                    Ok((None, _)) => {}
+                    Err(payload) => {
+                        let msg = payload
+                            .downcast_ref::<String>()
+                            .cloned()
+                            .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+                            .unwrap_or_else(|| "unknown panic".to_owned());
+                        stats
+                            .failures
+                            .push(format!("{}: panicked: {msg}", path.display()));
+                    }
+                }
+            }
+            WastDirective::ModuleInstance {
+                instance, module, ..
+            } => {
+                stats.modules += 1;
+                // Instantiate a stored definition with FRESH state (new
+                // store, new instance id) under the instance name.
+                let module_name = module.map(|id| id.name());
+                let instance_name = instance.map(|id| id.name());
+                let Some(definition) =
+                    module_name.and_then(|name| registry.definitions.get(name).cloned())
+                else {
+                    stats.failures.push(format!(
+                        "{}: module instance: no definition for {module_name:?} (instance {instance_name:?})",
+                        path.display()
+                    ));
+                    continue;
+                };
+                match instantiate(path, &mut registry, (*definition).clone()) {
+                    Ok(inst) => registry.insert(instance_name, inst),
+                    Err(msg) => stats.failures.push(format!("{}: {msg}", path.display())),
+                }
+            }
             WastDirective::AssertReturn { exec, results, .. } => {
                 stats.assertions += 1;
                 assert_return(path, &registry, exec, results, stats);
@@ -419,7 +764,7 @@ fn run_file(path: &Path, stats: &mut OfficialStats) {
                         let _ = name;
                         match instantiate(path, &mut registry, lowered) {
                             Err(msg) => {
-                                if !msg.contains(message) {
+                                if !message_matches(&msg, message) {
                                     stats.failures.push(format!(
                                         "{}: assert_trap expected {message:?}, got {msg:?}",
                                         path.display()
@@ -434,6 +779,11 @@ fn run_file(path: &Path, stats: &mut OfficialStats) {
                     }
                     _ => assert_trap(path, &registry, exec, message, stats),
                 }
+            }
+            WastDirective::AssertException { exec, span } => {
+                stats.assertions += 1;
+                let _ = span;
+                assert_exception(path, &registry, exec, stats);
             }
             WastDirective::AssertExhaustion { call, message, .. } => {
                 stats.assertions += 1;
@@ -576,6 +926,7 @@ fn invoke_args(args: &[WastArg<'_>]) -> Vec<Value> {
             WastArg::Core(WastArgCore::I64(value)) => Value::I64(*value),
             WastArg::Core(WastArgCore::F32(value)) => Value::F32(f32::from_bits(value.bits)),
             WastArg::Core(WastArgCore::F64(value)) => Value::F64(f64::from_bits(value.bits)),
+            WastArg::Core(WastArgCore::V128(value)) => Value::V128(value.to_le_bytes()),
             WastArg::Core(WastArgCore::RefNull(ty)) => match ty {
                 wast::core::HeapType::Abstract {
                     ty: wast::core::AbstractHeapType::Extern,
@@ -583,8 +934,12 @@ fn invoke_args(args: &[WastArg<'_>]) -> Vec<Value> {
                 } => Value::ExternRef(None),
                 _ => Value::FuncRef(None),
             },
-            WastArg::Core(WastArgCore::RefExtern(value))
-            | WastArg::Core(WastArgCore::RefHost(value)) => Value::ExternRef(Some(*value)),
+            // `ref.extern N` builds `ExternRef(HostRef N)`; `ref.host N`
+            // builds the any-side `HostRef N` (`script.ml:80`: its type is
+            // `AnyHT`). Keeping the zones distinct is what lets an anyref
+            // parameter accept a host reference.
+            WastArg::Core(WastArgCore::RefExtern(value)) => Value::ExternRef(Some(*value)),
+            WastArg::Core(WastArgCore::RefHost(value)) => Value::HostAny(Some(*value)),
             other => panic!("unsupported invoke argument: {other:?}"),
         })
         .collect()
@@ -607,6 +962,45 @@ fn execute_invoke(
     };
     let store = instance.store.borrow();
     Some(execute_export(&instance.module, &store, name, args))
+}
+
+fn assert_exception(
+    path: &Path,
+    registry: &Registry,
+    exec: WastExecute<'_>,
+    stats: &mut OfficialStats,
+) {
+    let WastExecute::Invoke(invoke) = exec else {
+        stats.failures.push(format!(
+            "{}: non-invoke assert_exception unsupported",
+            path.display()
+        ));
+        return;
+    };
+    let args = invoke_args(&invoke.args);
+    let Some(result) = execute_invoke(
+        path,
+        registry,
+        invoke.module.map(|id| id.name()),
+        invoke.name,
+        &args,
+        stats,
+    ) else {
+        return;
+    };
+    match result {
+        Err(RuntimeError {
+            kind: RuntimeErrorKind::UncaughtException { .. },
+        }) => {}
+        Err(other) => stats.failures.push(format!(
+            "{}: assert_exception expected an escaping exception, got trap {other:?}",
+            path.display()
+        )),
+        Ok(_) => stats.failures.push(format!(
+            "{}: assert_exception expected an escaping exception, got a value",
+            path.display()
+        )),
+    }
 }
 
 fn assert_return(
@@ -633,7 +1027,7 @@ fn assert_return(
                 return;
             };
             let actual = cell.get();
-            if expected.len() == 1 && result_matches(&actual, &expected[0]) {
+            if expected.len() == 1 && result_matches(&actual, &expected[0], Some(&store)) {
                 return;
             }
             stats.failures.push(format!(
@@ -661,11 +1055,17 @@ fn assert_return(
     };
     match result {
         Ok(actual) => {
+            // Reference-pattern matching needs the instance's store (GC object
+            // kinds live in the heap, not in the value).
+            let store = registry
+                .get(invoke.module.map(|id| id.name()))
+                .map(|instance| instance.store.borrow());
+            let store = store.as_deref();
             if actual.len() != expected.len()
                 || !actual
                     .iter()
                     .zip(expected.iter())
-                    .all(|(actual, expected)| result_matches(actual, expected))
+                    .all(|(actual, expected)| result_matches(actual, expected, store))
             {
                 stats.failures.push(format!(
                     "{}: assert_return mismatch on {:?}: actual {actual:?}, expected {expected:?}",
@@ -679,6 +1079,27 @@ fn assert_return(
             path.display(),
             invoke.name
         )),
+    }
+}
+
+/// The pin's assertion-message rule (`interpreter/script/runner.ml:498-502`,
+/// `assert_message`): the ACTUAL message must start with the EXPECTED
+/// string; the actual may be longer, but never differ inside the expected
+/// prefix (`String.sub msg 0 (String.length re) <> re` is the failure case).
+fn message_matches(actual: &str, expected: &str) -> bool {
+    actual.starts_with(expected)
+}
+
+/// The trap-shaped message for an execution error, if the error is a trap in
+/// the spec's sense. `ref.cast` failure is a runtime trap whose message
+/// starts with `"cast failure, expected "` (`interpreter/exec/eval.ml:657`);
+/// `RuntimeErrorKind::CastFailure` stays a distinct embedder-facing kind, but
+/// the script harness reports it through the trap-message channel.
+fn trap_message(error: &RuntimeError) -> Option<String> {
+    match &error.kind {
+        RuntimeErrorKind::Trap(trap) => Some(trap.wast_message().to_owned()),
+        RuntimeErrorKind::CastFailure { .. } => Some(error.kind.to_string()),
+        _ => None,
     }
 }
 
@@ -709,18 +1130,17 @@ fn assert_trap(
     };
     match result {
         Err(error) => {
-            let RuntimeErrorKind::Trap(trap) = error.kind else {
+            let Some(actual) = trap_message(&error) else {
                 stats.failures.push(format!(
                     "{}: assert_trap expected {message:?}, got non-trap error: {error:?}",
                     path.display()
                 ));
                 return;
             };
-            if trap.wast_message() != message {
+            if !message_matches(&actual, message) {
                 stats.failures.push(format!(
-                    "{}: assert_trap message mismatch: got {:?}, expected {message:?}",
-                    path.display(),
-                    trap.wast_message()
+                    "{}: assert_trap message mismatch: got {actual:?}, expected {message:?}",
+                    path.display()
                 ));
             }
         }
@@ -775,12 +1195,20 @@ fn assert_exhaustion(
 }
 
 /// Whether an actual runtime value satisfies an expected WAST result,
-/// including NaN patterns and v128 lane patterns.
-fn result_matches(actual: &Value, expected: &WastRet<'_>) -> bool {
+/// including NaN patterns, v128 lane patterns, and reference patterns
+/// (`script/runner.ml:464-483` `assert_ref_pat`).
+fn result_matches(actual: &Value, expected: &WastRet<'_>, store: Option<&Store>) -> bool {
     match expected {
-        WastRet::Core(WastRetCore::I32(value)) => *actual == Value::I32(*value),
-        WastRet::Core(WastRetCore::I64(value)) => *actual == Value::I64(*value),
-        WastRet::Core(WastRetCore::F32(pattern)) => match (actual, pattern) {
+        WastRet::Core(core) => ret_core_matches(actual, core, store),
+        _ => false,
+    }
+}
+
+fn ret_core_matches(actual: &Value, expected: &WastRetCore<'_>, store: Option<&Store>) -> bool {
+    match expected {
+        WastRetCore::I32(value) => *actual == Value::I32(*value),
+        WastRetCore::I64(value) => *actual == Value::I64(*value),
+        WastRetCore::F32(pattern) => match (actual, pattern) {
             (Value::F32(actual), wast::core::NanPattern::Value(expected)) => {
                 actual.to_bits() == expected.bits
             }
@@ -790,7 +1218,7 @@ fn result_matches(actual: &Value, expected: &WastRet<'_>) -> bool {
             (Value::F32(actual), wast::core::NanPattern::ArithmeticNan) => actual.is_nan(),
             _ => false,
         },
-        WastRet::Core(WastRetCore::F64(pattern)) => match (actual, pattern) {
+        WastRetCore::F64(pattern) => match (actual, pattern) {
             (Value::F64(actual), wast::core::NanPattern::Value(expected)) => {
                 actual.to_bits() == expected.bits
             }
@@ -800,36 +1228,65 @@ fn result_matches(actual: &Value, expected: &WastRet<'_>) -> bool {
             (Value::F64(actual), wast::core::NanPattern::ArithmeticNan) => actual.is_nan(),
             _ => false,
         },
-        WastRet::Core(WastRetCore::RefNull(_)) => {
-            matches!(actual, Value::FuncRef(None) | Value::ExternRef(None))
+        // Reference patterns: the pinned `assert_ref_pat` rows live in the
+        // runtime so embedders and tests share one relation.
+        WastRetCore::RefNull(_) => {
+            baedeker_core::runtime::ref_matches_pattern(actual, RefPattern::Null, store)
         }
-        WastRet::Core(WastRetCore::RefExtern(Some(expected))) => {
-            *actual == Value::ExternRef(Some(*expected))
+        WastRetCore::RefExtern(Some(expected)) => baedeker_core::runtime::ref_matches_pattern(
+            actual,
+            RefPattern::Extern(Some(*expected)),
+            store,
+        ),
+        // Bare `(ref.extern)`: the `RefTypePat ExternHT, _` row matches every
+        // reference value, nulls included (runner.ml:475).
+        WastRetCore::RefExtern(None) => {
+            baedeker_core::runtime::ref_matches_pattern(actual, RefPattern::Extern(None), store)
         }
-        WastRet::Core(WastRetCore::RefExtern(None)) => actual == &Value::ExternRef(None),
-        // `(ref.func)` with no index: any non-null funcref.
-        WastRet::Core(WastRetCore::RefFunc(None)) => matches!(actual, Value::FuncRef(Some(_))),
-        WastRet::Core(WastRetCore::RefFunc(Some(expected))) => {
-            let expected_idx = match expected {
-                wast::token::Index::Num(idx, _) => Some(*idx),
-                wast::token::Index::Id(_) => None,
-            };
-            match (actual, expected_idx) {
-                (Value::FuncRef(Some((_, actual_idx))), Some(expected_idx)) => {
-                    actual_idx == &expected_idx
-                }
-                (Value::FuncRef(Some(_)), None) => true,
-                _ => false,
+        // `(ref.func)` / `(ref.func $f)`.
+        WastRetCore::RefFunc(None) => {
+            baedeker_core::runtime::ref_matches_pattern(actual, RefPattern::FuncAny, store)
+        }
+        WastRetCore::RefFunc(Some(index)) => match index {
+            wast::token::Index::Num(idx, _) => baedeker_core::runtime::ref_matches_pattern(
+                actual,
+                RefPattern::FuncIndex(*idx),
+                store,
+            ),
+            wast::token::Index::Id(_) => {
+                baedeker_core::runtime::ref_matches_pattern(actual, RefPattern::FuncAny, store)
             }
+        },
+        // `(ref.host n)`: eq_ref identity on the any-side host handle only
+        // (`script.ml:93` equates `HostRef` with `HostRef`).
+        WastRetCore::RefHost(expected) => {
+            baedeker_core::runtime::ref_matches_pattern(actual, RefPattern::Host(*expected), store)
         }
-        WastRet::Core(WastRetCore::RefHost(_)) => false,
-        WastRet::Core(WastRetCore::V128(pattern)) => {
+        WastRetCore::RefAny => {
+            baedeker_core::runtime::ref_matches_pattern(actual, RefPattern::Any, store)
+        }
+        WastRetCore::RefEq => {
+            baedeker_core::runtime::ref_matches_pattern(actual, RefPattern::Eq, store)
+        }
+        WastRetCore::RefStruct => {
+            baedeker_core::runtime::ref_matches_pattern(actual, RefPattern::Struct, store)
+        }
+        WastRetCore::RefArray => {
+            baedeker_core::runtime::ref_matches_pattern(actual, RefPattern::Array, store)
+        }
+        WastRetCore::RefI31 | WastRetCore::RefI31Shared => {
+            baedeker_core::runtime::ref_matches_pattern(actual, RefPattern::I31, store)
+        }
+        // `EitherResult`: any alternative may match.
+        WastRetCore::Either(cases) => cases
+            .iter()
+            .any(|case| ret_core_matches(actual, case, store)),
+        WastRetCore::V128(pattern) => {
             let Value::V128(actual) = actual else {
                 return false;
             };
             v128_pattern_matches(actual, pattern)
         }
-        _ => false,
     }
 }
 
@@ -909,9 +1366,13 @@ fn official_spec_cases_inner() {
     let mut stats = OfficialStats::default();
     let mut deferred: Vec<(PathBuf, &'static str)> = Vec::new();
 
+    // The filter legitimately narrows a run, so the full-count assertions
+    // below apply only to an unfiltered run; `failures=0` is unconditional.
+    let filter = std::env::var("BAEDEKER_OFFICIAL_FILTER").unwrap_or_default();
+    let filtered = !filter.is_empty();
+
     for path in baedeker_testdata::spec_wast_cases("wast-official") {
-        if let Ok(filter) = std::env::var("BAEDEKER_OFFICIAL_FILTER")
-            && !filter.is_empty()
+        if filtered
             && !path
                 .file_name()
                 .unwrap_or_default()
@@ -954,16 +1415,19 @@ fn official_spec_cases_inner() {
         stats.directives += file_stats.directives;
         stats.modules += file_stats.modules;
         stats.assertions += file_stats.assertions;
+        stats.threads_directives_skipped += file_stats.threads_directives_skipped;
         stats.failures.extend(file_stats.failures);
     }
 
     eprintln!(
-        "official summary: files={} deferred={} directives={} modules={} assertions={} failures={}",
+        "official summary: files={} deferred={} directives={} modules={} assertions={} \
+         threads_directives_skipped={} failures={}",
         stats.files,
         stats.deferred,
         stats.directives,
         stats.modules,
         stats.assertions,
+        stats.threads_directives_skipped,
         stats.failures.len()
     );
     for (path, reason) in &deferred {
@@ -979,5 +1443,234 @@ fn official_spec_cases_inner() {
         }
         panic!("{report}");
     }
-    assert!(stats.files > 0, "expected official spec files to run");
+    assert!(
+        stats.files > 0 || filtered,
+        "expected official spec files to run"
+    );
+
+    // The threads slice's manifest (docs/plans/threads-unit3-contract.md):
+    // the 200 pre-existing runnable files + `atomic.wast` +
+    // `atomic_wait_notify.wast` + the two pinned deltas. `thread.wast` joins
+    // the two pre-existing deferrals. A `BAEDEKER_OFFICIAL_FILTER` run is a
+    // narrowing, so these counts are asserted only when it is unset/empty.
+    if !filtered {
+        assert_eq!(
+            stats.files, 204,
+            "the threads manifest is 204 runnable files"
+        );
+        assert_eq!(stats.deferred, 3, "the threads manifest defers 3 files");
+        assert_eq!(
+            stats.threads_directives_skipped, 4,
+            "atomic_wait_notify.wast carries four multi-agent directives \
+             (two `thread` blocks, two `wait` directives)"
+        );
+    }
+}
+
+/// `assert_message` accepts an actual message that extends the expected one
+/// (the pin's prefix rule) …
+#[test]
+fn assert_message_prefix_accepts_longer_actual() {
+    assert!(message_matches(
+        "cast failure, expected (ref null struct) but got i31",
+        "cast failure"
+    ));
+    assert!(message_matches(
+        "out of bounds memory access",
+        "out of bounds"
+    ));
+    assert!(message_matches("cast failure", "cast failure"));
+}
+
+/// … and rejects an actual message that diverges inside the expected prefix
+/// (including one that merely CONTAINS the expected text later on).
+#[test]
+fn assert_message_prefix_rejects_divergent_actual() {
+    assert!(!message_matches("cast failure", "cast failure, expected"));
+    assert!(!message_matches("expected cast failure", "cast failure"));
+    assert!(!message_matches(
+        "call stack exhausted, cast failure",
+        "cast failure"
+    ));
+}
+
+/// A `ref.cast` failure reaches the harness as the trap message the corpus
+/// asserts (`eval.ml:657`), while keeping its distinct embedder-facing kind.
+#[test]
+fn cast_failure_reports_trap_shaped_message() {
+    let error = RuntimeError {
+        kind: RuntimeErrorKind::CastFailure {
+            expected: baedeker_core::types::RefType::from_parts(
+                true,
+                baedeker_core::types::HeapType::Struct,
+            ),
+        },
+    };
+    let message = trap_message(&error).expect("cast failure is trap-shaped");
+    assert!(
+        message.starts_with("cast failure, expected "),
+        "rendered prefix must be exactly `cast failure, expected `: {message}"
+    );
+    assert!(message_matches(&message, "cast failure"));
+    assert!(message_matches(&message, "cast failure, expected"));
+}
+
+/// Lower an inline WAT module for a unit-level harness test.
+fn inline_module(source: &str) -> RegModule {
+    let buf = ParseBuffer::new(source).expect("parse buffer");
+    let mut wat = parse::<wast::Wat<'_>>(&buf).expect("parse wat");
+    let bytes = wat.encode().expect("encode wat");
+    Module::decode(&bytes)
+        .expect("decode module")
+        .lower()
+        .expect("lower module")
+}
+
+/// Link `source` against a fresh registry and return the outcome.
+fn link_inline(source: &str) -> Result<(), String> {
+    let mut registry = Registry::new();
+    instantiate(Path::new("<inline>"), &mut registry, inline_module(source)).map(|_| ())
+}
+
+/// A spectest declaration is an IMPORT DECLARATION like any other: its type
+/// entry must `match_deftype` the host function's own type entry
+/// (`host/spectest.ml:35` allocates the host function with `DefT (RecT [SubT
+/// (Final, [], FuncT (ts1, ts2))], 0)` and `eval.ml:1187` runs
+/// `Match.match_externtype [] xt' xt` on it). A mismatched declaration is a
+/// link error — never a silent binding.
+#[test]
+fn spectest_import_type_mismatch_is_a_link_error() {
+    let error = link_inline(r#"(module (import "spectest" "print_i32" (func (param i64))))"#)
+        .expect_err("a mismatched spectest declaration must not link");
+    assert!(
+        error.contains("incompatible import type"),
+        "expected an incompatible-import-type link error, got {error}"
+    );
+
+    // The matching declaration links.
+    link_inline(r#"(module (import "spectest" "print_i32" (func (param i32))))"#)
+        .expect("the matching declaration links");
+}
+
+/// The spectest check runs PER DECLARATION (the `$t0`/`$t1` shape): two
+/// declarations of one name with the same type both bind, and a mismatched
+/// declaration is rejected even when a matching one is present.
+#[test]
+fn spectest_import_type_check_is_per_declaration() {
+    link_inline(
+        r#"(module
+             (import "spectest" "print_i32" (func (param i32)))
+             (import "spectest" "print_i32" (func (param i32))))"#,
+    )
+    .expect("both matching declarations link");
+
+    let error = link_inline(
+        r#"(module
+             (import "spectest" "print_i32" (func (param i32)))
+             (import "spectest" "print_i32" (func (param i64))))"#,
+    )
+    .expect_err("the mismatched declaration must not link");
+    assert!(
+        error.contains("incompatible import type"),
+        "expected an incompatible-import-type link error, got {error}"
+    );
+}
+
+// ── pre-parse threads-directive strip (U3) ─────────────────────────
+
+/// The strip removes whole BALANCED forms and nothing else: a paren inside a
+/// string or a comment never closes a form early, and a `thread`/`wait`
+/// token inside a comment is not a directive. The stripped text still parses
+/// — the property the harness relies on.
+#[test]
+fn strip_threads_directives_preserves_unbalanced_form_and_interior() {
+    // Review r1 P2: a form that never balances is preserved INTACT —
+    // including its interior and everything after it. The old fallback
+    // resumed scanning inside the unterminated form and stripped a
+    // nested `(wait …)`, silently mutating the form the safety path
+    // promises to hand to the parser unchanged.
+    let text = "(thread $T (wait $T)";
+    let (stripped, removed) = strip_threads_directives(text);
+    assert_eq!(stripped, "(thread $T (wait $T)");
+    assert_eq!(removed, 0);
+}
+
+#[test]
+fn strip_threads_directives_removes_whole_forms_only() {
+    let text = r#"(module (memory 1 1))
+;; (wait $T0) in a line comment is not a directive
+(thread $T1 (shared (module $M))
+  (module (func (export "f") (i32.store (i32.const 0) (i32.const 40))))
+  (invoke "f")
+)
+(; (thread $T2 (module)) ;)
+(module (data "(\"thread\" )"))
+(wait $T1)
+(thread $T3 (module $M3 (memory 1 1) (data (i32.const 0) ")")))
+(wait $T3)
+(module)
+"#;
+    let (stripped, removed) = strip_threads_directives(text);
+    assert_eq!(removed, 4, "two `thread` blocks plus two `wait` directives");
+    assert!(
+        !stripped.contains("(thread $T1") && !stripped.contains("(thread $T3"),
+        "every thread block must be removed: {stripped}"
+    );
+    assert!(
+        !stripped.contains("(wait $T1)") && !stripped.contains("(wait $T3)"),
+        "every wait directive must be removed: {stripped}"
+    );
+    // Decoys survive verbatim: the parenthesised `wait` in a line comment,
+    // the parenthesised `thread` in a block comment, and the data string
+    // whose escapes and `)` must not be counted as a form end.
+    assert!(stripped.contains(";; (wait $T0) in a line comment"));
+    assert!(stripped.contains("(; (thread $T2 (module)) ;)"));
+    assert!(stripped.contains(r#"(module (data "(\"thread\" )"))"#));
+    // Only the forms were removed: the text still parses as a Wast script.
+    let buf = ParseBuffer::new(&stripped).expect("stripped text is a valid buffer");
+    parse::<Wast<'_>>(&buf).expect("stripped text parses as a Wast script");
+}
+
+/// The vendored corpus files other than `atomic_wait_notify.wast` carry no
+/// multi-agent directives, so the strip is byte-for-byte a no-op on them.
+#[test]
+fn strip_threads_directives_is_a_noop_for_the_other_vendored_files() {
+    let root = baedeker_testdata::spec_root().join("wast-official");
+    for name in [
+        "atomic.wast",
+        "binary-threads-delta.wast",
+        "memory-threads-delta.wast",
+    ] {
+        let text = baedeker_testdata::spec_case_text(root.join(name));
+        let (stripped, removed) = strip_threads_directives(&text);
+        assert_eq!(removed, 0, "{name} carries no multi-agent directive");
+        assert_eq!(stripped, text, "{name} must be passed through unchanged");
+    }
+}
+
+/// The vendored corpus file: exactly four balanced blocks, and what is left
+/// is a single-agent script (the stock wast grammar cannot parse the four
+/// multi-agent forms, which is why the strip runs before parsing).
+#[test]
+fn strip_threads_directives_removes_the_four_corpus_blocks() {
+    let path = baedeker_testdata::spec_root()
+        .join("wast-official")
+        .join("atomic_wait_notify.wast");
+    let text = baedeker_testdata::spec_case_text(&path);
+    let (stripped, removed) = strip_threads_directives(&text);
+    assert_eq!(
+        removed, 4,
+        "atomic_wait_notify.wast carries two `thread` blocks and two `wait` directives"
+    );
+    assert!(!stripped.contains("(thread $T"));
+    assert!(!stripped.contains("(wait $T"));
+    // The single-agent directives are untouched: the wait/notify exports,
+    // the unshared-memory trap assertions, and the OOB/unaligned family.
+    assert!(stripped.contains("memory.atomic.wait32"));
+    assert!(stripped.contains("memory.atomic.notify"));
+    assert!(stripped.contains("expected shared memory"));
+    assert!(stripped.contains("unaligned atomic"));
+
+    let buf = ParseBuffer::new(&stripped).expect("stripped corpus is a valid buffer");
+    parse::<Wast<'_>>(&buf).expect("the stripped corpus parses as a single-agent script");
 }

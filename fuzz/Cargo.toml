@@ -11,6 +11,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 baedeker-core = { path = "../crates/baedeker-core" }
 arbitrary = "1" 
+wast = "240"
 
 [dependencies.wasm-smith]
 version = "0.254"
@@ -18,6 +19,10 @@ optional = true
 
 [features]
 default = ["wasm-smith"]
+# R1 (GC slice): wasm-smith emits GC type sections plus a conservative
+# struct/array/i31 instruction subset. Off by default so the existing
+# non-GC campaign shape is unchanged.
+gc-smith = ["wasm-smith"]
 
 # Standalone workspace — intentionally not a member of the root workspace
 # (fuzz builds use a separate nightly toolchain and sanitizer flags).
@@ -42,8 +47,15 @@ test = false
 doc = false
 required-features = ["wasm-smith"]
 
+
 [[bin]]
 name = "trap_edges"
 path = "fuzz_targets/trap_edges.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "return_call_depth"
+path = "fuzz_targets/return_call_depth.rs"
 test = false
 doc = false

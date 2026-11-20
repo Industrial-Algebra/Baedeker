@@ -92,6 +92,9 @@ pub struct DecodeError {
 pub enum DecodeErrorKind {
     /// Unexpected end of input.
     UnexpectedEof,
+    /// A refused reservation while building a decoded structure (resource
+    /// discipline: clean error, never an allocation abort).
+    ResourceLimitExceeded,
     /// Invalid magic number (expected `\0asm`).
     InvalidMagic,
     /// Unsupported WASM version.
@@ -116,8 +119,12 @@ pub enum DecodeErrorKind {
     UnknownImportDesc { byte: u8 },
     /// Unknown export descriptor tag.
     UnknownExportDesc { byte: u8 },
+    /// Tag section entry had a non-zero attribute byte.
+    InvalidTagAttribute { byte: u8 },
     /// Invalid global mutability encoding.
     InvalidMutability { byte: u8 },
+    /// `br_on_cast` flags byte had a reserved bit set (`flags & 0xfc != 0`).
+    MalformedCastFlags { flags: u8 },
     /// Invalid UTF-8 in a name string.
     InvalidUtf8,
     /// Function and code section counts disagree.
@@ -126,6 +133,13 @@ pub enum DecodeErrorKind {
     TooManyLocals,
     /// Unknown instruction opcode.
     UnknownOpcode { byte: u8 },
+    /// A shared memory type without a maximum: the threads-pin memtype
+    /// production requires `max` when shared (limits tag 0x02 carries no
+    /// max by construction). Exact corpus string: "shared memory must
+    /// have maximum".
+    SharedMemoryRequiresMax,
+    /// Unknown atomic (0xFE-prefixed) instruction opcode.
+    UnknownAtomicOpcode { opcode: u8 },
     /// Unknown SIMD-prefixed instruction opcode.
     UnknownSimdOpcode { opcode: u32 },
     /// Unexpected byte value.
@@ -148,6 +162,9 @@ impl fmt::Display for DecodeErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             DecodeErrorKind::UnexpectedEof => write!(f, "unexpected end of input"),
+            DecodeErrorKind::ResourceLimitExceeded => {
+                write!(f, "resource limit exceeded")
+            }
             DecodeErrorKind::InvalidMagic => write!(f, "invalid magic number (expected \\0asm)"),
             DecodeErrorKind::UnsupportedVersion { found } => {
                 write!(f, "unsupported WASM version {found} (expected 1)")
@@ -182,8 +199,14 @@ impl fmt::Display for DecodeErrorKind {
             DecodeErrorKind::UnknownExportDesc { byte } => {
                 write!(f, "unknown export descriptor {byte:#04x}")
             }
+            DecodeErrorKind::InvalidTagAttribute { byte } => {
+                write!(f, "invalid tag attribute {byte:#04x}")
+            }
             DecodeErrorKind::InvalidMutability { byte } => {
                 write!(f, "invalid mutability {byte:#04x}")
+            }
+            DecodeErrorKind::MalformedCastFlags { flags } => {
+                write!(f, "malformed br_on_cast flags {flags:#04x}")
             }
             DecodeErrorKind::InvalidUtf8 => write!(f, "invalid UTF-8 string"),
             DecodeErrorKind::FunctionCodeLengthMismatch { functions, codes } => {
@@ -200,6 +223,12 @@ impl fmt::Display for DecodeErrorKind {
             }
             DecodeErrorKind::UnexpectedByte { expected, found } => {
                 write!(f, "expected {expected:#04x}, found {found:#04x}")
+            }
+            DecodeErrorKind::SharedMemoryRequiresMax => {
+                write!(f, "shared memory must have maximum")
+            }
+            DecodeErrorKind::UnknownAtomicOpcode { opcode } => {
+                write!(f, "unknown atomic opcode {opcode:#04x}")
             }
             DecodeErrorKind::SectionSizeMismatch { expected, consumed } => {
                 write!(

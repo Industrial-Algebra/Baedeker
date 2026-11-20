@@ -1,2 +1,13 @@
 upstream: https://github.com/WebAssembly/spec
 commit: dfa3f32a881aecc60a8c792da3c25787ccb15572
+
+threads corpus (classic threads proposal):
+upstream: https://github.com/WebAssembly/threads (branch main-legacy)
+commit: 33b2dcd6a933f5e3c4b860fbbc4d89077256a2aa
+files: atomic.wast, atomic_wait_notify.wast (four multi-agent directives
+       stripped before parsing), thread.wast (DEFERRED: multi-agent only)
+deltas: binary-threads-delta.wast <- binary.wast:586-595 (shared table limits
+        tag 0x02 rejected: "tables cannot be shared")
+        memory-threads-delta.wast <- memory.wast:9,10 (shared memory types),
+        :12 (shared without maximum: "shared memory must have maximum")
+        linking.wast: no threads delta (empty)

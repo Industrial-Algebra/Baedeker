@@ -88,6 +88,25 @@ enum BaedekerValueTag
   BaedekerValueTag_F32 = 2,
   BaedekerValueTag_F64 = 3,
   BaedekerValueTag_V128 = 4,
+  /**
+   * A GC `i31` immediate (payload in `data.i32_`). Never a heap object.
+   */
+  BaedekerValueTag_I31 = 5,
+  /**
+   * A GC aggregate reference, carried as an opaque `u64` handle token in
+   * `data.handle`.
+   */
+  BaedekerValueTag_GcRef = 6,
+  /**
+   * An internalized host reference (`any.convert_extern`), carried as an
+   * opaque `u64` handle token in `data.handle`.
+   */
+  BaedekerValueTag_HostAny = 7,
+  /**
+   * An externalized GC reference (`extern.convert_any`), carried as an
+   * opaque `u64` handle token in `data.handle`.
+   */
+  BaedekerValueTag_ExternGc = 8,
 };
 #ifndef __cplusplus
 #if __STDC_VERSION__ >= 202311L
@@ -109,7 +128,8 @@ typedef struct BaedekerModule BaedekerModule;
 
 /**
  * Payload of a [`BaedekerValue`]; the active field is selected by the tag.
- * Floats are carried as C `float`/`double` values, vectors as 16 raw bytes.
+ * Floats are carried as C `float`/`double` values, vectors as 16 raw bytes,
+ * opaque handles as `u64` tokens.
  */
 typedef union BaedekerValueData {
   int32_t i32_;
@@ -117,11 +137,14 @@ typedef union BaedekerValueData {
   float f32_;
   double f64_;
   uint8_t v128[16];
+  /**
+   * An opaque handle token minted by a [`HandleRegistry`].
+   */
+  uint64_t handle;
 } BaedekerValueData;
 
 /**
- * A WebAssembly value across the FFI boundary. Reference types (funcref /
- * externref) are not representable in this FFI version.
+ * A WebAssembly value across the FFI boundary.
  *
  * `tag` is a [`BaedekerValueTag`] value carried as a plain `uint8_t`:
  * fixed-underlying-type enums are C23-only, and a C-int enum here would

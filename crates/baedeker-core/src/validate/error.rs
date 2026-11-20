@@ -163,11 +163,98 @@ pub enum ValidationErrorKind {
         op: &'static str,
     },
     MemorySizeOutOfRange,
+    /// A memarg offset beyond u32 on an i32-indexed memory.
+    MemArgOffsetOutOfRange,
+    TableSizeOutOfRange,
+    TableMinExceedsMax,
     MemoryMinExceedsMax,
     /// A non-nullable-element table without an initializer.
     TableTypeMismatch,
     DuplicateExportName {
         name: alloc::string::String,
+    },
+    /// A feature that is decoded but not yet implemented/validated.
+    Unsupported {
+        feature: &'static str,
+    },
+    /// Tag declaration references a func type with results.
+    NonEmptyTagResult {
+        type_idx: u32,
+    },
+    /// Instruction referenced a tag index outside the tag index space.
+    UnknownTag {
+        idx: u32,
+    },
+    /// A subtype declared a supertype at or after its own rec group start.
+    ForwardUseOfTypeInSubType {
+        sub: u32,
+        supertype: u32,
+    },
+    /// A subtype declared a supertype that is itself final.
+    FinalSupertype {
+        sub: u32,
+        supertype: u32,
+    },
+    /// A subtype's composite type does not match its declared supertype's.
+    SubtypeComptypeMismatch {
+        sub: u32,
+        supertype: u32,
+    },
+    /// `struct.*` referenced a type index that is not a struct comptype.
+    UnknownStruct {
+        idx: TypeIdx,
+    },
+    /// `array.*` referenced a type index that is not an array comptype.
+    UnknownArray {
+        idx: TypeIdx,
+    },
+    /// A struct field index outside the type's field count.
+    UnknownField {
+        idx: TypeIdx,
+        field: u32,
+    },
+    /// `struct.set` on an immutable field.
+    ImmutableField {
+        idx: TypeIdx,
+        field: u32,
+    },
+    /// `array.set`/`array.fill`/`array.copy`/`array.init_*` on an immutable
+    /// array element.
+    ImmutableArray {
+        idx: TypeIdx,
+    },
+    /// The `_s`/`_u` extension marker is present iff the field is packed.
+    PackedFieldMismatch {
+        idx: TypeIdx,
+        field: u32,
+        packed: bool,
+    },
+    /// `struct.new_default`/`array.new_default` on a non-defaultable field.
+    NonDefaultable {
+        idx: TypeIdx,
+    },
+    /// `array.new_elem`/`array.init_elem`: the element segment's reference
+    /// type does not match the array's field type.
+    ElemFieldTypeMismatch {
+        elem: RefType,
+        field: ValType,
+    },
+    /// `array.new_data`/`array.init_data` on a non-numeric/non-vector field.
+    ArrayNotNumOrVec {
+        idx: TypeIdx,
+    },
+    /// `array.copy`: the source and destination storage types do not match.
+    ArrayStorageMismatch {
+        dst: TypeIdx,
+        src: TypeIdx,
+    },
+    /// A validator bookkeeping allocation was refused by the allocator.
+    ///
+    /// Validation is fallible at attacker-sized growth points (mirrors the
+    /// runtime's `ResourceLimitExceeded`): a refused reservation surfaces as
+    /// this error rather than aborting the process.
+    ResourceLimitExceeded {
+        what: &'static str,
     },
 }
 
@@ -420,6 +507,11 @@ impl fmt::Display for ValidationErrorKind {
                 write!(f, "{} requires a data count section", op)
             }
             ValidationErrorKind::MemorySizeOutOfRange => write!(f, "memory size"),
+            ValidationErrorKind::MemArgOffsetOutOfRange => write!(f, "offset out of range"),
+            ValidationErrorKind::TableSizeOutOfRange => write!(f, "table size"),
+            ValidationErrorKind::TableMinExceedsMax => {
+                write!(f, "size minimum must not be greater than maximum")
+            }
             ValidationErrorKind::MemoryMinExceedsMax => {
                 write!(f, "size minimum must not be greater than maximum")
             }
@@ -427,15 +519,90 @@ impl fmt::Display for ValidationErrorKind {
             ValidationErrorKind::DuplicateExportName { name } => {
                 write!(f, "duplicate export name {:?}", name)
             }
+            ValidationErrorKind::Unsupported { feature } => {
+                write!(f, "unsupported feature: {feature}")
+            }
+            ValidationErrorKind::NonEmptyTagResult { .. } => {
+                write!(f, "non-empty tag result type")
+            }
+            ValidationErrorKind::UnknownTag { idx } => {
+                write!(f, "unknown tag {idx}")
+            }
+            ValidationErrorKind::ForwardUseOfTypeInSubType { sub, supertype } => {
+                write!(
+                    f,
+                    "forward use of type {supertype} in sub type {sub} definition"
+                )
+            }
+            ValidationErrorKind::FinalSupertype { sub, supertype } => {
+                write!(f, "sub type {sub} has final super type {supertype}")
+            }
+            ValidationErrorKind::SubtypeComptypeMismatch { sub, supertype } => {
+                write!(f, "sub type {sub} does not match super type {supertype}")
+            }
+            ValidationErrorKind::UnknownStruct { idx } => {
+                write!(f, "non-structure type {}", idx.0)
+            }
+            ValidationErrorKind::UnknownArray { idx } => {
+                write!(f, "non-array type {}", idx.0)
+            }
+            ValidationErrorKind::UnknownField { idx, field } => {
+                write!(f, "unknown field {field} of type {}", idx.0)
+            }
+            ValidationErrorKind::ImmutableField { idx, field } => {
+                write!(f, "immutable field {field} of type {}", idx.0)
+            }
+            ValidationErrorKind::ImmutableArray { idx } => {
+                write!(f, "immutable array {}", idx.0)
+            }
+            ValidationErrorKind::PackedFieldMismatch { idx, field, packed } => {
+                write!(
+                    f,
+                    "field {field} of type {} is {}",
+                    idx.0,
+                    if *packed { "packed" } else { "unpacked" }
+                )
+            }
+            ValidationErrorKind::NonDefaultable { idx } => {
+                write!(f, "type {} has a non-defaultable field", idx.0)
+            }
+            ValidationErrorKind::ElemFieldTypeMismatch { elem, field } => {
+                write!(
+                    f,
+                    "element segment type {elem:?} does not match array field type {field:?}"
+                )
+            }
+            ValidationErrorKind::ArrayNotNumOrVec { idx } => {
+                write!(f, "array type {} is not numeric or vector", idx.0)
+            }
+            ValidationErrorKind::ArrayStorageMismatch { dst, src } => {
+                write!(
+                    f,
+                    "array types do not match: destination {} source {}",
+                    dst.0, src.0
+                )
+            }
+            ValidationErrorKind::ResourceLimitExceeded { what } => {
+                write!(f, "resource limit exceeded while validating {what}")
+            }
         }
     }
 }
 
 impl From<DecodeError> for ValidationErrorKind {
     fn from(error: DecodeError) -> Self {
-        Self::Decode {
-            context: error.context,
-            kind: error.kind,
+        match error.kind {
+            // A refused allocation while decoding is a resource limit, not a
+            // malformed-input error: surface it as the shared refusal so the
+            // whole validate path reports one resource-limit idiom (resource
+            // discipline, never an allocation abort).
+            DecodeErrorKind::ResourceLimitExceeded => Self::ResourceLimitExceeded {
+                what: "decoded instructions",
+            },
+            kind => Self::Decode {
+                context: error.context,
+                kind,
+            },
         }
     }
 }

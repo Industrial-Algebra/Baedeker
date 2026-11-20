@@ -8,6 +8,7 @@
 
 use alloc::vec::Vec;
 
+use crate::binary::instr::decode_const_expr_bytes;
 use crate::binary::leb128::{self, Cursor};
 use crate::binary::section::RawSection;
 use crate::error::{ByteOffset, DecodeContext, DecodeError, DecodeErrorKind};
@@ -117,22 +118,18 @@ fn parse_data_segment<'a>(
     }
 }
 
+/// Parse a data segment's offset/init expression, returning its raw bytes
+/// (including the terminating `end`).
+///
+/// The boundary comes from the shared instruction walk, never from scanning
+/// for the first `0x0B`: GC-era constant expressions (`array.new_fixed` with
+/// many operands, `struct.new` with wide field values) contain `0x0B` bytes
+/// inside immediates, which a raw scan truncates.
 fn parse_init_expr<'a>(
     cursor: &mut Cursor<'a>,
     base_offset: usize,
 ) -> Result<&'a [u8], DecodeError> {
-    let start = cursor.position();
-    loop {
-        let pos = cursor.position();
-        let byte = cursor.read_byte().map_err(|_| DecodeError {
-            offset: ByteOffset(base_offset + pos),
-            context: DecodeContext::DataSection,
-            kind: DecodeErrorKind::UnexpectedEof,
-        })?;
-        if byte == 0x0B {
-            return Ok(&cursor.original()[start..cursor.position()]);
-        }
-    }
+    decode_const_expr_bytes(cursor, base_offset, DecodeContext::DataSection)
 }
 
 fn parse_byte_vec<'a>(
@@ -191,6 +188,64 @@ mod tests {
             } => {
                 assert_eq!(*memory, MemIdx(0));
                 assert_eq!(*offset_expr, &[0x41, 0x00, 0x0B]);
+            }
+            DataMode::Passive => panic!("expected active"),
+        }
+        assert_eq!(segments[0].init, &[0xAA, 0xBB]);
+    }
+
+    /// The offset expression's boundary is found by decoding instructions, not
+    /// by scanning for the first `0x0B`: `i32.const 11` encodes as
+    /// `0x41 0x0B`, and the `0x0B` is an OPERAND byte, not the terminator.
+    /// (The old scan truncated the expression there and then read the real
+    /// terminator as the payload length — the `unexpected end of input`
+    /// decode failure the U4 smith campaign recorded on seeds 36/89/275.)
+    #[test]
+    fn offset_expr_operand_byte_0x0b_is_not_a_terminator() {
+        // count=1, flag=0, i32.const 11, end, len=2, "ab"
+        let section = raw_data_section(&[0x01, 0x00, 0x41, 0x0B, 0x0B, 0x02, b'a', b'b']);
+        let segments = parse_data_section(&section).unwrap();
+        assert_eq!(segments.len(), 1);
+        match &segments[0].mode {
+            DataMode::Active { offset_expr, .. } => {
+                assert_eq!(*offset_expr, &[0x41, 0x0B, 0x0B]);
+            }
+            DataMode::Passive => panic!("expected active"),
+        }
+        assert_eq!(segments[0].init, b"ab");
+    }
+
+    /// A GC-era constant expression with wide immediates is sized correctly:
+    /// `array.new_fixed $t 100` with 100 `i32.const 11` operands. Every
+    /// operand carries a `0x0B` payload byte, so a raw scan would stop inside
+    /// the first operand.
+    ///
+    /// A data-segment offset must type-check to `i32`, so this is a DECODER
+    /// boundary test (validation is a separate stage and rejects the offset);
+    /// the same expression appears as a valid element-segment initializer in
+    /// `elemsec`'s `expr_vec` path.
+    #[test]
+    fn array_new_fixed_length_100_offset_expr_is_sized_correctly() {
+        let mut bytes = alloc::vec![0x01u8, 0x00]; // count=1, flag=0 (active, memory 0)
+        for _ in 0..100 {
+            bytes.extend_from_slice(&[0x41, 0x0B]); // i32.const 11
+        }
+        bytes.extend_from_slice(&[0xFB, 0x08, 0x00, 0x64]); // array.new_fixed $t=0, n=100
+        bytes.push(0x0B); // end
+        let expr_len = bytes.len() - 2;
+        bytes.extend_from_slice(&[0x02, 0xAA, 0xBB]); // payload len=2
+
+        let section = raw_data_section(&bytes);
+        let segments = parse_data_section(&section).unwrap();
+        assert_eq!(segments.len(), 1);
+        match &segments[0].mode {
+            DataMode::Active { offset_expr, .. } => {
+                assert_eq!(offset_expr.len(), expr_len);
+                assert_eq!(offset_expr[expr_len - 1], 0x0B);
+                assert_eq!(
+                    &offset_expr[expr_len - 5..expr_len - 1],
+                    &[0xFB, 0x08, 0x00, 0x64]
+                );
             }
             DataMode::Passive => panic!("expected active"),
         }

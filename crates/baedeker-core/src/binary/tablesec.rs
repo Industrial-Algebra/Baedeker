@@ -73,7 +73,8 @@ fn parse_table_type(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Table
             match instr {
                 crate::binary::instr::Instr::Block(_)
                 | crate::binary::instr::Instr::Loop(_)
-                | crate::binary::instr::Instr::If(_) => block_depth += 1,
+                | crate::binary::instr::Instr::If(_)
+                | crate::binary::instr::Instr::TryTable(_) => block_depth += 1,
                 crate::binary::instr::Instr::End => {
                     if block_depth == 0 {
                         break;
@@ -119,14 +120,40 @@ fn parse_limits(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Limits, D
     match tag {
         0x00 => {
             let min = decode_u32_in_section(cursor, base_offset)?;
-            Ok(Limits { min, max: None })
+            Ok(Limits {
+                min: u64::from(min),
+                max: None,
+                is64: false,
+                shared: false,
+            })
         }
         0x01 => {
             let min = decode_u32_in_section(cursor, base_offset)?;
             let max = decode_u32_in_section(cursor, base_offset)?;
             Ok(Limits {
+                min: u64::from(min),
+                max: Some(u64::from(max)),
+                is64: false,
+                shared: false,
+            })
+        }
+        0x04 => {
+            let min = decode_u64_in_section(cursor, base_offset)?;
+            Ok(Limits {
+                min,
+                max: None,
+                is64: true,
+                shared: false,
+            })
+        }
+        0x05 => {
+            let min = decode_u64_in_section(cursor, base_offset)?;
+            let max = decode_u64_in_section(cursor, base_offset)?;
+            Ok(Limits {
                 min,
                 max: Some(max),
+                is64: true,
+                shared: false,
             })
         }
         _ => Err(DecodeError {
@@ -142,6 +169,14 @@ fn parse_limits(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<Limits, D
 
 fn decode_u32_in_section(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<u32, DecodeError> {
     leb128::decode_u32(cursor).map_err(|mut e| {
+        e.context = DecodeContext::TableSection;
+        e.offset = ByteOffset(base_offset + e.offset.0);
+        e
+    })
+}
+
+fn decode_u64_in_section(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<u64, DecodeError> {
+    leb128::decode_u64(cursor).map_err(|mut e| {
         e.context = DecodeContext::TableSection;
         e.offset = ByteOffset(base_offset + e.offset.0);
         e
@@ -190,11 +225,11 @@ mod tests {
 
     #[test]
     fn reject_unknown_ref_type() {
-        let section = raw_table_section(&[0x01, 0x6E, 0x00, 0x01]);
+        let section = raw_table_section(&[0x01, 0x68, 0x00, 0x01]);
         let err = parse_table_section(&section).unwrap_err();
         assert!(matches!(
             err.kind,
-            DecodeErrorKind::UnknownRefType { byte: 0x6E }
+            DecodeErrorKind::UnknownRefType { byte: 0x68 }
         ));
     }
 

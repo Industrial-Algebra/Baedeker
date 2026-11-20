@@ -9,7 +9,7 @@ Baedeker is a Rust workspace published to crates.io:
 
 ```toml
 [dependencies]
-baedeker-core = "0.1"
+baedeker-core = "0.2"
 ```
 
 For a command-line harness, install the CLI:

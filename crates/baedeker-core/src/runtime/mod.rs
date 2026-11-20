@@ -9,6 +9,7 @@
 
 use alloc::{string::String, vec::Vec};
 
+mod gcheap;
 mod store;
 mod table;
 
@@ -18,13 +19,25 @@ pub mod verify;
 
 pub use table::Table;
 
-pub use host::{HostFunction, link_func};
-pub use store::{Imports, LinkGroup, PAGE_SIZE, Store};
-
-use crate::lower::{
-    BinaryOp, LaneShape, Reg, RegFunc, RegInstr, RegModule, RegOp, RegTerm, UnaryOp, V128BinaryKind,
+pub use gcheap::{
+    Ext, GcHeap, GcObject, GcSnapshot, GcStats, GcTypeId, GcTypeKind, HeapId, ObjectId,
 };
-use crate::types::{FuncIdx, MemArg, NumType, RefType, TableIdx, ValType};
+pub use host::{HostFunction, link_func};
+pub use store::{
+    ExceptionRecord, ExpandedComp, ExpandedField, ExpandedFunc, ExpandedStorage, ExpandedVal,
+    Imports, LinkGroup, PAGE_SIZE, RecProvenance, Store, TagBinding,
+};
+
+use crate::binary::instr::AtomicRmw;
+use crate::lower::{
+    BinaryOp, GcExt, LaneShape, Reg, RegFunc, RegInstr, RegModule, RegOp, RegTerm, UnaryOp,
+    V128BinaryKind, V128CompareKind, V128ConvertKind, V128FloatUnaryKind, V128ShiftKind,
+    V128UnaryKind,
+};
+use crate::runtime::gcheap::storage_width;
+use crate::types::{
+    CompType, FuncIdx, HeapType, MemArg, NumType, RefType, StorageType, TableIdx, TypeIdx, ValType,
+};
 
 /// A runtime WebAssembly value.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -41,9 +54,46 @@ pub enum Value {
     /// An external reference value from the host: either null or a
     /// host-assigned index.
     ExternRef(Option<u32>),
+    /// An internalized host reference: a raw extern reference re-tagged
+    /// into the any hierarchy by `any.convert_extern`. Carries the same host
+    /// handle as [`Value::ExternRef`]; conversions are immediate re-tags and
+    /// never allocate a heap entry.
+    HostAny(Option<u32>),
+    /// An externalized GC-domain value: a struct/array/i31 reference re-tagged
+    /// into the extern hierarchy by `extern.convert_any`. Carries the GC
+    /// payload as-is so the reverse conversion is an exact identity;
+    /// conversions are immediate re-tags and never allocate a heap entry.
+    ExternGc(Option<ExternPayload>),
     /// A 128-bit vector, stored as raw little-endian bytes; lane
     /// interpretation happens per operation.
     V128([u8; 16]),
+    /// An exception reference: `None` is null; `Some(idx)` indexes the
+    /// store's exception arena. Arena records live as long as the store.
+    ExnRef(Option<u32>),
+    /// A GC aggregate reference: the process-unique id of the never-free
+    /// [`GcHeap`] that created it plus an index into that heap's object
+    /// table. Copies freely (no `Rc`); null GC references use the
+    /// reference-kind null of the static type.
+    GcRef {
+        heap: HeapId,
+        id: ObjectId,
+    },
+    /// A 31-bit immediate integer (`ref.i31`). The payload is masked to
+    /// 31 bits; `I31` never allocates a heap object.
+    I31(i32),
+}
+
+/// The GC-domain payload carried by an externalized [`Value::ExternGc`].
+///
+/// A struct/array reference stores its owning heap plus object id; an i31
+/// stores its 31-bit payload. Both survive an
+/// `extern.convert_any`/`any.convert_extern` roundtrip unchanged.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ExternPayload {
+    /// A `GcRef` object: owning heap plus object index.
+    Gc(HeapId, ObjectId),
+    /// An i31 immediate payload.
+    I31(i32),
 }
 
 impl Value {
@@ -55,7 +105,12 @@ impl Value {
             Value::F64(_) => ValType::Num(NumType::F64),
             Value::FuncRef(_) => ValType::Ref(RefType::FuncRef),
             Value::ExternRef(_) => ValType::Ref(RefType::ExternRef),
+            Value::HostAny(_) => ValType::Ref(RefType::from_parts(true, HeapType::Any)),
+            Value::ExternGc(_) => ValType::Ref(RefType::ExternRef),
             Value::V128(_) => ValType::Vec(crate::types::VecType::V128),
+            Value::ExnRef(_) => ValType::Ref(RefType::from_parts(true, HeapType::Exn)),
+            Value::GcRef { .. } => ValType::Ref(RefType::from_parts(true, HeapType::Any)),
+            Value::I31(_) => ValType::Ref(RefType::from_parts(false, HeapType::I31)),
         }
     }
 }
@@ -76,6 +131,11 @@ pub enum RuntimeErrorKind {
     TypeMismatch {
         expected: ValType,
         found: ValType,
+    },
+    /// `ref.cast` failed: the value did not match the target reference type.
+    /// The message begins with `"cast failure, expected "` per the pin.
+    CastFailure {
+        expected: RefType,
     },
     Trap(RuntimeTrap),
     UninitializedLocal {
@@ -138,6 +198,12 @@ pub enum RuntimeErrorKind {
     UnknownType {
         type_idx: u32,
     },
+    /// A GC reference named a heap this store has no handle for. A clean
+    /// runtime error: a foreign reference whose provider heap was never
+    /// registered must never be misindexed against the local heap.
+    GcHeapNotFound {
+        heap: u64,
+    },
     ImportedMemoryAccessUnsupported {
         memory: u32,
     },
@@ -154,6 +220,28 @@ pub enum RuntimeErrorKind {
     Gpu(crate::runtime::gpu::GpuError),
     MissingStore,
     MissingReturn,
+    /// A wasm exception is in flight (arena index into the store).
+    /// Never crosses the host boundary: `execute_export` converts an
+    /// escaping `Throw` into `UncaughtException`.
+    Throw {
+        exn: u32,
+    },
+    /// An exception escaped to the host. `exn` is the arena index when a
+    /// store backs execution; `None` when a storeless execution threw.
+    UncaughtException {
+        exn: Option<u32>,
+    },
+}
+
+impl core::fmt::Display for RuntimeErrorKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Throw { .. } => write!(f, "exception in flight"),
+            Self::UncaughtException { .. } => write!(f, "uncaught exception"),
+            Self::CastFailure { expected } => write!(f, "cast failure, expected {expected:?}"),
+            other => write!(f, "{other:?}"),
+        }
+    }
 }
 
 /// WebAssembly runtime traps surfaced by the interpreter.
@@ -171,6 +259,20 @@ pub enum RuntimeTrap {
     InvalidConversionToInteger,
     NullFunctionReference,
     NullReference,
+    /// `struct.get`/`struct.set` on a null structure reference.
+    NullStructReference,
+    /// A struct/array access on a null array reference.
+    NullArrayReference,
+    /// `i31.get_s`/`i31.get_u` on a null i31 reference.
+    NullI31Reference,
+    /// An array index/range out of bounds (`out of bounds array access`).
+    OutOfBoundsArrayAccess,
+    /// An atomic access whose effective address is not naturally aligned
+    /// (`unaligned atomic memory access`, pin `eval.ml:140-142`).
+    UnalignedAtomicMemoryAccess,
+    /// `memory.atomic.wait*` on a memory that is not shared
+    /// (`expected shared memory`, pin `eval.ml:144-147`).
+    ExpectedSharedMemory,
 }
 
 impl RuntimeTrap {
@@ -189,6 +291,12 @@ impl RuntimeTrap {
             RuntimeTrap::InvalidConversionToInteger => "invalid conversion to integer",
             RuntimeTrap::NullFunctionReference => "null function reference",
             RuntimeTrap::NullReference => "null reference",
+            RuntimeTrap::NullStructReference => "null structure reference",
+            RuntimeTrap::NullArrayReference => "null array reference",
+            RuntimeTrap::NullI31Reference => "null i31 reference",
+            RuntimeTrap::OutOfBoundsArrayAccess => "out of bounds array access",
+            RuntimeTrap::UnalignedAtomicMemoryAccess => "unaligned atomic memory access",
+            RuntimeTrap::ExpectedSharedMemory => "expected shared memory",
         }
     }
 }
@@ -229,7 +337,12 @@ pub fn execute_export(
             kind: RuntimeErrorKind::ExportedFunctionNotLowered { func: func_idx.0 },
         })?;
 
-    execute_func_in(Some(module), Some(store), func, args, 0)
+    execute_func_in(Some(module), Some(store), func, args, 0).map_err(|error| match error.kind {
+        RuntimeErrorKind::Throw { exn } => RuntimeError {
+            kind: RuntimeErrorKind::UncaughtException { exn: Some(exn) },
+        },
+        _ => error,
+    })
 }
 
 /// Resolve and invoke a direct call target.
@@ -268,7 +381,7 @@ fn execute_call_indirect(
     store: Option<&Store>,
     type_idx: &crate::types::TypeIdx,
     table: &TableIdx,
-    idx: u32,
+    idx: u64,
     call_args: &[Value],
     depth: usize,
 ) -> Result<Vec<Value>, RuntimeError> {
@@ -278,23 +391,7 @@ fn execute_call_indirect(
     let store = store.ok_or(RuntimeError {
         kind: RuntimeErrorKind::MissingStore,
     })?;
-    let target = store
-        .with_table(table.0, |table| table.get(idx))
-        .ok_or(RuntimeError {
-            kind: RuntimeErrorKind::UnknownTable { table: table.0 },
-        })?
-        .ok_or(trap(RuntimeTrap::UndefinedElement))?;
-    let Value::FuncRef(func_idx) = target else {
-        return Err(RuntimeError {
-            kind: RuntimeErrorKind::TypeMismatch {
-                expected: ValType::Ref(RefType::FuncRef),
-                found: target.val_type(),
-            },
-        });
-    };
-    let Some((instance_id, func_idx)) = func_idx else {
-        return Err(trap(RuntimeTrap::UninitializedElement));
-    };
+    let (instance_id, func_idx) = table_lookup_target(Some(store), table, idx)?;
     execute_funcref(
         module,
         store,
@@ -356,6 +453,21 @@ fn execute_funcref(
     call_args: &[Value],
     depth: usize,
 ) -> Result<Vec<Value>, RuntimeError> {
+    // The declared type index belongs to the CALLER's module — resolve the
+    // expected signature before any remote-module shadowing. A
+    // cross-instance target must be checked structurally against the
+    // caller's declared type, whatever the remote module's own type
+    // numbering is.
+    if module.types.get(type_idx.0 as usize).is_none() {
+        return Err(RuntimeError {
+            kind: RuntimeErrorKind::UnknownType {
+                type_idx: type_idx.0,
+            },
+        });
+    }
+    // The caller's type section, for structural cross-module comparison.
+    let caller_type_defs = &module.type_defs;
+    let caller_rec_groups = &module.rec_groups;
     if instance_id != store.instance_id() {
         // Cross-instance funcref: resolve through the link group and execute
         // against the owning instance (structural type check against the
@@ -376,37 +488,38 @@ fn execute_funcref(
             };
             (module.clone(), store.clone())
         };
-        let expected = module.types.get(type_idx.0 as usize).ok_or(RuntimeError {
-            kind: RuntimeErrorKind::UnknownType {
-                type_idx: type_idx.0,
-            },
-        })?;
-        let actual = if func_idx < module.imported_func_count {
-            &module
+        // The target's own type entry, in ITS module's index space.
+        let actual_idx = if func_idx < module.imported_func_count {
+            module
                 .imported_funcs
                 .get(func_idx as usize)
                 .ok_or(RuntimeError {
                     kind: RuntimeErrorKind::UnknownFunction { func: func_idx },
                 })?
-                .ty
+                .type_idx
         } else {
-            let callee = module
+            module
                 .funcs
                 .iter()
                 .find(|func| func.idx.0 == func_idx)
                 .ok_or(RuntimeError {
                     kind: RuntimeErrorKind::UnknownFunction { func: func_idx },
-                })?;
-            module
-                .types
-                .get(callee.type_idx.0 as usize)
-                .ok_or(RuntimeError {
-                    kind: RuntimeErrorKind::UnknownType {
-                        type_idx: callee.type_idx.0,
-                    },
                 })?
+                .type_idx
         };
-        if expected != actual {
+        // `match_deftype`: the target's type entry must be canonically the
+        // caller's declared one — cross-module closed-form identity, not a
+        // raw local-index comparison, so structurally identical types at
+        // different indices (iso-recursive groups included) match while
+        // different rec-group shapes do not.
+        if !crate::types::defined_type_matches(
+            &module.type_defs,
+            &module.rec_groups,
+            actual_idx,
+            caller_type_defs,
+            caller_rec_groups,
+            *type_idx,
+        ) {
             return Err(trap(RuntimeTrap::IndirectCallTypeMismatch));
         }
         let target_store = target_store.borrow();
@@ -432,20 +545,22 @@ fn execute_funcref(
     // Structural type check: the callee's type must match the declared
     // one — for imported targets, the import declaration's type; for
     // defined targets, the function's type entry.
-    let expected = module.types.get(type_idx.0 as usize).ok_or(RuntimeError {
-        kind: RuntimeErrorKind::UnknownType {
-            type_idx: type_idx.0,
-        },
-    })?;
     if func_idx < module.imported_func_count {
-        let import_ty = &module
+        let import_idx = module
             .imported_funcs
             .get(func_idx as usize)
             .ok_or(RuntimeError {
                 kind: RuntimeErrorKind::UnknownFunction { func: func_idx },
             })?
-            .ty;
-        if expected != import_ty {
+            .type_idx;
+        if !crate::types::defined_type_matches(
+            &module.type_defs,
+            &module.rec_groups,
+            import_idx,
+            &module.type_defs,
+            &module.rec_groups,
+            *type_idx,
+        ) {
             return Err(trap(RuntimeTrap::IndirectCallTypeMismatch));
         }
         // Indirect call targeting an imported function: host dispatch.
@@ -458,15 +573,14 @@ fn execute_funcref(
         .ok_or(RuntimeError {
             kind: RuntimeErrorKind::UnknownFunction { func: func_idx },
         })?;
-    let actual = module
-        .types
-        .get(callee.type_idx.0 as usize)
-        .ok_or(RuntimeError {
-            kind: RuntimeErrorKind::UnknownType {
-                type_idx: callee.type_idx.0,
-            },
-        })?;
-    if expected != actual {
+    if !crate::types::defined_type_matches(
+        &module.type_defs,
+        &module.rec_groups,
+        callee.type_idx,
+        &module.type_defs,
+        &module.rec_groups,
+        *type_idx,
+    ) {
         return Err(trap(RuntimeTrap::IndirectCallTypeMismatch));
     }
     execute_func_in(Some(module), Some(store), callee, call_args, depth + 1)
@@ -486,6 +600,261 @@ pub fn execute_func(func: &RegFunc, args: &[Value]) -> Result<Vec<Value>, Runtim
     execute_func_in(None, None, func, args, 0)
 }
 
+/// A resolved tail-call target: `Defined` transfers control to a
+/// same-instance function at the current depth (trampoline hop); `Ready`
+/// carries the final results (host target, or cross-instance delegation
+/// which recurses depth + 1 as before).
+enum TailTarget<'a> {
+    Defined(&'a RegFunc),
+    Ready(Vec<Value>),
+}
+
+/// Resolve a direct `return_call` target. Direct indices are module-local,
+/// so the target is either a host import (dispatched immediately) or a
+/// same-instance defined function (trampoline hop).
+fn resolve_tail_direct<'a>(
+    module: Option<&'a RegModule>,
+    store: Option<&Store>,
+    callee_idx: &FuncIdx,
+    call_args: &[Value],
+) -> Result<TailTarget<'a>, RuntimeError> {
+    let module = module.ok_or(RuntimeError {
+        kind: RuntimeErrorKind::UnknownFunction { func: callee_idx.0 },
+    })?;
+    if callee_idx.0 < module.imported_func_count {
+        // Tail call to an imported function: dispatch to the host; its
+        // results are the tail-call results.
+        let store = store.ok_or(RuntimeError {
+            kind: RuntimeErrorKind::MissingStore,
+        })?;
+        return Ok(TailTarget::Ready(store.call_host(callee_idx.0, call_args)?));
+    }
+    let callee = module
+        .funcs
+        .iter()
+        .find(|func| func.idx == *callee_idx)
+        .ok_or(RuntimeError {
+            kind: RuntimeErrorKind::UnknownFunction { func: callee_idx.0 },
+        })?;
+    Ok(TailTarget::Defined(callee))
+}
+
+/// Resolve an indirect/ref tail-call target. Host targets and cross-instance
+/// targets are executed immediately (results in `Ready`); same-instance
+/// defined targets transfer via the trampoline (`Defined`).
+#[allow(clippy::too_many_arguments)]
+fn resolve_tail_funcref<'a>(
+    module: Option<&'a RegModule>,
+    store: Option<&Store>,
+    type_idx: &crate::types::TypeIdx,
+    instance_id: u32,
+    func_idx: u32,
+    call_args: &[Value],
+    depth: usize,
+) -> Result<TailTarget<'a>, RuntimeError> {
+    let module = module.ok_or(RuntimeError {
+        kind: RuntimeErrorKind::UnknownFunction { func: 0 },
+    })?;
+    let store = store.ok_or(RuntimeError {
+        kind: RuntimeErrorKind::MissingStore,
+    })?;
+    if instance_id != store.instance_id() {
+        // Cross-instance tail target: delegate to the existing funcref path
+        // (structural type check against the remote module, depth + 1).
+        let results = execute_funcref(
+            module,
+            store,
+            type_idx,
+            instance_id,
+            func_idx,
+            call_args,
+            depth,
+        )?;
+        return Ok(TailTarget::Ready(results));
+    }
+    // Same instance: structural type check first (mirrors `execute_funcref`).
+    if module.types.get(type_idx.0 as usize).is_none() {
+        return Err(RuntimeError {
+            kind: RuntimeErrorKind::UnknownType {
+                type_idx: type_idx.0,
+            },
+        });
+    }
+    if func_idx < module.imported_func_count {
+        let import_idx = module
+            .imported_funcs
+            .get(func_idx as usize)
+            .ok_or(RuntimeError {
+                kind: RuntimeErrorKind::UnknownFunction { func: func_idx },
+            })?
+            .type_idx;
+        if !crate::types::defined_type_matches(
+            &module.type_defs,
+            &module.rec_groups,
+            import_idx,
+            &module.type_defs,
+            &module.rec_groups,
+            *type_idx,
+        ) {
+            return Err(trap(RuntimeTrap::IndirectCallTypeMismatch));
+        }
+        return Ok(TailTarget::Ready(store.call_host(func_idx, call_args)?));
+    }
+    let callee = module
+        .funcs
+        .iter()
+        .find(|func| func.idx.0 == func_idx)
+        .ok_or(RuntimeError {
+            kind: RuntimeErrorKind::UnknownFunction { func: func_idx },
+        })?;
+    if !crate::types::defined_type_matches(
+        &module.type_defs,
+        &module.rec_groups,
+        callee.type_idx,
+        &module.type_defs,
+        &module.rec_groups,
+        *type_idx,
+    ) {
+        return Err(trap(RuntimeTrap::IndirectCallTypeMismatch));
+    }
+    Ok(TailTarget::Defined(callee))
+}
+
+/// Look up an indirect-call target in a table: `(instance_id, func_idx)`.
+fn table_lookup_target(
+    store: Option<&Store>,
+    table: &TableIdx,
+    idx: u64,
+) -> Result<(u32, u32), RuntimeError> {
+    let store = store.ok_or(RuntimeError {
+        kind: RuntimeErrorKind::MissingStore,
+    })?;
+    let target = store
+        .with_table(table.0, |table| table.get(idx))
+        .ok_or(RuntimeError {
+            kind: RuntimeErrorKind::UnknownTable { table: table.0 },
+        })?
+        .ok_or(trap(RuntimeTrap::UndefinedElement))?;
+    let Value::FuncRef(func_idx) = target else {
+        return Err(RuntimeError {
+            kind: RuntimeErrorKind::TypeMismatch {
+                expected: ValType::Ref(RefType::FuncRef),
+                found: target.val_type(),
+            },
+        });
+    };
+    let Some((instance_id, func_idx)) = func_idx else {
+        return Err(trap(RuntimeTrap::UninitializedElement));
+    };
+    Ok((instance_id, func_idx))
+}
+
+/// What a matched catch clause delivers into its destination registers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CatchDelivery {
+    /// `catch_all`: the payload and exnref are discarded.
+    None,
+    /// `catch`: the tag payload only.
+    Payload,
+    /// `catch_ref`: the tag payload followed by the exnref.
+    PayloadAndExn,
+    /// `catch_all_ref`: the exnref only.
+    ExnOnly,
+}
+
+/// Find the innermost protected region containing `block_idx` whose catch
+/// clauses match the in-flight exception, and describe the landing.
+/// `None` = not caught in this frame.
+///
+/// Regions are consulted innermost-first: a clause of a nested `try_table`
+/// takes precedence over an enclosing one's, but an enclosing region is
+/// still consulted when the nested region has no matching clause.
+fn consult_catch<'a>(
+    func: &'a RegFunc,
+    block_idx: u32,
+    exn_idx: u32,
+    store: &Store,
+) -> Option<(u32, &'a [Reg], CatchDelivery)> {
+    let record = store.exception(exn_idx)?;
+    let mut regions: Vec<&crate::lower::ProtectedRegion> = func
+        .regions
+        .iter()
+        .filter(|r| r.first_block <= block_idx && block_idx < r.end_block)
+        .collect();
+    regions.sort_by_key(|r| core::cmp::Reverse(r.first_block));
+    for region in regions {
+        for catch in &region.catches {
+            let delivery = match catch.tag {
+                // catch_all discards the payload; catch_all_ref keeps only
+                // the exnref (its destination is a single register).
+                None => {
+                    if catch.dst_regs.is_empty() {
+                        CatchDelivery::None
+                    } else {
+                        CatchDelivery::ExnOnly
+                    }
+                }
+                Some(tag) => {
+                    let Some(binding) = store.tag_binding(tag.0) else {
+                        continue;
+                    };
+                    if record.tag != binding.identity {
+                        continue;
+                    }
+                    if catch.dst_regs.len() == record.payload.len() + 1 {
+                        CatchDelivery::PayloadAndExn
+                    } else {
+                        CatchDelivery::Payload
+                    }
+                }
+            };
+            return Some((catch.target_block, &catch.dst_regs[..], delivery));
+        }
+    }
+    None
+}
+
+/// Write the landing: payload and/or exnref into dst_regs, set block_idx.
+fn land_catch(
+    registers: &mut [Option<Value>],
+    target: u32,
+    dst_regs: &[Reg],
+    exn_idx: u32,
+    delivery: CatchDelivery,
+    store: &Store,
+    block_idx: &mut u32,
+) -> Result<(), RuntimeError> {
+    let record = store.exception(exn_idx).ok_or(RuntimeError {
+        kind: RuntimeErrorKind::MissingReturn,
+    })?; // arena invariant
+    match delivery {
+        CatchDelivery::None => {}
+        CatchDelivery::ExnOnly => {
+            debug_assert_eq!(dst_regs.len(), 1, "catch_all_ref writes one exnref");
+            set_reg(registers, dst_regs[0], Value::ExnRef(Some(exn_idx)))?;
+        }
+        CatchDelivery::Payload => {
+            debug_assert_eq!(dst_regs.len(), record.payload.len());
+            for (&reg, &value) in dst_regs.iter().zip(record.payload.iter()) {
+                set_reg(registers, reg, value)?;
+            }
+        }
+        CatchDelivery::PayloadAndExn => {
+            debug_assert_eq!(dst_regs.len(), record.payload.len() + 1);
+            for (&reg, &value) in dst_regs.iter().zip(record.payload.iter()) {
+                set_reg(registers, reg, value)?;
+            }
+            set_reg(
+                registers,
+                dst_regs[record.payload.len()],
+                Value::ExnRef(Some(exn_idx)),
+            )?;
+        }
+    }
+    *block_idx = target;
+    Ok(())
+}
+
 /// Execute a function with optional module context for resolving `call`
 /// targets and optional store context for memory/global access, tracking
 /// recursion depth for stack exhaustion.
@@ -499,82 +868,98 @@ pub(crate) fn execute_func_in(
     if depth >= MAX_CALL_DEPTH {
         return Err(trap(RuntimeTrap::CallStackExhausted));
     }
-    if args.len() != func.params.len() {
-        return Err(RuntimeError {
-            kind: RuntimeErrorKind::ArityMismatch {
-                expected: func.params.len(),
-                found: args.len(),
-            },
-        });
-    }
 
-    for (&arg, &expected) in args.iter().zip(func.params.iter()) {
-        if !value_satisfies(expected, arg) {
+    // Tail-call trampoline: `return_call*` terminators replace the current
+    // frame at the same depth instead of recursing, keeping tail recursion
+    // stack-safe. `func`/`args` are reassigned per hop; `module`/`store`
+    // stay fixed — cross-instance tail targets delegate through
+    // `resolve_tail_funcref` with depth + 1 (correct, depth-bounded).
+    let mut func = func;
+    let mut owned_args: Vec<Value> = Vec::new();
+    let mut use_owned_args = false;
+    // Backstop against true infinite loops when no fuel budget is set (the
+    // coarse guard predates configurable fuel; with fuel, exhaustion is the
+    // honest `FuelExhausted` error instead of `MissingReturn`, so the cap is
+    // skipped entirely while a budget is active). The cap spans tail hops:
+    // an unbounded no-fuel tail loop is still bounded.
+    let max_iterations = 10_000_000;
+    let mut iteration: usize = 0;
+
+    'tail: loop {
+        let args: &[Value] = if use_owned_args { &owned_args } else { args };
+        if args.len() != func.params.len() {
             return Err(RuntimeError {
-                kind: RuntimeErrorKind::TypeMismatch {
-                    expected,
-                    found: arg.val_type(),
+                kind: RuntimeErrorKind::ArityMismatch {
+                    expected: func.params.len(),
+                    found: args.len(),
                 },
             });
         }
-    }
 
-    let mut locals = alloc::vec![None; func.locals.len()];
-    for (idx, &arg) in args.iter().enumerate() {
-        locals[idx] = Some(arg);
-    }
-    // Non-parameter locals are zero-initialized per spec (null for
-    // nullable references).
-    for (slot, &ty) in locals.iter_mut().zip(func.locals.iter()).skip(args.len()) {
-        if slot.is_none() {
-            *slot = match ty {
-                ValType::Num(NumType::I32) => Some(Value::I32(0)),
-                ValType::Num(NumType::I64) => Some(Value::I64(0)),
-                ValType::Num(NumType::F32) => Some(Value::F32(0.0)),
-                ValType::Num(NumType::F64) => Some(Value::F64(0.0)),
-                ValType::Ref(ref_type) if ref_nullable(&ref_type) => {
-                    Some(ref_null_value(&ref_type))
-                }
-                ValType::Vec(_) => Some(Value::V128([0; 16])),
-                _ => None,
-            };
+        for (&arg, &expected) in args.iter().zip(func.params.iter()) {
+            if !value_satisfies(module, store, expected, arg) {
+                return Err(RuntimeError {
+                    kind: RuntimeErrorKind::TypeMismatch {
+                        expected,
+                        found: arg.val_type(),
+                    },
+                });
+            }
         }
-    }
 
-    let mut registers = alloc::vec![None; func.reg_types.len()];
+        // Frame storage is fallible too: an armed allocator must yield a
+        // clean refusal (never an abort) when a function's local or register
+        // array is large — e.g. a reachable `array.new_fixed` with a large
+        // operand count, whose operands are materialized as registers.
+        let mut locals: Vec<Option<Value>> = Vec::new();
+        locals
+            .try_reserve(func.locals.len())
+            .map_err(|_| frame_allocation_failed())?;
+        locals.resize(func.locals.len(), None);
+        for (idx, &arg) in args.iter().enumerate() {
+            locals[idx] = Some(arg);
+        }
+        // Non-parameter locals are zero-initialized per spec (null for
+        // nullable references).
+        for (slot, &ty) in locals.iter_mut().zip(func.locals.iter()).skip(args.len()) {
+            if slot.is_none() {
+                *slot = match ty {
+                    ValType::Num(NumType::I32) => Some(Value::I32(0)),
+                    ValType::Num(NumType::I64) => Some(Value::I64(0)),
+                    ValType::Num(NumType::F32) => Some(Value::F32(0.0)),
+                    ValType::Num(NumType::F64) => Some(Value::F64(0.0)),
+                    ValType::Ref(ref_type) if ref_nullable(&ref_type) => {
+                        Some(ref_null_value(&ref_type))
+                    }
+                    ValType::Vec(_) => Some(Value::V128([0; 16])),
+                    _ => None,
+                };
+            }
+        }
 
-    if func.blocks.is_empty() {
-        return Err(RuntimeError {
-            kind: RuntimeErrorKind::MissingReturn,
-        });
-    }
+        let mut registers: Vec<Option<Value>> = Vec::new();
+        registers
+            .try_reserve(func.reg_types.len())
+            .map_err(|_| frame_allocation_failed())?;
+        registers.resize(func.reg_types.len(), None);
 
-    let mut block_idx: u32 = 0;
-    // Backstop against true infinite loops when no fuel budget is set (the
-    // coarse guard predates configurable fuel; with fuel, exhaustion is the
-    // honest `FuelExhausted` error instead of `MissingReturn`).
-    let max_iterations = 10_000_000;
-    let mut iteration: usize = 0;
-    loop {
-        iteration += 1;
-        if iteration > max_iterations {
+        if func.blocks.is_empty() {
             return Err(RuntimeError {
                 kind: RuntimeErrorKind::MissingReturn,
             });
         }
-        if let Some(store) = store
-            && !store.charge_fuel()
-        {
-            return Err(RuntimeError {
-                kind: RuntimeErrorKind::FuelExhausted,
-            });
-        }
-        let block = func.blocks.get(block_idx as usize).ok_or(RuntimeError {
-            kind: RuntimeErrorKind::MissingReturn,
-        })?;
 
-        // Execute straight-line instructions in this block
-        for instr in &block.instrs {
+        let mut block_idx: u32 = 0;
+        'blocks: loop {
+            iteration += 1;
+            // The coarse backstop applies only when no fuel budget is set;
+            // with a budget, fuel exhaustion is the honest bound — a large
+            // budget must not surface as `MissingReturn` with fuel left.
+            if iteration > max_iterations && store.is_none_or(|store| store.fuel().is_none()) {
+                return Err(RuntimeError {
+                    kind: RuntimeErrorKind::MissingReturn,
+                });
+            }
             if let Some(store) = store
                 && !store.charge_fuel()
             {
@@ -582,155 +967,385 @@ pub(crate) fn execute_func_in(
                     kind: RuntimeErrorKind::FuelExhausted,
                 });
             }
-            if let RegOp::Call {
-                func: callee_idx,
-                args: arg_regs,
-                results,
-            } = &instr.op
-            {
-                let call_args = arg_regs
-                    .iter()
-                    .map(|&reg| get_reg(&registers, reg))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let returned = execute_call(module, store, callee_idx, &call_args, depth)?;
-                for (&dst, value) in results.iter().zip(returned) {
-                    set_reg(&mut registers, dst, value)?;
-                }
-            } else if let RegOp::CallIndirect {
-                type_idx,
-                table,
-                index,
-                args: arg_regs,
-                results,
-            } = &instr.op
-            {
-                let idx = expect_addr(get_reg(&registers, *index)?)?;
-                let call_args = arg_regs
-                    .iter()
-                    .map(|&reg| get_reg(&registers, reg))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let returned =
-                    execute_call_indirect(module, store, type_idx, table, idx, &call_args, depth)?;
-                for (&dst, value) in results.iter().zip(returned) {
-                    set_reg(&mut registers, dst, value)?;
-                }
-            } else if let RegOp::CallRef {
-                type_idx,
-                func,
-                args: arg_regs,
-                results,
-            } = &instr.op
-            {
-                let target = get_reg(&registers, *func)?;
-                let call_args = arg_regs
-                    .iter()
-                    .map(|&reg| get_reg(&registers, reg))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let returned =
-                    execute_call_ref(module, store, type_idx, target, &call_args, depth)?;
-                for (&dst, value) in results.iter().zip(returned) {
-                    set_reg(&mut registers, dst, value)?;
-                }
-            } else {
-                execute_reg_op(store, &mut registers, &mut locals, instr)?;
-            }
-        }
+            let block = func.blocks.get(block_idx as usize).ok_or(RuntimeError {
+                kind: RuntimeErrorKind::MissingReturn,
+            })?;
 
-        // Follow the terminator
-        match &block.term {
-            RegTerm::Return { values } => {
-                let mut results = Vec::with_capacity(values.len());
-                for &reg in values {
-                    results.push(get_reg(&registers, reg)?);
+            // Execute straight-line instructions in this block
+            for instr in &block.instrs {
+                if let Some(store) = store
+                    && !store.charge_fuel()
+                {
+                    return Err(RuntimeError {
+                        kind: RuntimeErrorKind::FuelExhausted,
+                    });
                 }
-                return Ok(results);
+                if let RegOp::Call {
+                    func: callee_idx,
+                    args: arg_regs,
+                    results,
+                } = &instr.op
+                {
+                    let call_args = read_reg_list(&registers, arg_regs)?;
+                    let returned = execute_call(module, store, callee_idx, &call_args, depth);
+                    let returned = match returned {
+                        Err(error) => {
+                            if let RuntimeErrorKind::Throw { exn } = &error.kind {
+                                let exn = *exn;
+                                match store.and_then(|s| consult_catch(func, block_idx, exn, s)) {
+                                    Some((target, dst_regs, delivery)) => {
+                                        land_catch(
+                                            &mut registers,
+                                            target,
+                                            dst_regs,
+                                            exn,
+                                            delivery,
+                                            store.expect("consult_catch requires a store"),
+                                            &mut block_idx,
+                                        )?;
+                                        continue 'blocks;
+                                    }
+                                    None => return Err(error),
+                                }
+                            }
+                            return Err(error);
+                        }
+                        Ok(returned) => returned,
+                    };
+                    for (&dst, value) in results.iter().zip(returned) {
+                        set_reg(&mut registers, dst, value)?;
+                    }
+                } else if let RegOp::CallIndirect {
+                    type_idx,
+                    table,
+                    index,
+                    args: arg_regs,
+                    results,
+                } = &instr.op
+                {
+                    let idx = read_addr(
+                        get_reg(&registers, *index)?,
+                        store
+                            .and_then(|s| s.table_type(table.0))
+                            .is_some_and(|ty| ty.limits.is64),
+                    )?;
+                    let call_args = read_reg_list(&registers, arg_regs)?;
+                    let returned = execute_call_indirect(
+                        module, store, type_idx, table, idx, &call_args, depth,
+                    );
+                    let returned = match returned {
+                        Err(error) => {
+                            if let RuntimeErrorKind::Throw { exn } = &error.kind {
+                                let exn = *exn;
+                                match store.and_then(|s| consult_catch(func, block_idx, exn, s)) {
+                                    Some((target, dst_regs, delivery)) => {
+                                        land_catch(
+                                            &mut registers,
+                                            target,
+                                            dst_regs,
+                                            exn,
+                                            delivery,
+                                            store.expect("consult_catch requires a store"),
+                                            &mut block_idx,
+                                        )?;
+                                        continue 'blocks;
+                                    }
+                                    None => return Err(error),
+                                }
+                            }
+                            return Err(error);
+                        }
+                        Ok(returned) => returned,
+                    };
+                    for (&dst, value) in results.iter().zip(returned) {
+                        set_reg(&mut registers, dst, value)?;
+                    }
+                } else if let RegOp::CallRef {
+                    type_idx,
+                    func: func_ref,
+                    args: arg_regs,
+                    results,
+                } = &instr.op
+                {
+                    let target = get_reg(&registers, *func_ref)?;
+                    let call_args = read_reg_list(&registers, arg_regs)?;
+                    let returned =
+                        execute_call_ref(module, store, type_idx, target, &call_args, depth);
+                    let returned = match returned {
+                        Err(error) => {
+                            if let RuntimeErrorKind::Throw { exn } = &error.kind {
+                                let exn = *exn;
+                                match store.and_then(|s| consult_catch(func, block_idx, exn, s)) {
+                                    Some((target, dst_regs, delivery)) => {
+                                        land_catch(
+                                            &mut registers,
+                                            target,
+                                            dst_regs,
+                                            exn,
+                                            delivery,
+                                            store.expect("consult_catch requires a store"),
+                                            &mut block_idx,
+                                        )?;
+                                        continue 'blocks;
+                                    }
+                                    None => return Err(error),
+                                }
+                            }
+                            return Err(error);
+                        }
+                        Ok(returned) => returned,
+                    };
+                    for (&dst, value) in results.iter().zip(returned) {
+                        set_reg(&mut registers, dst, value)?;
+                    }
+                } else {
+                    execute_reg_op(store, &mut registers, &mut locals, instr)?;
+                }
             }
-            RegTerm::IfFork {
-                cond,
-                then_block,
-                else_block,
-            } => {
-                let val = get_reg(&registers, *cond)?;
-                if let Value::I32(v) = val {
-                    if v != 0 {
-                        block_idx = *then_block;
+
+            // Follow the terminator
+            match &block.term {
+                RegTerm::Throw { tag, values } => {
+                    let payload = read_reg_list(&registers, values)?;
+                    let Some(store) = store else {
+                        return Err(RuntimeError {
+                            kind: RuntimeErrorKind::UncaughtException { exn: None },
+                        });
+                    };
+                    let identity = store
+                        .tag_binding(tag.0)
+                        .map(|binding| binding.identity)
+                        .unwrap_or_else(|| (store.instance_id(), tag.0));
+                    let exn = store.allocate_exception(identity, payload);
+                    match consult_catch(func, block_idx, exn, store) {
+                        Some((target, dst_regs, delivery)) => {
+                            land_catch(
+                                &mut registers,
+                                target,
+                                dst_regs,
+                                exn,
+                                delivery,
+                                store,
+                                &mut block_idx,
+                            )?;
+                            continue 'blocks;
+                        }
+                        None => {
+                            return Err(RuntimeError {
+                                kind: RuntimeErrorKind::Throw { exn },
+                            });
+                        }
+                    }
+                }
+                RegTerm::ThrowRef { exn } => {
+                    let value = get_reg(&registers, *exn)?;
+                    let idx = match value {
+                        Value::ExnRef(Some(idx)) => idx,
+                        // A null exnref rethrow traps; any other value is
+                        // unreachable given validation.
+                        _ => {
+                            return Err(trap(RuntimeTrap::NullReference));
+                        }
+                    };
+                    let Some(store) = store else {
+                        return Err(RuntimeError {
+                            kind: RuntimeErrorKind::UncaughtException { exn: None },
+                        });
+                    };
+                    match consult_catch(func, block_idx, idx, store) {
+                        Some((target, dst_regs, delivery)) => {
+                            land_catch(
+                                &mut registers,
+                                target,
+                                dst_regs,
+                                idx,
+                                delivery,
+                                store,
+                                &mut block_idx,
+                            )?;
+                            continue 'blocks;
+                        }
+                        None => {
+                            return Err(RuntimeError {
+                                kind: RuntimeErrorKind::Throw { exn: idx },
+                            });
+                        }
+                    }
+                }
+                RegTerm::Return { values } => {
+                    let results = read_reg_list(&registers, values)?;
+                    return Ok(results);
+                }
+                RegTerm::TailCall {
+                    func: callee_idx,
+                    args: arg_regs,
+                } => {
+                    let call_args = read_reg_list(&registers, arg_regs)?;
+                    match resolve_tail_direct(module, store, callee_idx, &call_args)? {
+                        TailTarget::Defined(callee) => {
+                            func = callee;
+                            owned_args = call_args;
+                            use_owned_args = true;
+                            continue 'tail;
+                        }
+                        TailTarget::Ready(results) => return Ok(results),
+                    }
+                }
+                RegTerm::TailCallIndirect {
+                    type_idx,
+                    table,
+                    index,
+                    args: arg_regs,
+                } => {
+                    let idx = read_addr(
+                        get_reg(&registers, *index)?,
+                        store
+                            .and_then(|s| s.table_type(table.0))
+                            .is_some_and(|ty| ty.limits.is64),
+                    )?;
+                    let call_args = read_reg_list(&registers, arg_regs)?;
+                    let (instance_id, target_func_idx) = table_lookup_target(store, table, idx)?;
+                    match resolve_tail_funcref(
+                        module,
+                        store,
+                        type_idx,
+                        instance_id,
+                        target_func_idx,
+                        &call_args,
+                        depth,
+                    )? {
+                        TailTarget::Defined(callee) => {
+                            func = callee;
+                            owned_args = call_args;
+                            use_owned_args = true;
+                            continue 'tail;
+                        }
+                        TailTarget::Ready(results) => return Ok(results),
+                    }
+                }
+                RegTerm::TailCallRef {
+                    type_idx,
+                    func: func_reg,
+                    args: arg_regs,
+                } => {
+                    let target = get_reg(&registers, *func_reg)?;
+                    let call_args = read_reg_list(&registers, arg_regs)?;
+                    let Value::FuncRef(func_idx) = target else {
+                        return Err(RuntimeError {
+                            kind: RuntimeErrorKind::TypeMismatch {
+                                expected: ValType::Ref(RefType::FuncRef),
+                                found: target.val_type(),
+                            },
+                        });
+                    };
+                    let Some((instance_id, target_func_idx)) = func_idx else {
+                        return Err(trap(RuntimeTrap::NullFunctionReference));
+                    };
+                    match resolve_tail_funcref(
+                        module,
+                        store,
+                        type_idx,
+                        instance_id,
+                        target_func_idx,
+                        &call_args,
+                        depth,
+                    )? {
+                        TailTarget::Defined(callee) => {
+                            func = callee;
+                            owned_args = call_args;
+                            use_owned_args = true;
+                            continue 'tail;
+                        }
+                        TailTarget::Ready(results) => return Ok(results),
+                    }
+                }
+                RegTerm::IfFork {
+                    cond,
+                    then_block,
+                    else_block,
+                } => {
+                    let val = get_reg(&registers, *cond)?;
+                    if let Value::I32(v) = val {
+                        if v != 0 {
+                            block_idx = *then_block;
+                        } else {
+                            block_idx = *else_block;
+                        }
                     } else {
                         block_idx = *else_block;
                     }
-                } else {
-                    block_idx = *else_block;
                 }
-            }
-            RegTerm::Br { target_block, .. } => {
-                block_idx = *target_block;
-            }
-            RegTerm::BrIf {
-                cond, target_block, ..
-            } => {
-                let val = get_reg(&registers, *cond)?;
-                if let Value::I32(v) = val {
-                    if v != 0 {
+                RegTerm::Br { target_block, .. } => {
+                    block_idx = *target_block;
+                }
+                RegTerm::BrIf {
+                    cond, target_block, ..
+                } => {
+                    let val = get_reg(&registers, *cond)?;
+                    if let Value::I32(v) = val {
+                        if v != 0 {
+                            block_idx = *target_block;
+                        } else {
+                            block_idx += 1;
+                        }
+                    } else {
+                        block_idx += 1;
+                    }
+                }
+                RegTerm::BrIfNull {
+                    value,
+                    target_block,
+                    ..
+                } => {
+                    let val = get_reg(&registers, *value)?;
+                    if is_null_ref(&val) {
                         block_idx = *target_block;
                     } else {
                         block_idx += 1;
                     }
-                } else {
+                }
+                RegTerm::BrIfNonNull {
+                    value,
+                    target_block,
+                    ..
+                } => {
+                    let val = get_reg(&registers, *value)?;
+                    if is_null_ref(&val) {
+                        block_idx += 1;
+                    } else {
+                        block_idx = *target_block;
+                    }
+                }
+                RegTerm::BrTable {
+                    index,
+                    targets,
+                    default,
+                    ..
+                } => {
+                    let val = get_reg(&registers, *index)?;
+                    // The index is read as u32: negative i32 values are large
+                    // and fall through to the default target.
+                    let idx = match val {
+                        Value::I32(v) => v as u32 as usize,
+                        _ => targets.len(),
+                    };
+                    block_idx = if idx < targets.len() {
+                        targets[idx]
+                    } else {
+                        *default
+                    };
+                }
+                RegTerm::Fallthrough => {
                     block_idx += 1;
+                    if block_idx as usize >= func.blocks.len() {
+                        return Err(RuntimeError {
+                            kind: RuntimeErrorKind::MissingReturn,
+                        });
+                    }
                 }
-            }
-            RegTerm::BrIfNull {
-                value,
-                target_block,
-                ..
-            } => {
-                let val = get_reg(&registers, *value)?;
-                if is_null_ref(&val) {
-                    block_idx = *target_block;
-                } else {
-                    block_idx += 1;
+                RegTerm::Trap => {
+                    return Err(trap(RuntimeTrap::Unreachable));
                 }
-            }
-            RegTerm::BrIfNonNull {
-                value,
-                target_block,
-                ..
-            } => {
-                let val = get_reg(&registers, *value)?;
-                if is_null_ref(&val) {
-                    block_idx += 1;
-                } else {
-                    block_idx = *target_block;
-                }
-            }
-            RegTerm::BrTable {
-                index,
-                targets,
-                default,
-                ..
-            } => {
-                let val = get_reg(&registers, *index)?;
-                // The index is read as u32: negative i32 values are large
-                // and fall through to the default target.
-                let idx = match val {
-                    Value::I32(v) => v as u32 as usize,
-                    _ => targets.len(),
-                };
-                block_idx = if idx < targets.len() {
-                    targets[idx]
-                } else {
-                    *default
-                };
-            }
-            RegTerm::Fallthrough => {
-                block_idx += 1;
-                if block_idx as usize >= func.blocks.len() {
-                    return Err(RuntimeError {
-                        kind: RuntimeErrorKind::MissingReturn,
-                    });
-                }
-            }
-            RegTerm::Trap => {
-                return Err(trap(RuntimeTrap::Unreachable));
             }
         }
     }
@@ -812,14 +1427,475 @@ fn execute_reg_op(
             }
             set_reg(registers, *dst, val)?;
         }
+        RegOp::StructNew {
+            dst,
+            type_idx,
+            fields,
+        } => {
+            let store = require_store(store)?;
+            let type_id = store.gc_type_id(*type_idx)?;
+            let mut values: Vec<Value> = Vec::new();
+            values
+                .try_reserve(fields.len())
+                .map_err(|_| gc_allocation_failed())?;
+            for &reg in fields {
+                values.push(get_reg(registers, reg)?);
+            }
+            let heap = store.gc_heap();
+            let id = heap.borrow_mut().alloc_struct_typed(type_id, values)?;
+            set_reg(registers, *dst, own_gc_ref(store, id))?;
+        }
+        RegOp::StructNewDefault { dst, type_idx } => {
+            let store = require_store(store)?;
+            let type_id = store.gc_type_id(*type_idx)?;
+            let heap = store.gc_heap();
+            let mut values: Vec<Value> = Vec::new();
+            {
+                let borrowed = heap.borrow();
+                let kind = borrowed
+                    .type_kind(type_id)
+                    .ok_or_else(|| unknown_type_err(*type_idx))?;
+                match kind {
+                    GcTypeKind::Struct(fields) => {
+                        values
+                            .try_reserve(fields.len())
+                            .map_err(|_| gc_allocation_failed())?;
+                        for field in fields {
+                            values.push(default_for_storage(field.storage));
+                        }
+                    }
+                    GcTypeKind::Array(_) => return Err(unknown_type_err(*type_idx)),
+                }
+            }
+            let id = heap.borrow_mut().alloc_struct_typed(type_id, values)?;
+            set_reg(registers, *dst, own_gc_ref(store, id))?;
+        }
+        RegOp::StructGet {
+            dst,
+            field,
+            ext,
+            object,
+            ..
+        } => {
+            let object = get_reg(registers, *object)?;
+            let (heap_id, id) = expect_gc_ref(object, RuntimeTrap::NullStructReference)?;
+            let store = require_store(store)?;
+            let value = with_resolved_heap(store, heap_id, |heap| {
+                heap.struct_get(id, *field, heap_ext(*ext))
+            })
+            .and_then(|value| value)?;
+            set_reg(registers, *dst, value)?;
+        }
+        RegOp::StructSet {
+            field,
+            object,
+            value,
+            ..
+        } => {
+            let value = get_reg(registers, *value)?;
+            let object = get_reg(registers, *object)?;
+            let (heap_id, id) = expect_gc_ref(object, RuntimeTrap::NullStructReference)?;
+            let store = require_store(store)?;
+            with_resolved_heap_mut(store, heap_id, |heap| heap.struct_set(id, *field, value))
+                .and_then(|result| result)?;
+        }
+        RegOp::ArrayNew {
+            dst,
+            type_idx,
+            len,
+            value,
+        } => {
+            let len = expect_u32(get_reg(registers, *len)?)?;
+            let value = get_reg(registers, *value)?;
+            let store = require_store(store)?;
+            let type_id = store.gc_type_id(*type_idx)?;
+            let heap = store.gc_heap();
+            let id = heap.borrow_mut().alloc_array_typed(type_id, len, value)?;
+            set_reg(registers, *dst, own_gc_ref(store, id))?;
+        }
+        RegOp::ArrayNewDefault { dst, type_idx, len } => {
+            let len = expect_u32(get_reg(registers, *len)?)?;
+            let store = require_store(store)?;
+            let type_id = store.gc_type_id(*type_idx)?;
+            let heap = store.gc_heap();
+            let fill = {
+                let borrowed = heap.borrow();
+                let kind = borrowed
+                    .type_kind(type_id)
+                    .ok_or_else(|| unknown_type_err(*type_idx))?;
+                match kind {
+                    GcTypeKind::Array(field) => default_for_storage(field.storage),
+                    GcTypeKind::Struct(_) => return Err(unknown_type_err(*type_idx)),
+                }
+            };
+            let id = heap.borrow_mut().alloc_array_typed(type_id, len, fill)?;
+            set_reg(registers, *dst, own_gc_ref(store, id))?;
+        }
+        RegOp::ArrayNewFixed {
+            dst,
+            type_idx,
+            values,
+        } => {
+            let store = require_store(store)?;
+            let type_id = store.gc_type_id(*type_idx)?;
+            let mut elems: Vec<Value> = Vec::new();
+            elems
+                .try_reserve(values.len())
+                .map_err(|_| gc_allocation_failed())?;
+            for &reg in values {
+                elems.push(get_reg(registers, reg)?);
+            }
+            let heap = store.gc_heap();
+            let id = heap.borrow_mut().alloc_fixed_typed(type_id, elems)?;
+            set_reg(registers, *dst, own_gc_ref(store, id))?;
+        }
+        RegOp::ArrayNewData {
+            dst,
+            type_idx,
+            data,
+            src,
+            len,
+        } => {
+            let src = expect_u32(get_reg(registers, *src)?)?;
+            let len = expect_u32(get_reg(registers, *len)?)?;
+            let store = require_store(store)?;
+            let type_id = store.gc_type_id(*type_idx)?;
+            let heap = store.gc_heap();
+            let storage = heap
+                .borrow()
+                .type_kind(type_id)
+                .and_then(|kind| match kind {
+                    GcTypeKind::Array(field) => Some(field.storage),
+                    GcTypeKind::Struct(_) => None,
+                })
+                .ok_or_else(|| unknown_type_err(*type_idx))?;
+            let width = storage_width(storage);
+            // Build and allocate inside the segment borrow, so the element
+            // payload is reserved fallibly with no full-segment clone.
+            let id = store
+                .with_data(data.0, |slot| -> Result<ObjectId, RuntimeError> {
+                    let bytes = slot.map_or(&[][..], |v| v.as_slice());
+                    let elems = data_segment_values(bytes, src, len, width, storage)?;
+                    let mut heap = heap.borrow_mut();
+                    heap.alloc_fixed_typed(type_id, elems)
+                })
+                .ok_or_else(|| unknown_data_err(data.0))??;
+            set_reg(registers, *dst, own_gc_ref(store, id))?;
+        }
+        RegOp::ArrayNewElem {
+            dst,
+            type_idx,
+            elem,
+            src,
+            len,
+        } => {
+            let src = expect_u32(get_reg(registers, *src)?)?;
+            let len = expect_u32(get_reg(registers, *len)?)?;
+            let store = require_store(store)?;
+            let type_id = store.gc_type_id(*type_idx)?;
+            let heap = store.gc_heap();
+            let id = store
+                .with_elem(elem.0, |slot| -> Result<ObjectId, RuntimeError> {
+                    let values = slot.map_or(&[][..], |v| v.as_slice());
+                    let elems = elem_segment_values(values, src, len)?;
+                    let mut heap = heap.borrow_mut();
+                    heap.alloc_fixed_typed(type_id, elems)
+                })
+                .ok_or_else(|| unknown_elem_err(elem.0))??;
+            set_reg(registers, *dst, own_gc_ref(store, id))?;
+        }
+        RegOp::ArrayGet {
+            dst,
+            array,
+            index,
+            ext,
+            ..
+        } => {
+            let index = expect_u32(get_reg(registers, *index)?)?;
+            let array = get_reg(registers, *array)?;
+            let (heap_id, id) = expect_gc_ref(array, RuntimeTrap::NullArrayReference)?;
+            let store = require_store(store)?;
+            let len = with_array_len(store, heap_id, id)?;
+            if array_index_oob(index, 1, len) {
+                return Err(trap(RuntimeTrap::OutOfBoundsArrayAccess));
+            }
+            let value = with_resolved_heap(store, heap_id, |heap| {
+                heap.array_get(id, index, heap_ext(*ext))
+            })
+            .and_then(|value| value)?;
+            set_reg(registers, *dst, value)?;
+        }
+        RegOp::ArraySet {
+            array,
+            index,
+            value,
+            ..
+        } => {
+            let value = get_reg(registers, *value)?;
+            let index = expect_u32(get_reg(registers, *index)?)?;
+            let array = get_reg(registers, *array)?;
+            let (heap_id, id) = expect_gc_ref(array, RuntimeTrap::NullArrayReference)?;
+            let store = require_store(store)?;
+            let len = with_array_len(store, heap_id, id)?;
+            if array_index_oob(index, 1, len) {
+                return Err(trap(RuntimeTrap::OutOfBoundsArrayAccess));
+            }
+            with_resolved_heap_mut(store, heap_id, |heap| heap.array_set(id, index, value))
+                .and_then(|result| result)?;
+        }
+        RegOp::ArrayLen { dst, array } => {
+            let array = get_reg(registers, *array)?;
+            let (heap_id, id) = expect_gc_ref(array, RuntimeTrap::NullArrayReference)?;
+            let store = require_store(store)?;
+            let len = with_array_len(store, heap_id, id)?;
+            set_reg(registers, *dst, Value::I32(len as i32))?;
+        }
+        RegOp::ArrayFill {
+            array,
+            index,
+            value,
+            len,
+            ..
+        } => {
+            let len = expect_u32(get_reg(registers, *len)?)?;
+            let value = get_reg(registers, *value)?;
+            let index = expect_u32(get_reg(registers, *index)?)?;
+            let array = get_reg(registers, *array)?;
+            let (heap_id, id) = expect_gc_ref(array, RuntimeTrap::NullArrayReference)?;
+            let store = require_store(store)?;
+            let array_len = with_array_len(store, heap_id, id)?;
+            if array_index_oob(index, len, array_len) {
+                return Err(trap(RuntimeTrap::OutOfBoundsArrayAccess));
+            }
+            if len == 0 {
+                return Ok(());
+            }
+            let handle = require_heap(store, heap_id)?;
+            let mut heap = handle.borrow_mut();
+            for i in 0..len {
+                heap.array_set(id, index + i, value)?;
+            }
+        }
+        RegOp::ArrayCopy {
+            dst,
+            dst_off,
+            src,
+            src_off,
+            len,
+            ..
+        } => {
+            let len = expect_u32(get_reg(registers, *len)?)?;
+            let src_off = expect_u32(get_reg(registers, *src_off)?)?;
+            let src_value = get_reg(registers, *src)?;
+            let dst_off = expect_u32(get_reg(registers, *dst_off)?)?;
+            let dst_value = get_reg(registers, *dst)?;
+            // Null checks precede bounds; the reference checks the SOURCE
+            // reference first (eval.ml's ArrayCopy pattern order).
+            let (src_heap, src_id) = expect_gc_ref(src_value, RuntimeTrap::NullArrayReference)?;
+            let (dst_heap, dst_id) = expect_gc_ref(dst_value, RuntimeTrap::NullArrayReference)?;
+            let store = require_store(store)?;
+            let src_len = with_array_len(store, src_heap, src_id)?;
+            let dst_len = with_array_len(store, dst_heap, dst_id)?;
+            if array_index_oob(src_off, len, src_len) || array_index_oob(dst_off, len, dst_len) {
+                return Err(trap(RuntimeTrap::OutOfBoundsArrayAccess));
+            }
+            if len == 0 {
+                return Ok(());
+            }
+            let ext = with_resolved_heap(store, src_heap, |heap| heap.array_ext(src_id))?;
+            let src_handle = require_heap(store, src_heap)?;
+            let dst_handle = require_heap(store, dst_heap)?;
+            // If both references name the same heap, borrow it once; a
+            // second borrow_mut of the same RefCell would panic. `ptr_eq`
+            // compares heap identity, matching the registration by HeapId.
+            if alloc::rc::Rc::ptr_eq(&src_handle, &dst_handle) {
+                let mut heap = src_handle.borrow_mut();
+                if dst_off <= src_off {
+                    for i in 0..len {
+                        let value = heap.array_get(src_id, src_off + i, ext)?;
+                        heap.array_set(dst_id, dst_off + i, value)?;
+                    }
+                } else {
+                    for i in (0..len).rev() {
+                        let value = heap.array_get(src_id, src_off + i, ext)?;
+                        heap.array_set(dst_id, dst_off + i, value)?;
+                    }
+                }
+            } else {
+                let src_borrow = src_handle.borrow();
+                let mut dst_borrow = dst_handle.borrow_mut();
+                if dst_off <= src_off {
+                    for i in 0..len {
+                        let value = src_borrow.array_get(src_id, src_off + i, ext)?;
+                        dst_borrow.array_set(dst_id, dst_off + i, value)?;
+                    }
+                } else {
+                    for i in (0..len).rev() {
+                        let value = src_borrow.array_get(src_id, src_off + i, ext)?;
+                        dst_borrow.array_set(dst_id, dst_off + i, value)?;
+                    }
+                }
+            }
+        }
+        RegOp::ArrayInitData {
+            type_idx,
+            data,
+            array,
+            dst_off,
+            src_off,
+            len,
+        } => {
+            let len = expect_u32(get_reg(registers, *len)?)?;
+            let src_off = expect_u32(get_reg(registers, *src_off)?)?;
+            let dst_off = expect_u32(get_reg(registers, *dst_off)?)?;
+            let array = get_reg(registers, *array)?;
+            let (heap_id, id) = expect_gc_ref(array, RuntimeTrap::NullArrayReference)?;
+            let store = require_store(store)?;
+            let type_id = store.gc_type_id(*type_idx)?;
+            let storage = store
+                .with_gc_heap(|heap| {
+                    heap.type_kind(type_id).and_then(|kind| match kind {
+                        GcTypeKind::Array(field) => Some(field.storage),
+                        GcTypeKind::Struct(_) => None,
+                    })
+                })
+                .ok_or_else(|| unknown_type_err(*type_idx))?;
+            let width = storage_width(storage);
+            let array_len = with_array_len(store, heap_id, id)?;
+            // Array bounds before segment bounds (trap identity matters).
+            if array_index_oob(dst_off, len, array_len) {
+                return Err(trap(RuntimeTrap::OutOfBoundsArrayAccess));
+            }
+            let handle = require_heap(store, heap_id)?;
+            store
+                .with_data(data.0, |slot| -> Result<(), RuntimeError> {
+                    let bytes = slot.map_or(&[][..], |v| v.as_slice());
+                    let elems = data_segment_values(bytes, src_off, len, width, storage)?;
+                    if len == 0 {
+                        return Ok(());
+                    }
+                    let mut heap = handle.borrow_mut();
+                    for (i, value) in elems.into_iter().enumerate() {
+                        heap.array_set(id, dst_off + i as u32, value)?;
+                    }
+                    Ok(())
+                })
+                .ok_or_else(|| unknown_data_err(data.0))??;
+        }
+        RegOp::ArrayInitElem {
+            type_idx,
+            elem,
+            array,
+            dst_off,
+            src_off,
+            len,
+        } => {
+            let len = expect_u32(get_reg(registers, *len)?)?;
+            let src_off = expect_u32(get_reg(registers, *src_off)?)?;
+            let dst_off = expect_u32(get_reg(registers, *dst_off)?)?;
+            let array = get_reg(registers, *array)?;
+            let (heap_id, id) = expect_gc_ref(array, RuntimeTrap::NullArrayReference)?;
+            let _ = type_idx;
+            let store = require_store(store)?;
+            let array_len = with_array_len(store, heap_id, id)?;
+            if array_index_oob(dst_off, len, array_len) {
+                return Err(trap(RuntimeTrap::OutOfBoundsArrayAccess));
+            }
+            let handle = require_heap(store, heap_id)?;
+            store
+                .with_elem(elem.0, |slot| -> Result<(), RuntimeError> {
+                    let values = slot.map_or(&[][..], |v| v.as_slice());
+                    let elems = elem_segment_values(values, src_off, len)?;
+                    if len == 0 {
+                        return Ok(());
+                    }
+                    let mut heap = handle.borrow_mut();
+                    for (i, value) in elems.into_iter().enumerate() {
+                        heap.array_set(id, dst_off + i as u32, value)?;
+                    }
+                    Ok(())
+                })
+                .ok_or_else(|| unknown_elem_err(elem.0))??;
+        }
+        RegOp::RefI31 { dst, value } => {
+            let value = expect_u32(get_reg(registers, *value)?)?;
+            set_reg(registers, *dst, Value::I31((value & 0x7FFF_FFFF) as i32))?;
+        }
+        RegOp::I31Get { dst, value, signed } => {
+            let value = get_reg(registers, *value)?;
+            match value {
+                Value::I31(payload) => {
+                    let result = if *signed {
+                        (payload << 1) >> 1
+                    } else {
+                        payload
+                    };
+                    set_reg(registers, *dst, Value::I32(result))?;
+                }
+                other if is_null_ref(&other) => {
+                    return Err(trap(RuntimeTrap::NullI31Reference));
+                }
+                other => {
+                    return Err(RuntimeError {
+                        kind: RuntimeErrorKind::TypeMismatch {
+                            expected: ValType::Ref(RefType::from_parts(false, HeapType::I31)),
+                            found: other.val_type(),
+                        },
+                    });
+                }
+            }
+        }
+        RegOp::RefTest {
+            dst,
+            value,
+            nullable,
+            ht,
+        } => {
+            let value = get_reg(registers, *value)?;
+            let matched = ref_matches_ht(store, value, *nullable, *ht);
+            set_reg(registers, *dst, Value::I32(matched as i32))?;
+        }
+        RegOp::RefCast {
+            dst,
+            value,
+            nullable,
+            ht,
+        } => {
+            let value = get_reg(registers, *value)?;
+            if ref_matches_ht(store, value, *nullable, *ht) {
+                set_reg(registers, *dst, value)?;
+            } else {
+                return Err(RuntimeError {
+                    kind: RuntimeErrorKind::CastFailure {
+                        expected: RefType::from_parts(*nullable, *ht),
+                    },
+                });
+            }
+        }
+        RegOp::RefEq { dst, lhs, rhs } => {
+            let lhs = get_reg(registers, *lhs)?;
+            let rhs = get_reg(registers, *rhs)?;
+            set_reg(registers, *dst, Value::I32(eq_ref(lhs, rhs) as i32))?;
+        }
+        RegOp::AnyConvertExtern { dst, value } => {
+            let value = get_reg(registers, *value)?;
+            set_reg(registers, *dst, any_convert_extern(value)?)?;
+        }
+        RegOp::ExternConvertAny { dst, value } => {
+            let value = get_reg(registers, *value)?;
+            set_reg(registers, *dst, extern_convert_any(value)?)?;
+        }
         RegOp::Load {
             op,
             dst,
             addr,
             memarg,
         } => {
-            let addr = expect_addr(get_reg(registers, *addr)?)?;
             let store = require_store(store)?;
+            let is64 = store
+                .memory_type(memarg.memory.0)
+                .is_some_and(|ty| ty.limits.is64);
+            let addr = read_addr(get_reg(registers, *addr)?, is64)?;
             let mem = store.shared_memory(memarg.memory.0).ok_or(RuntimeError {
                 kind: RuntimeErrorKind::UnknownMemory {
                     memory: memarg.memory.0,
@@ -864,6 +1940,85 @@ fn execute_reg_op(
                     Value::I64(u32::from_le_bytes(bytes.try_into().expect("width checked")) as i64)
                 }
                 crate::lower::LoadOp::V128 => Value::V128(bytes.try_into().expect("width checked")),
+                crate::lower::LoadOp::V128Load8x8S => {
+                    let mut out = [0u8; 16];
+                    for (lane, byte) in out.chunks_exact_mut(2).zip(bytes.iter()) {
+                        let extended = (*byte as i8) as i16;
+                        lane.copy_from_slice(&extended.to_le_bytes());
+                    }
+                    Value::V128(out)
+                }
+                crate::lower::LoadOp::V128Load8x8U => {
+                    let mut out = [0u8; 16];
+                    for (lane, byte) in out.chunks_exact_mut(2).zip(bytes.iter()) {
+                        lane.copy_from_slice(&(*byte as u16).to_le_bytes());
+                    }
+                    Value::V128(out)
+                }
+                crate::lower::LoadOp::V128Load16x4S => {
+                    let mut out = [0u8; 16];
+                    for (lane, chunk) in out.chunks_exact_mut(4).zip(bytes.chunks_exact(2)) {
+                        let extended = i16::from_le_bytes(chunk.try_into().expect("width")) as i32;
+                        lane.copy_from_slice(&extended.to_le_bytes());
+                    }
+                    Value::V128(out)
+                }
+                crate::lower::LoadOp::V128Load16x4U => {
+                    let mut out = [0u8; 16];
+                    for (lane, chunk) in out.chunks_exact_mut(4).zip(bytes.chunks_exact(2)) {
+                        let extended = u16::from_le_bytes(chunk.try_into().expect("width")) as u32;
+                        lane.copy_from_slice(&extended.to_le_bytes());
+                    }
+                    Value::V128(out)
+                }
+                crate::lower::LoadOp::V128Load32x2S => {
+                    let mut out = [0u8; 16];
+                    for (lane, chunk) in out.chunks_exact_mut(8).zip(bytes.chunks_exact(4)) {
+                        let extended = i32::from_le_bytes(chunk.try_into().expect("width")) as i64;
+                        lane.copy_from_slice(&extended.to_le_bytes());
+                    }
+                    Value::V128(out)
+                }
+                crate::lower::LoadOp::V128Load32x2U => {
+                    let mut out = [0u8; 16];
+                    for (lane, chunk) in out.chunks_exact_mut(8).zip(bytes.chunks_exact(4)) {
+                        let extended = u32::from_le_bytes(chunk.try_into().expect("width")) as u64;
+                        lane.copy_from_slice(&extended.to_le_bytes());
+                    }
+                    Value::V128(out)
+                }
+                crate::lower::LoadOp::V128Load8Splat => Value::V128([bytes[0]; 16]),
+                crate::lower::LoadOp::V128Load16Splat => {
+                    let mut out = [0u8; 16];
+                    for lane in out.chunks_exact_mut(2) {
+                        lane.copy_from_slice(&bytes[..2]);
+                    }
+                    Value::V128(out)
+                }
+                crate::lower::LoadOp::V128Load32Splat => {
+                    let mut out = [0u8; 16];
+                    for lane in out.chunks_exact_mut(4) {
+                        lane.copy_from_slice(&bytes[..4]);
+                    }
+                    Value::V128(out)
+                }
+                crate::lower::LoadOp::V128Load64Splat => {
+                    let mut out = [0u8; 16];
+                    for lane in out.chunks_exact_mut(8) {
+                        lane.copy_from_slice(&bytes[..8]);
+                    }
+                    Value::V128(out)
+                }
+                crate::lower::LoadOp::V128Load32Zero => {
+                    let mut out = [0u8; 16];
+                    out[..4].copy_from_slice(&bytes[..4]);
+                    Value::V128(out)
+                }
+                crate::lower::LoadOp::V128Load64Zero => {
+                    let mut out = [0u8; 16];
+                    out[..8].copy_from_slice(&bytes[..8]);
+                    Value::V128(out)
+                }
             };
             set_reg(registers, *dst, value)?;
         }
@@ -873,9 +2028,12 @@ fn execute_reg_op(
             value,
             memarg,
         } => {
-            let addr = expect_addr(get_reg(registers, *addr)?)?;
-            let value = get_reg(registers, *value)?;
             let store = require_store(store)?;
+            let is64 = store
+                .memory_type(memarg.memory.0)
+                .is_some_and(|ty| ty.limits.is64);
+            let addr = read_addr(get_reg(registers, *addr)?, is64)?;
+            let value = get_reg(registers, *value)?;
             let mem = store.shared_memory(memarg.memory.0).ok_or(RuntimeError {
                 kind: RuntimeErrorKind::UnknownMemory {
                     memory: memarg.memory.0,
@@ -925,6 +2083,185 @@ fn execute_reg_op(
                 }
             }
         }
+        RegOp::AtomicLoad {
+            width,
+            dst,
+            addr,
+            memarg,
+        } => {
+            let mem = atomic_memory(store, memarg)?;
+            let addr = atomic_addr(store, registers, *addr, memarg)?;
+            let mem = mem.borrow();
+            let range = atomic_range(&mem, memarg, addr, width.byte_width())?;
+            let bits = atomic_read(&mem[range]);
+            set_reg(registers, *dst, atomic_value(bits, width.val_type()))?;
+        }
+        RegOp::AtomicStore {
+            width,
+            addr,
+            value,
+            memarg,
+        } => {
+            let mem = atomic_memory(store, memarg)?;
+            let addr = atomic_addr(store, registers, *addr, memarg)?;
+            let bits = atomic_operand_bits(get_reg(registers, *value)?, width.val_type())?;
+            let mut mem = mem.borrow_mut();
+            let range = atomic_range(&mem, memarg, addr, width.byte_width())?;
+            atomic_write(&mut mem[range], bits);
+        }
+        RegOp::AtomicRmw {
+            op,
+            width,
+            dst,
+            addr,
+            value,
+            memarg,
+        } => {
+            let mem = atomic_memory(store, memarg)?;
+            let addr = atomic_addr(store, registers, *addr, memarg)?;
+            let ty = width.val_type();
+            let operand = atomic_operand_bits(get_reg(registers, *value)?, ty)?;
+            let mut mem = mem.borrow_mut();
+            let range = atomic_range(&mem, memarg, addr, width.byte_width())?;
+            // Narrow forms zero-extend the load and truncate the store; the
+            // arithmetic itself runs at the full value width (wrapping), and
+            // the OLD value is the result (`eval.ml:295-311`).
+            let old = atomic_read(&mem[range.start..range.end]);
+            let new = atomic_rmw(*op, old, operand);
+            atomic_write(&mut mem[range], new);
+            set_reg(registers, *dst, atomic_value(old, ty))?;
+        }
+        RegOp::AtomicCmpxchg {
+            width,
+            dst,
+            addr,
+            expected,
+            replacement,
+            memarg,
+        } => {
+            let mem = atomic_memory(store, memarg)?;
+            let addr = atomic_addr(store, registers, *addr, memarg)?;
+            let ty = width.val_type();
+            let expected = atomic_operand_bits(get_reg(registers, *expected)?, ty)?;
+            let replacement = atomic_operand_bits(get_reg(registers, *replacement)?, ty)?;
+            let mut mem = mem.borrow_mut();
+            let range = atomic_range(&mem, memarg, addr, width.byte_width())?;
+            let old = atomic_read(&mem[range.start..range.end]);
+            if old == expected {
+                atomic_write(&mut mem[range], replacement);
+            }
+            set_reg(registers, *dst, atomic_value(old, ty))?;
+        }
+        RegOp::AtomicWait {
+            width,
+            dst,
+            addr,
+            expected,
+            timeout,
+            memarg,
+        } => {
+            let mem = atomic_memory(store, memarg)?;
+            let addr = atomic_addr(store, registers, *addr, memarg)?;
+            let ty = width.val_type();
+            let expected = atomic_operand_bits(get_reg(registers, *expected)?, ty)?;
+            // The timeout operand is read (and type-checked) but never slept
+            // on — see the single-agent determination below.
+            atomic_operand_bits(get_reg(registers, *timeout)?, ValType::Num(NumType::I64))?;
+            // Trap order pinned by `eval.ml:329-335`: check_align, then
+            // check_shared, then the load (whose bounds check comes last).
+            // A wait on unshared memory traps even when it would not block.
+            atomic_align(memarg, addr, width.byte_width())?;
+            if !require_store(store)?
+                .memory_type(memarg.memory.0)
+                .is_some_and(|ty| ty.limits.shared)
+            {
+                return Err(trap(RuntimeTrap::ExpectedSharedMemory));
+            }
+            let mem = mem.borrow();
+            let range = memory_bounds(&mem, memarg, addr, width.byte_width())?;
+            let old = atomic_read(&mem[range]);
+            // Single-agent determination: with no second agent there is no
+            // wake source, so a matching wait deterministically times out
+            // (`eval.ml:329-345` suspends the agent when the value matches
+            // and the timeout is outside the 1 ms epsilon band). Returning 2
+            // immediately for EVERY timeout — including negative (infinite)
+            // ones — is observationally identical for a single-agent store
+            // and is the only non-hanging choice.
+            let result = if old == expected { 2 } else { 1 };
+            set_reg(registers, *dst, Value::I32(result))?;
+        }
+        RegOp::AtomicNotify {
+            dst,
+            addr,
+            count,
+            memarg,
+        } => {
+            let mem = atomic_memory(store, memarg)?;
+            let addr = atomic_addr(store, registers, *addr, memarg)?;
+            atomic_operand_bits(get_reg(registers, *count)?, ValType::Num(NumType::I32))?;
+            let mem = mem.borrow();
+            // notify is a 32-bit access with no narrow form (`eval.ml:347`).
+            let range = atomic_range(&mem, memarg, addr, 4)?;
+            // The load exists only for its out-of-bounds trap effect; the
+            // value is discarded (`eval.ml:349`).
+            let _ = atomic_read(&mem[range]);
+            // Single-agent determination: no waiters can exist, so every
+            // count (including 0) returns 0 (`eval.ml:347-357`).
+            set_reg(registers, *dst, Value::I32(0))?;
+        }
+        RegOp::V128LoadLane {
+            width,
+            dst,
+            vec,
+            addr,
+            memarg,
+            lane,
+        } => {
+            let store = require_store(store)?;
+            let is64 = store
+                .memory_type(memarg.memory.0)
+                .is_some_and(|ty| ty.limits.is64);
+            let addr = read_addr(get_reg(registers, *addr)?, is64)?;
+            let Value::V128(mut bytes) = get_reg(registers, *vec)? else {
+                return Err(type_mismatch_v128(registers, *vec));
+            };
+            let mem = store.shared_memory(memarg.memory.0).ok_or(RuntimeError {
+                kind: RuntimeErrorKind::UnknownMemory {
+                    memory: memarg.memory.0,
+                },
+            })?;
+            let mem = mem.borrow();
+            let range = memory_bounds(&mem, memarg, addr, *width as usize)?;
+            let start = *lane as usize * *width as usize;
+            bytes[start..start + *width as usize].copy_from_slice(&mem[range]);
+            drop(mem);
+            set_reg(registers, *dst, Value::V128(bytes))?;
+        }
+        RegOp::V128StoreLane {
+            width,
+            addr,
+            vec,
+            memarg,
+            lane,
+        } => {
+            let store = require_store(store)?;
+            let is64 = store
+                .memory_type(memarg.memory.0)
+                .is_some_and(|ty| ty.limits.is64);
+            let addr = read_addr(get_reg(registers, *addr)?, is64)?;
+            let Value::V128(bytes) = get_reg(registers, *vec)? else {
+                return Err(type_mismatch_v128(registers, *vec));
+            };
+            let mem = store.shared_memory(memarg.memory.0).ok_or(RuntimeError {
+                kind: RuntimeErrorKind::UnknownMemory {
+                    memory: memarg.memory.0,
+                },
+            })?;
+            let mut mem = mem.borrow_mut();
+            let range = memory_bounds(&mem, memarg, addr, *width as usize)?;
+            let start = *lane as usize * *width as usize;
+            mem[range].copy_from_slice(&bytes[start..start + *width as usize]);
+        }
         RegOp::GlobalGet { dst, global } => {
             let store = require_store(store)?;
             let value = store.global(global.0).ok_or(RuntimeError {
@@ -941,37 +2278,52 @@ fn execute_reg_op(
         }
         RegOp::MemorySize { dst, memory } => {
             let store = require_store(store)?;
+            let is64 = store.memory_type(memory.0).is_some_and(|ty| ty.limits.is64);
             let pages = store
                 .with_memory(memory.0, |mem| mem.len())
                 .ok_or(RuntimeError {
                     kind: RuntimeErrorKind::UnknownMemory { memory: memory.0 },
                 })?
                 / PAGE_SIZE;
-            set_reg(registers, *dst, Value::I32(pages as i32))?;
+            let value = if is64 {
+                Value::I64(pages as i64)
+            } else {
+                Value::I32(pages as i32)
+            };
+            set_reg(registers, *dst, value)?;
         }
         RegOp::MemoryGrow { dst, memory, delta } => {
             let store = require_store(store)?;
-            let delta = expect_addr(get_reg(registers, *delta)?)?;
+            let is64 = store.memory_type(memory.0).is_some_and(|ty| ty.limits.is64);
+            let delta = read_addr(get_reg(registers, *delta)?, is64)?;
             let max_pages = store
                 .memory_type(memory.0)
                 .and_then(|ty| ty.limits.max)
-                .unwrap_or(65536) as usize;
+                .unwrap_or(if is64 { 1 << 48 } else { 1 << 16 });
             let mem = store.shared_memory(memory.0).ok_or(RuntimeError {
                 kind: RuntimeErrorKind::UnknownMemory { memory: memory.0 },
             })?;
-            let result = {
+            let result: u64 = {
                 let mut mem = mem.borrow_mut();
-                let old_pages = mem.len() / PAGE_SIZE;
-                match old_pages.checked_add(delta as usize) {
+                let old_pages = (mem.len() / PAGE_SIZE) as u64;
+                match old_pages.checked_add(delta) {
                     Some(new_pages)
-                        if new_pages <= max_pages && grow_memory_fallible(&mut mem, new_pages) =>
+                        if new_pages <= max_pages
+                            && usize::try_from(new_pages)
+                                .map(|pages| grow_memory_fallible(&mut mem, pages))
+                                .unwrap_or(false) =>
                     {
-                        old_pages as i32
+                        old_pages
                     }
-                    _ => -1,
+                    _ => u64::MAX,
                 }
             };
-            set_reg(registers, *dst, Value::I32(result))?;
+            let value = if is64 {
+                Value::I64(result as i64)
+            } else {
+                Value::I32(result as i32)
+            };
+            set_reg(registers, *dst, value)?;
         }
         RegOp::MemoryInit {
             memory,
@@ -981,9 +2333,10 @@ fn execute_reg_op(
             count,
         } => {
             let store = require_store(store)?;
-            let dst = expect_addr(get_reg(registers, *dst)?)? as usize;
-            let src = expect_addr(get_reg(registers, *src)?)? as usize;
-            let count = expect_addr(get_reg(registers, *count)?)? as usize;
+            let is64 = store.memory_type(memory.0).is_some_and(|ty| ty.limits.is64);
+            let dst = read_addr(get_reg(registers, *dst)?, is64)?;
+            let src = u64::from(expect_addr(get_reg(registers, *src)?)?);
+            let count = u64::from(expect_addr(get_reg(registers, *count)?)?);
             // Bounds-check and copy the segment range before borrowing memory.
             let (bytes, dst_end) = {
                 let segment = store
@@ -998,17 +2351,17 @@ fn execute_reg_op(
                 else {
                     return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
                 };
-                if src_end > segment.len() {
+                if src_end > segment.len() as u64 {
                     return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
                 }
-                (segment[src..src_end].to_vec(), dst_end)
+                (segment[src as usize..src_end as usize].to_vec(), dst_end)
             };
             store
                 .with_memory_mut(memory.0, |mem| {
-                    if dst_end > mem.len() {
+                    if dst_end > mem.len() as u64 {
                         return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
                     }
-                    mem[dst..dst_end].copy_from_slice(&bytes);
+                    mem[dst as usize..dst_end as usize].copy_from_slice(&bytes);
                     Ok(())
                 })
                 .ok_or(RuntimeError {
@@ -1029,9 +2382,15 @@ fn execute_reg_op(
             count,
         } => {
             let store = require_store(store)?;
-            let dst = expect_addr(get_reg(registers, *dst)?)? as usize;
-            let src = expect_addr(get_reg(registers, *src)?)? as usize;
-            let count = expect_addr(get_reg(registers, *count)?)? as usize;
+            let dst_is64 = store
+                .memory_type(dst_memory.0)
+                .is_some_and(|ty| ty.limits.is64);
+            let src_is64 = store
+                .memory_type(src_memory.0)
+                .is_some_and(|ty| ty.limits.is64);
+            let dst = read_addr(get_reg(registers, *dst)?, dst_is64)?;
+            let src = read_addr(get_reg(registers, *src)?, src_is64)?;
+            let count = read_addr(get_reg(registers, *count)?, dst_is64 && src_is64)?;
             // Bounds-check both ranges before copying (via a temporary, so
             // overlapping regions copy per spec).
             let src_len = store
@@ -1052,11 +2411,13 @@ fn execute_reg_op(
             else {
                 return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
             };
-            if src_end > src_len || dst_end > dst_len {
+            if src_end > src_len as u64 || dst_end > dst_len as u64 {
                 return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
             }
             let temp: Vec<u8> = store
-                .with_memory(src_memory.0, |mem| mem[src..src_end].to_vec())
+                .with_memory(src_memory.0, |mem| {
+                    mem[src as usize..src_end as usize].to_vec()
+                })
                 .ok_or(RuntimeError {
                     kind: RuntimeErrorKind::UnknownMemory {
                         memory: src_memory.0,
@@ -1064,7 +2425,7 @@ fn execute_reg_op(
                 })?;
             store
                 .with_memory_mut(dst_memory.0, |mem| {
-                    mem[dst..dst_end].copy_from_slice(&temp);
+                    mem[dst as usize..dst_end as usize].copy_from_slice(&temp);
                 })
                 .ok_or(RuntimeError {
                     kind: RuntimeErrorKind::UnknownMemory {
@@ -1079,18 +2440,19 @@ fn execute_reg_op(
             count,
         } => {
             let store = require_store(store)?;
-            let dst = expect_addr(get_reg(registers, *dst)?)? as usize;
-            let count = expect_addr(get_reg(registers, *count)?)? as usize;
+            let is64 = store.memory_type(memory.0).is_some_and(|ty| ty.limits.is64);
+            let dst = read_addr(get_reg(registers, *dst)?, is64)?;
+            let count = read_addr(get_reg(registers, *count)?, is64)?;
             let value = expect_addr(get_reg(registers, *value)?)? as u8;
             store
                 .with_memory_mut(memory.0, |mem| {
                     let Some(end) = dst.checked_add(count) else {
                         return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
                     };
-                    if end > mem.len() {
+                    if end > mem.len() as u64 {
                         return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
                     }
-                    mem[dst..end].fill(value);
+                    mem[dst as usize..end as usize].fill(value);
                     Ok(())
                 })
                 .ok_or(RuntimeError {
@@ -1099,7 +2461,8 @@ fn execute_reg_op(
         }
         RegOp::TableGet { dst, table, index } => {
             let store = require_store(store)?;
-            let idx = expect_addr(get_reg(registers, *index)?)?;
+            let is64 = store.table_type(table.0).is_some_and(|ty| ty.limits.is64);
+            let idx = read_addr(get_reg(registers, *index)?, is64)?;
             let value = store
                 .with_table(table.0, |table| table.get(idx))
                 .ok_or(RuntimeError {
@@ -1114,7 +2477,8 @@ fn execute_reg_op(
             value,
         } => {
             let store = require_store(store)?;
-            let idx = expect_addr(get_reg(registers, *index)?)?;
+            let is64 = store.table_type(table.0).is_some_and(|ty| ty.limits.is64);
+            let idx = read_addr(get_reg(registers, *index)?, is64)?;
             let value = get_reg(registers, *value)?;
             store
                 .with_table_mut(table.0, |table| {
@@ -1130,12 +2494,18 @@ fn execute_reg_op(
         }
         RegOp::TableSize { dst, table } => {
             let store = require_store(store)?;
+            let is64 = store.table_type(table.0).is_some_and(|ty| ty.limits.is64);
             let len = store
                 .with_table(table.0, |table| table.len())
                 .ok_or(RuntimeError {
                     kind: RuntimeErrorKind::UnknownTable { table: table.0 },
                 })?;
-            set_reg(registers, *dst, Value::I32(len as i32))?;
+            let value = if is64 {
+                Value::I64(len as i64)
+            } else {
+                Value::I32(len as i32)
+            };
+            set_reg(registers, *dst, value)?;
         }
         RegOp::TableGrow {
             dst,
@@ -1144,19 +2514,19 @@ fn execute_reg_op(
             delta,
         } => {
             let store = require_store(store)?;
-            let delta = expect_addr(get_reg(registers, *delta)?)?;
+            let is64 = store.table_type(table.0).is_some_and(|ty| ty.limits.is64);
+            let delta = read_addr(get_reg(registers, *delta)?, is64)?;
             let value = get_reg(registers, *value)?;
             let tbl = store.shared_table(table.0).ok_or(RuntimeError {
                 kind: RuntimeErrorKind::UnknownTable { table: table.0 },
             })?;
-            let result = {
-                let mut tbl = tbl.borrow_mut();
-                match tbl.grow(delta, value) {
-                    Some(old) => old as i32,
-                    None => -1,
-                }
+            let result: u64 = tbl.borrow_mut().grow(delta, value).unwrap_or(u64::MAX);
+            let value = if is64 {
+                Value::I64(result as i64)
+            } else {
+                Value::I32(result as i32)
             };
-            set_reg(registers, *dst, Value::I32(result))?;
+            set_reg(registers, *dst, value)?;
         }
         RegOp::TableFill {
             table,
@@ -1165,8 +2535,9 @@ fn execute_reg_op(
             count,
         } => {
             let store = require_store(store)?;
-            let dst = expect_addr(get_reg(registers, *dst)?)?;
-            let count = expect_addr(get_reg(registers, *count)?)?;
+            let is64 = store.table_type(table.0).is_some_and(|ty| ty.limits.is64);
+            let dst = read_addr(get_reg(registers, *dst)?, is64)?;
+            let count = read_addr(get_reg(registers, *count)?, is64)?;
             let value = get_reg(registers, *value)?;
             store
                 .with_table_mut(table.0, |tbl| {
@@ -1188,24 +2559,70 @@ fn execute_reg_op(
             count,
         } => {
             let store = require_store(store)?;
-            let dst = expect_addr(get_reg(registers, *dst)?)?;
-            let src = expect_addr(get_reg(registers, *src)?)?;
-            let count = expect_addr(get_reg(registers, *count)?)?;
-            // Bounds-check both ranges before copying (via a temporary, so
-            // overlapping copies within one table behave per spec).
-            let temp: Vec<Value> = store
-                .with_table(src_table.0, |table| table.read_slice(src, count))
-                .ok_or(RuntimeError {
-                    kind: RuntimeErrorKind::UnknownTable { table: src_table.0 },
-                })?
-                .ok_or(trap(RuntimeTrap::OutOfBoundsTableAccess))?;
-            store
-                .with_table_mut(dst_table.0, |table| table.write_slice(dst, &temp))
-                .ok_or(RuntimeError {
-                    kind: RuntimeErrorKind::UnknownTable { table: dst_table.0 },
-                })?
-                .then_some(())
-                .ok_or(trap(RuntimeTrap::OutOfBoundsTableAccess))?;
+            let dst_is64 = store
+                .table_type(dst_table.0)
+                .is_some_and(|ty| ty.limits.is64);
+            let src_is64 = store
+                .table_type(src_table.0)
+                .is_some_and(|ty| ty.limits.is64);
+            let dst = read_addr(get_reg(registers, *dst)?, dst_is64)?;
+            let src = read_addr(get_reg(registers, *src)?, src_is64)?;
+            let count = read_addr(get_reg(registers, *count)?, dst_is64 && src_is64)?;
+            // Bounds-check BOTH ranges before any copying or allocation:
+            // a huge count against a short table must trap, never abort
+            // on an oversized temporary (review r1 P1).
+            let dst_len =
+                store
+                    .with_table(dst_table.0, |table| table.len())
+                    .ok_or(RuntimeError {
+                        kind: RuntimeErrorKind::UnknownTable { table: dst_table.0 },
+                    })?;
+            let src_len =
+                store
+                    .with_table(src_table.0, |table| table.len())
+                    .ok_or(RuntimeError {
+                        kind: RuntimeErrorKind::UnknownTable { table: src_table.0 },
+                    })?;
+            let dst_ok = dst.checked_add(count).is_some_and(|end| end <= dst_len);
+            let src_ok = src.checked_add(count).is_some_and(|end| end <= src_len);
+            if !dst_ok || !src_ok {
+                return Err(trap(RuntimeTrap::OutOfBoundsTableAccess));
+            }
+            // Aliased imports (one shared table bound at two indices)
+            // must take the same-table path too: borrowing one RefCell
+            // twice would panic (review r2 P1).
+            let dst_handle = store.shared_table(dst_table.0).ok_or(RuntimeError {
+                kind: RuntimeErrorKind::UnknownTable { table: dst_table.0 },
+            })?;
+            let src_handle = store.shared_table(src_table.0).ok_or(RuntimeError {
+                kind: RuntimeErrorKind::UnknownTable { table: src_table.0 },
+            })?;
+            if dst_table.0 == src_table.0 || alloc::rc::Rc::ptr_eq(&dst_handle, &src_handle) {
+                // One table: overlap-preserving copy, no temporary. A
+                // refused allocation inside the copy is a CLEAN runtime
+                // failure — never a silent success with a partial
+                // destination (review r5 P1).
+                let copied = store
+                    .with_table_mut(dst_table.0, |table| table.copy_within(dst, src, count))
+                    .ok_or(RuntimeError {
+                        kind: RuntimeErrorKind::UnknownTable { table: dst_table.0 },
+                    })?;
+                if !copied {
+                    return Err(RuntimeError {
+                        kind: RuntimeErrorKind::ResourceLimitExceeded { what: "table copy" },
+                    });
+                }
+            } else {
+                // Two tables: distinct handles, still no temporary — copy
+                // in runs straight across.
+                let src_ref = src_handle.borrow();
+                let mut dst_ref = dst_handle.borrow_mut();
+                if !dst_ref.copy_from(&src_ref, dst, src, count) {
+                    return Err(RuntimeError {
+                        kind: RuntimeErrorKind::ResourceLimitExceeded { what: "table copy" },
+                    });
+                }
+            }
         }
         RegOp::TableInit {
             table,
@@ -1215,9 +2632,10 @@ fn execute_reg_op(
             count,
         } => {
             let store = require_store(store)?;
-            let dst = expect_addr(get_reg(registers, *dst)?)? as usize;
-            let src = expect_addr(get_reg(registers, *src)?)? as usize;
-            let count = expect_addr(get_reg(registers, *count)?)? as usize;
+            let is64 = store.table_type(table.0).is_some_and(|ty| ty.limits.is64);
+            let dst = read_addr(get_reg(registers, *dst)?, is64)?;
+            let src = u64::from(expect_addr(get_reg(registers, *src)?)?);
+            let count = u64::from(expect_addr(get_reg(registers, *count)?)?);
             let segment = store
                 .with_elem(elem.0, |segment| segment.cloned())
                 .ok_or(RuntimeError {
@@ -1234,13 +2652,13 @@ fn execute_reg_op(
             else {
                 return Err(trap(RuntimeTrap::OutOfBoundsTableAccess));
             };
-            if src_end > segment.len() || dst_end as u32 > table_len {
+            if src_end > segment.len() as u64 || dst_end > table_len {
                 return Err(trap(RuntimeTrap::OutOfBoundsTableAccess));
             }
-            let temp: Vec<Value> = segment[src..src_end].to_vec();
+            let temp: Vec<Value> = segment[src as usize..src_end as usize].to_vec();
             store
                 .with_table_mut(table.0, |table| {
-                    if table.write_slice(dst as u32, &temp) {
+                    if table.write_slice(dst, &temp) {
                         Ok(())
                     } else {
                         Err(trap(RuntimeTrap::OutOfBoundsTableAccess))
@@ -1284,6 +2702,7 @@ fn execute_reg_op(
             shape,
             src,
             lane,
+            signed,
         } => {
             let Value::V128(bytes) = get_reg(registers, *src)? else {
                 return Err(RuntimeError {
@@ -1293,7 +2712,7 @@ fn execute_reg_op(
                     },
                 });
             };
-            let value = extract_lane(*shape, &bytes, *lane)?;
+            let value = extract_lane(*shape, &bytes, *lane, *signed)?;
             set_reg(registers, *dst, value)?;
         }
         RegOp::V128ReplaceLane {
@@ -1356,6 +2775,215 @@ fn execute_reg_op(
             }
             set_reg(registers, *dst, Value::V128(out))?;
         }
+        RegOp::V128Unary {
+            dst,
+            src,
+            shape,
+            kind,
+        } => {
+            let Value::V128(bytes) = get_reg(registers, *src)? else {
+                return Err(type_mismatch_v128(registers, *src));
+            };
+            let mut out = [0u8; 16];
+            v128_unary(*shape, *kind, &mut out, &bytes);
+            set_reg(registers, *dst, Value::V128(out))?;
+        }
+        RegOp::V128Extend {
+            dst,
+            src,
+            src_shape,
+            high,
+            signed,
+        } => {
+            let Value::V128(bytes) = get_reg(registers, *src)? else {
+                return Err(type_mismatch_v128(registers, *src));
+            };
+            let mut out = [0u8; 16];
+            v128_extend(*src_shape, *high, *signed, &mut out, &bytes);
+            set_reg(registers, *dst, Value::V128(out))?;
+        }
+        RegOp::V128ExtMul {
+            dst,
+            a,
+            b,
+            src_shape,
+            high,
+            signed,
+        } => {
+            let (Value::V128(a_bytes), Value::V128(b_bytes)) =
+                (get_reg(registers, *a)?, get_reg(registers, *b)?)
+            else {
+                return Err(type_mismatch_v128(registers, *a));
+            };
+            let mut out = [0u8; 16];
+            v128_extmul(*src_shape, *high, *signed, &mut out, &a_bytes, &b_bytes);
+            set_reg(registers, *dst, Value::V128(out))?;
+        }
+        RegOp::V128ExtAddPairwise {
+            dst,
+            src,
+            src_shape,
+            signed,
+        } => {
+            let Value::V128(bytes) = get_reg(registers, *src)? else {
+                return Err(type_mismatch_v128(registers, *src));
+            };
+            let mut out = [0u8; 16];
+            v128_extadd_pairwise(*src_shape, *signed, &mut out, &bytes);
+            set_reg(registers, *dst, Value::V128(out))?;
+        }
+        RegOp::V128Narrow {
+            dst,
+            a,
+            b,
+            dst_shape,
+            signed,
+        } => {
+            let (Value::V128(a_bytes), Value::V128(b_bytes)) =
+                (get_reg(registers, *a)?, get_reg(registers, *b)?)
+            else {
+                return Err(type_mismatch_v128(registers, *a));
+            };
+            let mut out = [0u8; 16];
+            v128_narrow(*dst_shape, *signed, &mut out, &a_bytes, &b_bytes);
+            set_reg(registers, *dst, Value::V128(out))?;
+        }
+        RegOp::V128Dot { dst, a, b } => {
+            let (Value::V128(a_bytes), Value::V128(b_bytes)) =
+                (get_reg(registers, *a)?, get_reg(registers, *b)?)
+            else {
+                return Err(type_mismatch_v128(registers, *a));
+            };
+            let mut out = [0u8; 16];
+            v128_dot(&mut out, &a_bytes, &b_bytes);
+            set_reg(registers, *dst, Value::V128(out))?;
+        }
+        RegOp::V128Bitselect { dst, a, b, mask } => {
+            let (Value::V128(a), Value::V128(b), Value::V128(m)) = (
+                get_reg(registers, *a)?,
+                get_reg(registers, *b)?,
+                get_reg(registers, *mask)?,
+            ) else {
+                return Err(type_mismatch_v128(registers, *mask));
+            };
+            let mut out = [0u8; 16];
+            for i in 0..16 {
+                out[i] = (a[i] & m[i]) | (b[i] & !m[i]);
+            }
+            set_reg(registers, *dst, Value::V128(out))?;
+        }
+        RegOp::V128AnyTrue { dst, src } => {
+            let Value::V128(bytes) = get_reg(registers, *src)? else {
+                return Err(type_mismatch_v128(registers, *src));
+            };
+            set_reg(
+                registers,
+                *dst,
+                Value::I32(if bytes.iter().any(|&b| b != 0) { 1 } else { 0 }),
+            )?;
+        }
+        RegOp::V128AllTrue { dst, src, shape } => {
+            let Value::V128(bytes) = get_reg(registers, *src)? else {
+                return Err(type_mismatch_v128(registers, *src));
+            };
+            let width = shape.lane_width();
+            let all = bytes
+                .chunks_exact(width)
+                .all(|lane| lane.iter().any(|&b| b != 0));
+            set_reg(registers, *dst, Value::I32(if all { 1 } else { 0 }))?;
+        }
+        RegOp::V128Bitmask { dst, src, shape } => {
+            let Value::V128(bytes) = get_reg(registers, *src)? else {
+                return Err(type_mismatch_v128(registers, *src));
+            };
+            let width = shape.lane_width();
+            let mut bits = 0u32;
+            for (i, lane) in bytes.chunks_exact(width).enumerate() {
+                if lane[width - 1] & 0x80 != 0 {
+                    bits |= 1 << i;
+                }
+            }
+            set_reg(registers, *dst, Value::I32(bits as i32))?;
+        }
+        RegOp::V128Compare {
+            dst,
+            a,
+            b,
+            shape,
+            kind,
+        } => {
+            let (Value::V128(a), Value::V128(b)) =
+                (get_reg(registers, *a)?, get_reg(registers, *b)?)
+            else {
+                return Err(type_mismatch_v128(registers, *b));
+            };
+            let mut out = [0u8; 16];
+            v128_compare(*shape, *kind, &mut out, &a, &b);
+            set_reg(registers, *dst, Value::V128(out))?;
+        }
+        RegOp::V128Shift {
+            dst,
+            src,
+            amount,
+            shape,
+            kind,
+        } => {
+            let Value::V128(bytes) = get_reg(registers, *src)? else {
+                return Err(type_mismatch_v128(registers, *src));
+            };
+            let Value::I32(amount) = get_reg(registers, *amount)? else {
+                return Err(RuntimeError {
+                    kind: RuntimeErrorKind::TypeMismatch {
+                        expected: ValType::Num(NumType::I32),
+                        found: get_reg(registers, *amount)?.val_type(),
+                    },
+                });
+            };
+            let mut out = [0u8; 16];
+            v128_shift(*shape, *kind, &mut out, &bytes, amount);
+            set_reg(registers, *dst, Value::V128(out))?;
+        }
+        RegOp::V128FloatUnary {
+            dst,
+            src,
+            shape,
+            kind,
+        } => {
+            let Value::V128(bytes) = get_reg(registers, *src)? else {
+                return Err(type_mismatch_v128(registers, *src));
+            };
+            let mut out = [0u8; 16];
+            v128_float_unary(*shape, *kind, &mut out, &bytes);
+            set_reg(registers, *dst, Value::V128(out))?;
+        }
+        RegOp::V128Convert { dst, src, kind } => {
+            let Value::V128(bytes) = get_reg(registers, *src)? else {
+                return Err(type_mismatch_v128(registers, *src));
+            };
+            let mut out = [0u8; 16];
+            v128_convert(*kind, &mut out, &bytes);
+            set_reg(registers, *dst, Value::V128(out))?;
+        }
+        RegOp::V128Swizzle { dst, a, b } => {
+            let (Value::V128(a_bytes), Value::V128(b_bytes)) =
+                (get_reg(registers, *a)?, get_reg(registers, *b)?)
+            else {
+                return Err(type_mismatch_v128(registers, *a));
+            };
+            let mut out = [0u8; 16];
+            v128_swizzle(&mut out, &a_bytes, &b_bytes);
+            set_reg(registers, *dst, Value::V128(out))?;
+        }
+        RegOp::V128Shuffle { dst, a, b, lanes } => {
+            let (Value::V128(a_bytes), Value::V128(b_bytes)) =
+                (get_reg(registers, *a)?, get_reg(registers, *b)?)
+            else {
+                return Err(type_mismatch_v128(registers, *a));
+            };
+            let mut out = [0u8; 16];
+            v128_shuffle(&mut out, &a_bytes, &b_bytes, lanes);
+            set_reg(registers, *dst, Value::V128(out))?;
+        }
     }
     Ok(())
 }
@@ -1367,34 +2995,329 @@ fn require_store(store: Option<&Store>) -> Result<&Store, RuntimeError> {
 }
 
 /// Whether a runtime value satisfies a value type at the boundary: exact
-/// for numerics/vectors, nullable-aware subtyping for references (a
-/// non-null value satisfies `(ref T)`; abstract funcref/externref accept
-/// matching heap families at any nullability).
-fn value_satisfies(expected: ValType, value: Value) -> bool {
+/// for numerics/vectors, nullable-aware subtyping for references.
+///
+/// Concrete aggregate references are resolved against the store's heap and
+/// matched module-aware: a `GcRef`'s cross-module closed type must be a
+/// subtype of the expected `(ref $t)`, so passing a struct where a different
+/// struct (or an array) is declared is a clean rejection rather than the
+/// former "any `GcRef` fits any `Type(_)`" laxness.
+fn value_satisfies(
+    module: Option<&RegModule>,
+    store: Option<&Store>,
+    expected: ValType,
+    value: Value,
+) -> bool {
     use crate::types::HeapType;
     match (expected, value) {
-        (ValType::Ref(expected_ref), value) => match (expected_ref, value) {
-            (RefType::FuncRef, Value::FuncRef(_)) => true,
-            (RefType::ExternRef, Value::ExternRef(_)) => true,
-            (RefType::Typed { nullable, heap }, value) => {
-                let non_null = match value {
-                    Value::FuncRef(inner) => inner.is_some(),
-                    Value::ExternRef(inner) => inner.is_some(),
-                    _ => return false,
-                };
-                if !nullable && !non_null {
-                    return false;
-                }
-                matches!(
-                    (heap, value),
-                    (HeapType::Func | HeapType::Type(_), Value::FuncRef(_))
-                        | (HeapType::Extern, Value::ExternRef(_))
-                )
+        (ValType::Ref(expected_ref), value) => {
+            let is_null = is_null_ref(&value);
+            if is_null && !expected_ref.is_nullable() {
+                return false;
             }
-            _ => false,
-        },
+            if is_null {
+                return null_satisfies_heap(expected_ref.heap_type(), &value);
+            }
+            match expected_ref.heap_type() {
+                HeapType::Func => matches!(value, Value::FuncRef(_)),
+                HeapType::Extern => matches!(value, Value::ExternRef(_) | Value::ExternGc(_)),
+                HeapType::Exn => matches!(value, Value::ExnRef(_)),
+                HeapType::Any => match value {
+                    // i31 immediates are valid any values and need no heap
+                    // resolution.
+                    Value::I31(_) => true,
+                    // An internalized host handle is a non-null any value but
+                    // is NOT an eq value (it has no struct/array/i31
+                    // structure).
+                    Value::HostAny(_) => true,
+                    // A `GcRef` must RESOLVE (own heap or a registered
+                    // foreign heap, object in bounds) even though the
+                    // declared heap type is abstract: an unregistered or
+                    // stale reference is a clean rejection, never a dangling
+                    // handle admitted across the boundary.
+                    Value::GcRef { heap, id } => gc_ref_resolves(store, heap, id),
+                    _ => false,
+                },
+                HeapType::Eq => match value {
+                    Value::I31(_) => true,
+                    Value::GcRef { heap, id } => gc_ref_resolves(store, heap, id),
+                    _ => false,
+                },
+                HeapType::Struct => gc_value_is_kind(store, &value, true),
+                HeapType::Array => gc_value_is_kind(store, &value, false),
+                HeapType::I31 => matches!(value, Value::I31(_)),
+                HeapType::None | HeapType::NoFunc | HeapType::NoExtern | HeapType::NoExn => false,
+                HeapType::Type(idx) => concrete_value_matches(module, store, idx, &value),
+            }
+        }
         (expected, value) => expected == value.val_type(),
     }
+}
+
+/// A reference RESULT pattern, mirroring the reference interpreter's
+/// `script/runner.ml:464-483` `assert_ref_pat` rows. The runner maps the wast
+/// result syntax onto these cases; the semantics live here so every embedder
+/// (and the tests) exercises the same relation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefPattern {
+    /// `NullPat _`: only a null reference matches.
+    Null,
+    /// `RefPat (ExternRef (HostRef n))`: host-handle identity in the extern
+    /// zone. `None` is the bare `(ref.extern)` pattern — the
+    /// `RefTypePat ExternHT, _` row, which matches EVERY reference value,
+    /// including nulls (there is no null exclusion in the pin).
+    Extern(Option<u32>),
+    /// `RefPat (HostRef n)`: host-handle identity on the any-side handle
+    /// (`script.ml:93` equates `HostRef` with `HostRef` only, so an
+    /// externalized handle in the extern zone does NOT match).
+    Host(u32),
+    /// `(ref.func)` with no index: any non-null funcref.
+    FuncAny,
+    /// `(ref.func $f)`: a specific module-local function index.
+    FuncIndex(u32),
+    /// `RefTypePat AnyHT`: every non-null reference EXCEPT a funcref
+    /// (`runner.ml:467-469`); nulls also match the `AnyHT, _` row.
+    Any,
+    /// `RefTypePat EqHT`: i31/struct/array only.
+    Eq,
+    /// `RefTypePat StructHT`.
+    Struct,
+    /// `RefTypePat ArrayHT`.
+    Array,
+    /// `RefTypePat I31HT`.
+    I31,
+}
+
+/// Whether a runtime reference value satisfies a [`RefPattern`], following
+/// the pinned `assert_ref_pat` rows. GC object kinds are resolved through the
+/// store's (or a registered foreign) heap.
+///
+/// Reference patterns apply ONLY to reference values: the pin dispatches them
+/// from the `Ref` result case (`runner.ml:481`), so a numeric value never
+/// matches a reference pattern.
+pub fn ref_matches_pattern(value: &Value, pattern: RefPattern, store: Option<&Store>) -> bool {
+    if !is_reference_value(value) {
+        return false;
+    }
+    match pattern {
+        RefPattern::Null => is_null_ref(value),
+        RefPattern::Extern(Some(handle)) => *value == Value::ExternRef(Some(handle)),
+        // `RefTypePat ExternHT, _ -> true`: EVERY reference value matches,
+        // null included (runner.ml:475).
+        RefPattern::Extern(None) => true,
+        // `RefPat (HostRef n)` is `eq_ref` identity, and `script.ml:93`
+        // equates `HostRef` with `HostRef` only: the internalized any-side
+        // handle matches, the externalized extern-zone value does not.
+        RefPattern::Host(handle) => {
+            matches!(value, Value::HostAny(Some(found)) if *found == handle)
+        }
+        RefPattern::FuncAny => matches!(value, Value::FuncRef(Some(_))),
+        RefPattern::FuncIndex(idx) => {
+            matches!(value, Value::FuncRef(Some((_, found))) if *found == idx)
+        }
+        RefPattern::Any => !matches!(value, Value::FuncRef(Some(_))),
+        RefPattern::Eq => matches!(value, Value::I31(_) | Value::GcRef { .. }),
+        RefPattern::Struct => gc_ref_is_kind(store, value, true),
+        RefPattern::Array => gc_ref_is_kind(store, value, false),
+        RefPattern::I31 => matches!(value, Value::I31(_)),
+    }
+}
+
+/// Whether a value is a reference (`Value.ref_` in the reference
+/// interpreter). Non-reference values dispatch numeric/vector patterns.
+fn is_reference_value(value: &Value) -> bool {
+    matches!(
+        value,
+        Value::FuncRef(_)
+            | Value::ExternRef(_)
+            | Value::HostAny(_)
+            | Value::ExternGc(_)
+            | Value::ExnRef(_)
+            | Value::GcRef { .. }
+            | Value::I31(_)
+    )
+}
+
+/// Whether a `GcRef` object is a struct (`want_struct`) or an array, resolved
+/// against its owning (possibly foreign) heap.
+fn gc_ref_is_kind(store: Option<&Store>, value: &Value, want_struct: bool) -> bool {
+    let Value::GcRef { heap, id } = value else {
+        return false;
+    };
+    let Some(store) = store else {
+        return false;
+    };
+    store
+        .with_heap(*heap, |heap| {
+            let Some(type_id) = heap.object_type_id(*id) else {
+                return false;
+            };
+            match heap.type_kind(type_id) {
+                Some(GcTypeKind::Struct(_)) => want_struct,
+                Some(GcTypeKind::Array(_)) => !want_struct,
+                None => false,
+            }
+        })
+        .unwrap_or(false)
+}
+
+/// Whether a null reference value is a legal null of the expected heap
+/// family. Non-null bottoms constrain nothing further.
+fn null_satisfies_heap(heap: crate::types::HeapType, value: &Value) -> bool {
+    use crate::types::HeapType;
+    match heap {
+        HeapType::Extern | HeapType::NoExtern => {
+            matches!(value, Value::ExternRef(None) | Value::ExternGc(None))
+        }
+        HeapType::Exn | HeapType::NoExn => matches!(value, Value::ExnRef(None)),
+        // The generic funcref null is the any-side null produced by
+        // `ref.null any`; an internalized host null is also a legal any null.
+        _ => matches!(value, Value::FuncRef(None) | Value::HostAny(None)),
+    }
+}
+
+/// Whether a `GcRef` resolves against this store: its heap is the store's
+/// own or a registered foreign heap, and the object id is in bounds.
+fn gc_ref_resolves(store: Option<&Store>, heap: HeapId, id: ObjectId) -> bool {
+    let Some(store) = store else {
+        return false;
+    };
+    store
+        .with_heap(heap, |heap| heap.object_type_id(id).is_some())
+        .unwrap_or(false)
+}
+
+/// Whether a `GcRef` object is a struct (`want_struct`) or array, resolving
+/// the owning heap; an unregistered heap is a clean non-match.
+fn gc_value_is_kind(store: Option<&Store>, value: &Value, want_struct: bool) -> bool {
+    let Value::GcRef { heap, id } = value else {
+        return false;
+    };
+    let Some(store) = store else {
+        return false;
+    };
+    store
+        .with_heap(*heap, |heap| {
+            let Some(type_id) = heap.object_type_id(*id) else {
+                return false;
+            };
+            match heap.type_kind(type_id) {
+                Some(GcTypeKind::Struct(_)) => want_struct,
+                Some(GcTypeKind::Array(_)) => !want_struct,
+                None => false,
+            }
+        })
+        .unwrap_or(false)
+}
+
+/// Module-aware match of a runtime value against a concrete defined type
+/// `(ref $t)`. Function types accept function references; struct/array
+/// types require a GC reference whose cross-module closed form is a
+/// subtype of the expected closed form.
+fn concrete_value_matches(
+    module: Option<&RegModule>,
+    store: Option<&Store>,
+    idx: TypeIdx,
+    value: &Value,
+) -> bool {
+    let Some(module) = module else {
+        // Storeless execution cannot resolve a concrete aggregate; keep the
+        // historical permissive behavior for the (test-only) bare path.
+        return matches!(value, Value::FuncRef(_));
+    };
+    match module.type_defs.get(idx.0 as usize).map(|sub| &sub.comp) {
+        Some(CompType::Func(_)) => concrete_func_value_matches(module, store, idx, value),
+        Some(CompType::Struct(_)) | Some(CompType::Array(_)) => {
+            let Value::GcRef { heap, id } = value else {
+                return false;
+            };
+            let Some(store) = store else {
+                return false;
+            };
+            // Both closed forms come from interned tables: the expected one
+            // from the store's instantiation-time cache, the actual one from
+            // the value's heap. No closed-form construction (and no layout
+            // clone) happens on the boundary path.
+            let Ok(expected_id) = store.gc_type_id(idx) else {
+                return false;
+            };
+            store
+                .with_heap(*heap, |value_heap| {
+                    let Some(actual_id) = value_heap.object_type_id(*id) else {
+                        return false;
+                    };
+                    let Some(actual) = value_heap.closed_type(actual_id) else {
+                        return false;
+                    };
+                    store.with_gc_heap(|own_heap| {
+                        own_heap
+                            .closed_type(expected_id)
+                            .is_some_and(|expected| actual.is_subtype_of(expected))
+                    })
+                })
+                .unwrap_or(false)
+        }
+        None => false,
+    }
+}
+
+/// Whether a runtime value satisfies a CONCRETE function type `(ref $ft)`.
+///
+/// The reference's actual function type is resolved in its DEFINING module
+/// (the link group supplies it for a foreign instance) and compared
+/// structurally against the expected type: parameter types contravariantly,
+/// result types covariantly, concrete reference types by rolled closed form
+/// or declared-supertype chain (`valid/match.ml:135-141`). A funcref whose
+/// signature does not match is rejected — the former "any `FuncRef` fits any
+/// concrete function type" laxness admitted observably wrong calls.
+/// Abstract [`HeapType::Func`] stays permissive (lattice-correct): every
+/// funcref is a `funcref`.
+fn concrete_func_value_matches(
+    module: &RegModule,
+    store: Option<&Store>,
+    idx: TypeIdx,
+    value: &Value,
+) -> bool {
+    let Value::FuncRef(Some((instance_id, func_idx))) = value else {
+        return false;
+    };
+    // Resolve the defining module of the function reference.
+    let foreign = match store {
+        Some(store) if store.instance_id() != *instance_id => {
+            match store.group_module(*instance_id) {
+                Some(module) => Some(module),
+                None => return false,
+            }
+        }
+        Some(_) => None,
+        // Storeless execution runs unlinked modules (instance 0); any other
+        // instance id cannot be resolved and is a clean rejection.
+        None if *instance_id == 0 => None,
+        None => return false,
+    };
+    let source: &RegModule = foreign.as_deref().unwrap_or(module);
+
+    // The function's own type entry in its defining module.
+    let source_idx = match source.imported_funcs.get(*func_idx as usize) {
+        Some(import) => import.type_idx,
+        None => match source.funcs.iter().find(|func| func.idx.0 == *func_idx) {
+            Some(func) => func.type_idx,
+            None => return false,
+        },
+    };
+
+    // `match_deftype`: the value's function type must be canonically the
+    // expected one (or declare a supertype chain reaching it). Not a
+    // params/results comparison — a different rec-group shape is a different
+    // type even with an identical signature.
+    crate::types::defined_type_matches(
+        &source.type_defs,
+        &source.rec_groups,
+        source_idx,
+        &module.type_defs,
+        &module.rec_groups,
+        idx,
+    )
 }
 
 /// WASM min: NaN propagates as the canonical NaN; -0 is smaller than +0.
@@ -1471,22 +3394,252 @@ fn grow_memory_fallible(mem: &mut Vec<u8>, new_pages: usize) -> bool {
 fn memory_bounds(
     mem: &[u8],
     memarg: &MemArg,
-    addr: u32,
+    addr: u64,
     width: usize,
 ) -> Result<core::ops::Range<usize>, RuntimeError> {
-    let ea = addr as u64 + memarg.offset as u64;
+    let ea = addr
+        .checked_add(memarg.offset)
+        .ok_or(trap(RuntimeTrap::OutOfBoundsMemoryAccess))?;
     let end = ea
         .checked_add(width as u64)
         .ok_or(trap(RuntimeTrap::OutOfBoundsMemoryAccess))?;
     if end > mem.len() as u64 {
         return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
     }
+    // On 32-bit targets the in-bounds range may still not be addressable;
+    // guard before narrowing to `usize` (trivially true on 64-bit).
+    if ea > usize::MAX as u64 || end > usize::MAX as u64 {
+        return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
+    }
     Ok(ea as usize..end as usize)
+}
+
+/// The shared handle of an atomic access's memory (the bytes are the same
+/// handle plain loads/stores use; `memory.grow` mutates it in place).
+fn atomic_memory(
+    store: Option<&Store>,
+    memarg: &MemArg,
+) -> Result<alloc::rc::Rc<core::cell::RefCell<Vec<u8>>>, RuntimeError> {
+    require_store(store)?
+        .shared_memory(memarg.memory.0)
+        .ok_or(RuntimeError {
+            kind: RuntimeErrorKind::UnknownMemory {
+                memory: memarg.memory.0,
+            },
+        })
+}
+
+/// Read an atomic access's address operand, at the target memory's declared
+/// index width (32-bit for every shared memory at the threads pin; a 64-bit
+/// unshared memory still admits atomics in this engine).
+fn atomic_addr(
+    store: Option<&Store>,
+    registers: &[Option<Value>],
+    addr: Reg,
+    memarg: &MemArg,
+) -> Result<u64, RuntimeError> {
+    let is64 = require_store(store)?
+        .memory_type(memarg.memory.0)
+        .is_some_and(|ty| ty.limits.is64);
+    read_addr(get_reg(registers, addr)?, is64)
+}
+
+/// The natural-alignment check for an atomic access (`check_align`, pin
+/// `eval.ml:140-142` / `runtime/memory.ml:23-28`).
+///
+/// The check runs on the EFFECTIVE address `base + memarg.offset`, per the
+/// normative text (`document/core/exec/instructions.rst`, `_exec-atomic.*`:
+/// "ea = i + memarg.OFFSET … If ea modulo N/8 is not equal to 0, then:
+/// trap"). The pin's interpreter checks only the base address (`eval.ml:275`
+/// passes `addr` before `offset` is applied inside `load_value`) — a bug the
+/// corpus cannot see because no atomic test file uses `offset=`. Addition
+/// wraps modulo the address width, matching the spec's modular effective
+/// address; a genuinely out-of-range result is caught by the bounds check.
+fn atomic_align(memarg: &MemArg, addr: u64, byte_width: usize) -> Result<(), RuntimeError> {
+    let ea = addr.wrapping_add(memarg.offset);
+    if ea % byte_width as u64 != 0 {
+        return Err(trap(RuntimeTrap::UnalignedAtomicMemoryAccess));
+    }
+    Ok(())
+}
+
+/// Alignment first, then the bounds-checked byte range: the alignment trap
+/// precedes every bounds check for every atomic op (`eval.ml:271-357`).
+fn atomic_range(
+    mem: &[u8],
+    memarg: &MemArg,
+    addr: u64,
+    byte_width: usize,
+) -> Result<core::ops::Range<usize>, RuntimeError> {
+    atomic_align(memarg, addr, byte_width)?;
+    memory_bounds(mem, memarg, addr, byte_width)
+}
+
+/// Zero-extended little-endian read of `bytes.len()` (1..=8) bytes: the
+/// narrow atomic forms zero-extend to their full value width (`ZX` in the
+/// pin's `load_packed`).
+fn atomic_read(bytes: &[u8]) -> u64 {
+    let mut buf = [0u8; 8];
+    buf[..bytes.len()].copy_from_slice(bytes);
+    u64::from_le_bytes(buf)
+}
+
+/// Write the low `bytes.len()` bytes of `bits`: narrow atomic stores
+/// truncate (`store_packed` in the pin).
+fn atomic_write(bytes: &mut [u8], bits: u64) {
+    let raw = bits.to_le_bytes();
+    bytes.copy_from_slice(&raw[..bytes.len()]);
+}
+
+/// Read an atomic operand of value type `ty` as its raw bits.
+fn atomic_operand_bits(value: Value, ty: ValType) -> Result<u64, RuntimeError> {
+    match (value, ty) {
+        (Value::I32(value), ValType::Num(NumType::I32)) => Ok(value as u32 as u64),
+        (Value::I64(value), _) => Ok(value as u64),
+        (other, expected) => Err(RuntimeError {
+            kind: RuntimeErrorKind::TypeMismatch {
+                expected,
+                found: other.val_type(),
+            },
+        }),
+    }
+}
+
+/// Rebuild a value of type `ty` from raw bits.
+fn atomic_value(bits: u64, ty: ValType) -> Value {
+    match ty {
+        ValType::Num(NumType::I32) => Value::I32(bits as u32 as i32),
+        _ => Value::I64(bits as i64),
+    }
+}
+
+/// `eval_rmwop` at the full value width: wrapping add/sub, bitwise
+/// and/or/xor, and xchg returning the operand (`eval.ml:295-311`).
+fn atomic_rmw(kind: AtomicRmw, old: u64, operand: u64) -> u64 {
+    match kind {
+        AtomicRmw::Add => old.wrapping_add(operand),
+        AtomicRmw::Sub => old.wrapping_sub(operand),
+        AtomicRmw::And => old & operand,
+        AtomicRmw::Or => old | operand,
+        AtomicRmw::Xor => old ^ operand,
+        AtomicRmw::Xchg => operand,
+    }
 }
 
 /// Whether a reference value is null (`ref.null`).
 fn is_null_ref(value: &Value) -> bool {
-    matches!(value, Value::FuncRef(None) | Value::ExternRef(None))
+    matches!(
+        value,
+        Value::FuncRef(None)
+            | Value::ExternRef(None)
+            | Value::ExnRef(None)
+            | Value::HostAny(None)
+            | Value::ExternGc(None)
+    )
+}
+
+/// Runtime `match_reftype [] (type_of_ref r) (nullable, ht)`: whether a
+/// runtime reference value matches a target reference heap type. Zero
+/// allocation: concrete targets walk the object's precomputed ancestry
+/// chain, resolved through the store's own or a registered foreign heap.
+fn ref_matches_ht(store: Option<&Store>, value: Value, nullable: bool, ht: HeapType) -> bool {
+    if is_null_ref(&value) {
+        return nullable;
+    }
+    match (value, ht) {
+        (Value::I31(_), HeapType::I31 | HeapType::Eq | HeapType::Any) => true,
+        (Value::FuncRef(_), HeapType::Func) => true,
+        // A function reference carries no type of its own: its runtime type is
+        // the function's declared defined type, and a concrete target is
+        // matched with `match_deftype` (`runtime/instance.ml:48`,
+        // `valid/match.ml:92,151-155`).
+        (Value::FuncRef(Some((instance, func))), HeapType::Type(idx)) => {
+            store.is_some_and(|store| store.func_ref_matches_type(instance, func, idx))
+        }
+        // Both extern-domain shapes match `extern`: a raw host reference and
+        // a value externalized from the GC domain.
+        (Value::ExternRef(_) | Value::ExternGc(_), HeapType::Extern) => true,
+        (Value::ExnRef(_), HeapType::Exn) => true,
+        // An internalized host handle is a non-null any value, and matches
+        // nothing else in the any hierarchy (it is not an eq value).
+        (Value::HostAny(_), HeapType::Any) => true,
+        (Value::GcRef { heap, id }, target) => {
+            let Some(store) = store else {
+                return false;
+            };
+            store
+                .with_heap(heap, |obj_heap| {
+                    let Some(actual) = obj_heap.object_type_id(id) else {
+                        return false;
+                    };
+                    match target {
+                        HeapType::Any | HeapType::Eq => true,
+                        HeapType::Struct => {
+                            matches!(obj_heap.type_kind(actual), Some(GcTypeKind::Struct(_)))
+                        }
+                        HeapType::Array => {
+                            matches!(obj_heap.type_kind(actual), Some(GcTypeKind::Array(_)))
+                        }
+                        HeapType::Type(idx) => {
+                            // FAST PATH: same-heap concrete target. Heap type
+                            // ids are per-heap positional, so the store-side
+                            // precomputed id is valid in this heap.
+                            if heap == store.gc_heap_id() {
+                                let Ok(expected) = store.gc_type_id(idx) else {
+                                    return false;
+                                };
+                                return actual == expected
+                                    || obj_heap.type_ancestry(actual).contains(&expected);
+                            }
+                            // FOREIGN HEAP: positional ids do not transfer, so
+                            // the store-side id indexes the wrong table.
+                            // Resolve the target's closed form (read-only, no
+                            // interning, zero alloc) and look it up in the
+                            // OBJECT heap's key table; a miss means no match.
+                            // Then id-walk the object heap's own chain.
+                            let expected = store.with_gc_heap(|own_heap| {
+                                let expected_id = store.gc_type_id(idx).ok()?;
+                                let closed = own_heap.closed_type(expected_id)?;
+                                obj_heap.find_closed(closed)
+                            });
+                            expected.is_some_and(|expected| {
+                                actual == expected
+                                    || obj_heap.type_ancestry(actual).contains(&expected)
+                            })
+                        }
+                        _ => false,
+                    }
+                })
+                .unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
+/// `ref.eq` semantics (`value.ml:127`, `i31.ml:17`): i31 payload equality,
+/// GC object identity (same heap AND object id), null equals null, and
+/// values from different domains are never equal.
+fn eq_ref(lhs: Value, rhs: Value) -> bool {
+    match (lhs, rhs) {
+        (Value::I31(lhs), Value::I31(rhs)) => lhs == rhs,
+        (
+            Value::GcRef {
+                heap: lhs_heap,
+                id: lhs_id,
+            },
+            Value::GcRef {
+                heap: rhs_heap,
+                id: rhs_id,
+            },
+        ) => lhs_heap == rhs_heap && lhs_id == rhs_id,
+        (Value::FuncRef(lhs), Value::FuncRef(rhs)) => lhs == rhs,
+        (Value::ExternRef(lhs), Value::ExternRef(rhs)) => lhs == rhs,
+        (Value::HostAny(lhs), Value::HostAny(rhs)) => lhs == rhs,
+        (Value::ExternGc(lhs), Value::ExternGc(rhs)) => lhs == rhs,
+        (Value::ExnRef(lhs), Value::ExnRef(rhs)) => lhs == rhs,
+        (lhs, rhs) if is_null_ref(&lhs) && is_null_ref(&rhs) => true,
+        _ => false,
+    }
 }
 
 /// Extract an i32 memory address operand as u32.
@@ -1502,6 +3655,36 @@ fn expect_addr(value: Value) -> Result<u32, RuntimeError> {
     }
 }
 
+/// Read a memory/table address operand by the target's index type.
+///
+/// `is64` selects the expected register width: 64-bit memories and tables
+/// carry addresses in `I64`, 32-bit ones in `I32`. Validation already
+/// guarantees the width matches, so a wrong-width register is reported as a
+/// defensive `TypeMismatch`.
+fn read_addr(value: Value, is64: bool) -> Result<u64, RuntimeError> {
+    if is64 {
+        match value {
+            Value::I64(value) => Ok(value as u64),
+            other => Err(RuntimeError {
+                kind: RuntimeErrorKind::TypeMismatch {
+                    expected: ValType::Num(NumType::I64),
+                    found: other.val_type(),
+                },
+            }),
+        }
+    } else {
+        match value {
+            Value::I32(value) => Ok(value as u32 as u64),
+            other => Err(RuntimeError {
+                kind: RuntimeErrorKind::TypeMismatch {
+                    expected: ValType::Num(NumType::I32),
+                    found: other.val_type(),
+                },
+            }),
+        }
+    }
+}
+
 /// Whether references of this type default to null (nullable refs).
 fn ref_nullable(ref_type: &RefType) -> bool {
     match ref_type {
@@ -1511,14 +3694,291 @@ fn ref_nullable(ref_type: &RefType) -> bool {
 }
 
 /// The null value for a reference type (funcref null vs externref null).
-fn ref_null_value(ref_type: &RefType) -> Value {
+pub(crate) fn ref_null_value(ref_type: &RefType) -> Value {
     match ref_type {
         RefType::ExternRef
         | RefType::Typed {
             heap: crate::types::HeapType::Extern,
             ..
+        }
+        | RefType::Typed {
+            heap: crate::types::HeapType::NoExtern,
+            ..
         } => Value::ExternRef(None),
+        RefType::Typed {
+            heap: crate::types::HeapType::Exn,
+            ..
+        }
+        | RefType::Typed {
+            heap: crate::types::HeapType::NoExn,
+            ..
+        } => Value::ExnRef(None),
+        // The func side (`func`, `nofunc`, concrete function types) and every
+        // GC-side heap (`any`, `eq`, `i31`, `struct`, `array`, `none`) share
+        // the generic any-side null.
         _ => Value::FuncRef(None),
+    }
+}
+
+/// `any.convert_extern` (eval.ml:929-939): re-tag an extern-side reference
+/// into the any hierarchy. An immediate value-level re-tag that never
+/// allocates; a null extern reference becomes the any-side null.
+pub(crate) fn any_convert_extern(value: Value) -> Result<Value, RuntimeError> {
+    Ok(match value {
+        Value::ExternRef(payload) => Value::HostAny(payload),
+        Value::ExternGc(Some(ExternPayload::Gc(heap, id))) => Value::GcRef { heap, id },
+        Value::ExternGc(Some(ExternPayload::I31(payload))) => Value::I31(payload),
+        other if is_null_ref(&other) => Value::FuncRef(None),
+        other => {
+            return Err(RuntimeError {
+                kind: RuntimeErrorKind::TypeMismatch {
+                    expected: ValType::Ref(RefType::ExternRef),
+                    found: other.val_type(),
+                },
+            });
+        }
+    })
+}
+
+/// `extern.convert_any` (eval.ml:929-939): re-tag an any-side reference into
+/// the extern hierarchy, carrying the inner payload so the reverse
+/// conversion is an exact identity. Never allocates.
+pub(crate) fn extern_convert_any(value: Value) -> Result<Value, RuntimeError> {
+    Ok(match value {
+        Value::HostAny(payload) => Value::ExternRef(payload),
+        Value::GcRef { heap, id } => Value::ExternGc(Some(ExternPayload::Gc(heap, id))),
+        Value::I31(payload) => Value::ExternGc(Some(ExternPayload::I31(payload))),
+        other if is_null_ref(&other) => Value::ExternRef(None),
+        other => {
+            return Err(RuntimeError {
+                kind: RuntimeErrorKind::TypeMismatch {
+                    expected: ValType::Ref(RefType::from_parts(true, HeapType::Any)),
+                    found: other.val_type(),
+                },
+            });
+        }
+    })
+}
+
+/// The default value for a storage slot (numeric/vector zero, nullable ref
+/// null). Validation guarantees the field is defaultable.
+pub(crate) fn default_for_storage(storage: StorageType) -> Value {
+    match storage {
+        StorageType::I8 | StorageType::I16 => Value::I32(0),
+        StorageType::Val(val) => default_for_val(val),
+    }
+}
+
+fn default_for_val(val: ValType) -> Value {
+    match val {
+        ValType::Num(NumType::I32) => Value::I32(0),
+        ValType::Num(NumType::I64) => Value::I64(0),
+        ValType::Num(NumType::F32) => Value::F32(0.0),
+        ValType::Num(NumType::F64) => Value::F64(0.0),
+        ValType::Vec(_) => Value::V128([0; 16]),
+        ValType::Ref(ref_type) => ref_null_value(&ref_type),
+    }
+}
+
+/// The heap's packed-read extension for a lowered GC `get` op.
+fn heap_ext(ext: GcExt) -> Option<Ext> {
+    match ext {
+        GcExt::None => None,
+        GcExt::S => Some(Ext::S),
+        GcExt::U => Some(Ext::U),
+    }
+}
+
+fn gc_allocation_failed() -> RuntimeError {
+    RuntimeError {
+        kind: RuntimeErrorKind::ResourceLimitExceeded { what: "gc heap" },
+    }
+}
+
+fn frame_allocation_failed() -> RuntimeError {
+    RuntimeError {
+        kind: RuntimeErrorKind::ResourceLimitExceeded {
+            what: "interpreter frame",
+        },
+    }
+}
+
+fn unknown_type_err(type_idx: TypeIdx) -> RuntimeError {
+    RuntimeError {
+        kind: RuntimeErrorKind::UnknownType {
+            type_idx: type_idx.0,
+        },
+    }
+}
+
+fn unknown_data_err(data: u32) -> RuntimeError {
+    RuntimeError {
+        kind: RuntimeErrorKind::UnknownDataSegment { data },
+    }
+}
+
+fn unknown_elem_err(elem: u32) -> RuntimeError {
+    RuntimeError {
+        kind: RuntimeErrorKind::UnknownElem { elem },
+    }
+}
+
+/// Resolve a `GcRef`'s heap handle, reporting a clean error when the heap
+/// was never registered with this store (never panic, never misindex).
+fn require_heap(
+    store: &Store,
+    heap: HeapId,
+) -> Result<alloc::rc::Rc<core::cell::RefCell<GcHeap>>, RuntimeError> {
+    store.heap_handle(heap).ok_or(RuntimeError {
+        kind: RuntimeErrorKind::GcHeapNotFound { heap: heap.0 },
+    })
+}
+
+fn with_resolved_heap<R>(
+    store: &Store,
+    heap: HeapId,
+    f: impl FnOnce(&GcHeap) -> R,
+) -> Result<R, RuntimeError> {
+    store.with_heap(heap, f).ok_or(RuntimeError {
+        kind: RuntimeErrorKind::GcHeapNotFound { heap: heap.0 },
+    })
+}
+
+fn with_resolved_heap_mut<R>(
+    store: &Store,
+    heap: HeapId,
+    f: impl FnOnce(&mut GcHeap) -> R,
+) -> Result<R, RuntimeError> {
+    store.with_heap_mut(heap, f).ok_or(RuntimeError {
+        kind: RuntimeErrorKind::GcHeapNotFound { heap: heap.0 },
+    })
+}
+
+fn with_array_len(store: &Store, heap: HeapId, id: ObjectId) -> Result<u32, RuntimeError> {
+    with_resolved_heap(store, heap, |heap| heap.array_len(id))
+        .map(|len| len.ok_or_else(|| unknown_type_err(TypeIdx(0))))?
+}
+
+/// Null-check a GC reference operand before any heap access (every
+/// struct/array access traps on a null operand first). Returns the owning
+/// heap id and object id.
+fn expect_gc_ref(value: Value, null_trap: RuntimeTrap) -> Result<(HeapId, ObjectId), RuntimeError> {
+    if is_null_ref(&value) {
+        return Err(trap(null_trap));
+    }
+    match value {
+        Value::GcRef { heap, id } => Ok((heap, id)),
+        other => Err(RuntimeError {
+            kind: RuntimeErrorKind::TypeMismatch {
+                expected: ValType::Ref(RefType::from_parts(true, HeapType::Any)),
+                found: other.val_type(),
+            },
+        }),
+    }
+}
+
+/// Construct a `GcRef` value for an object in the store's own heap.
+fn own_gc_ref(store: &Store, id: ObjectId) -> Value {
+    Value::GcRef {
+        heap: store.gc_heap_id(),
+        id,
+    }
+}
+
+fn expect_u32(value: Value) -> Result<u32, RuntimeError> {
+    match value {
+        Value::I32(value) => Ok(value as u32),
+        other => Err(RuntimeError {
+            kind: RuntimeErrorKind::TypeMismatch {
+                expected: ValType::Num(NumType::I32),
+                found: other.val_type(),
+            },
+        }),
+    }
+}
+
+/// `array_oob a i n` (eval.ml): `i + n > len`, unsigned with overflow as
+/// out of bounds.
+fn array_index_oob(index: u32, count: u32, len: u32) -> bool {
+    (index as u64)
+        .checked_add(count as u64)
+        .is_none_or(|end| end > len as u64)
+}
+
+/// Load `len` elements of `storage` from a data segment starting at byte
+/// `src` (`array.new_data` / `array.init_data`). Segment bounds precede any
+/// payload build, and the payload reserve is fallible.
+fn data_segment_values(
+    bytes: &[u8],
+    src: u32,
+    len: u32,
+    width: u64,
+    storage: StorageType,
+) -> Result<Vec<Value>, RuntimeError> {
+    let byte_len = (len as u64)
+        .checked_mul(width)
+        .ok_or_else(|| trap(RuntimeTrap::OutOfBoundsMemoryAccess))?;
+    let end = (src as u64)
+        .checked_add(byte_len)
+        .ok_or_else(|| trap(RuntimeTrap::OutOfBoundsMemoryAccess))?;
+    if end > bytes.len() as u64 {
+        return Err(trap(RuntimeTrap::OutOfBoundsMemoryAccess));
+    }
+    let mut values: Vec<Value> = Vec::new();
+    values
+        .try_reserve(len as usize)
+        .map_err(|_| gc_allocation_failed())?;
+    for i in 0..len as u64 {
+        let off = (src as u64 + i * width) as usize;
+        let width = width as usize;
+        values.push(read_storage_value(&bytes[off..off + width], storage));
+    }
+    Ok(values)
+}
+
+/// Copy `len` element values from an element segment (`array.new_elem` /
+/// `array.init_elem`). Segment bounds precede the payload reserve.
+fn elem_segment_values(values: &[Value], src: u32, len: u32) -> Result<Vec<Value>, RuntimeError> {
+    let end = (src as u64)
+        .checked_add(len as u64)
+        .ok_or_else(|| trap(RuntimeTrap::OutOfBoundsTableAccess))?;
+    if end > values.len() as u64 {
+        return Err(trap(RuntimeTrap::OutOfBoundsTableAccess));
+    }
+    let mut out: Vec<Value> = Vec::new();
+    out.try_reserve(len as usize)
+        .map_err(|_| gc_allocation_failed())?;
+    out.extend_from_slice(&values[src as usize..end as usize]);
+    Ok(out)
+}
+
+/// Read one storage value from a data segment (`Data.load_val_storage`):
+/// little-endian, packed i8/i16 zero-extended into an `i32`.
+fn read_storage_value(bytes: &[u8], storage: StorageType) -> Value {
+    match storage {
+        StorageType::I8 => Value::I32(bytes[0] as i32),
+        StorageType::I16 => Value::I32(u16::from_le_bytes([bytes[0], bytes[1]]) as i32),
+        StorageType::Val(val) => match val {
+            ValType::Num(NumType::I32) => {
+                Value::I32(i32::from_le_bytes(bytes.try_into().expect("width checked")))
+            }
+            ValType::Num(NumType::I64) => {
+                Value::I64(i64::from_le_bytes(bytes.try_into().expect("width checked")))
+            }
+            ValType::Num(NumType::F32) => Value::F32(f32::from_bits(u32::from_le_bytes(
+                bytes.try_into().expect("width checked"),
+            ))),
+            ValType::Num(NumType::F64) => Value::F64(f64::from_bits(u64::from_le_bytes(
+                bytes.try_into().expect("width checked"),
+            ))),
+            ValType::Vec(_) => {
+                let mut vec = [0u8; 16];
+                vec.copy_from_slice(bytes);
+                Value::V128(vec)
+            }
+            // Numeric/vector storages only are validated for data segments.
+            ValType::Ref(_) => Value::FuncRef(None),
+        },
     }
 }
 
@@ -1531,7 +3991,28 @@ macro_rules! lane_int_op {
             V128BinaryKind::Sub => a.wrapping_sub(b),
             V128BinaryKind::Mul => a.wrapping_mul(b),
             V128BinaryKind::Div => a.wrapping_div(b),
-            _ => unreachable!("bitwise kinds handled separately"),
+            V128BinaryKind::AddSatS => a.saturating_add(b),
+            V128BinaryKind::SubSatS => a.saturating_sub(b),
+            V128BinaryKind::MinS => a.min(b),
+            V128BinaryKind::MaxS => a.max(b),
+            _ => unreachable!("unsigned kinds handled by lane_uint_op!"),
+        }
+    }};
+}
+
+/// Lane-wise unsigned-interpretation integer arithmetic. The `_u` variants
+/// reinterpret the lane bytes as unsigned before operating; `avgr_u`
+/// widens so `(a + b + 1)` cannot overflow.
+macro_rules! lane_uint_op {
+    ($kind:expr, $a:expr, $b:expr, $ty:ty) => {{
+        let (a, b) = ($a as $ty, $b as $ty);
+        match $kind {
+            V128BinaryKind::AddSatU => a.saturating_add(b),
+            V128BinaryKind::SubSatU => a.saturating_sub(b),
+            V128BinaryKind::MinU => a.min(b),
+            V128BinaryKind::MaxU => a.max(b),
+            V128BinaryKind::AvgrU => (a as u32 + b as u32).div_ceil(2) as $ty,
+            _ => unreachable!("signed kinds handled by lane_int_op!"),
         }
     }};
 }
@@ -1586,8 +4067,15 @@ fn splat_bytes(shape: LaneShape, scalar: Value) -> Result<[u8; 16], RuntimeError
     Ok(out)
 }
 
-/// Read one lane as a scalar Value.
-fn extract_lane(shape: LaneShape, bytes: &[u8; 16], lane: u8) -> Result<Value, RuntimeError> {
+/// Read one lane as a scalar Value. `signed` only affects 8/16-bit int
+/// lanes (`_s` sign-extends, `_u` zero-extends); wider/float shapes ignore
+/// it.
+fn extract_lane(
+    shape: LaneShape,
+    bytes: &[u8; 16],
+    lane: u8,
+    signed: bool,
+) -> Result<Value, RuntimeError> {
     let width = shape.lane_width();
     let start = lane as usize * width;
     if start + width > 16 {
@@ -1597,9 +4085,20 @@ fn extract_lane(shape: LaneShape, bytes: &[u8; 16], lane: u8) -> Result<Value, R
     }
     let lane_bytes = &bytes[start..start + width];
     Ok(match shape {
-        LaneShape::I8x16 => Value::I32(lane_bytes[0] as i8 as i32),
+        LaneShape::I8x16 => {
+            if signed {
+                Value::I32(lane_bytes[0] as i8 as i32)
+            } else {
+                Value::I32(lane_bytes[0] as i32)
+            }
+        }
         LaneShape::I16x8 => {
-            Value::I32(i16::from_le_bytes(lane_bytes.try_into().expect("width")) as i32)
+            let value = i16::from_le_bytes(lane_bytes.try_into().expect("width"));
+            if signed {
+                Value::I32(value as i32)
+            } else {
+                Value::I32(value as u16 as i32)
+            }
         }
         LaneShape::I32x4 => Value::I32(i32::from_le_bytes(lane_bytes.try_into().expect("width"))),
         LaneShape::I64x2 => Value::I64(i64::from_le_bytes(lane_bytes.try_into().expect("width"))),
@@ -1650,6 +4149,11 @@ fn v128_binary(shape: LaneShape, kind: V128BinaryKind, lhs: &[u8; 16], rhs: &[u8
                 out[i] = lhs[i] ^ rhs[i];
             }
         }
+        V128BinaryKind::Andnot => {
+            for i in 0..16 {
+                out[i] = lhs[i] & !rhs[i];
+            }
+        }
         _ => {
             let width = shape.lane_width();
             for ((dst_lane, lhs_lane), rhs_lane) in out
@@ -1671,40 +4175,712 @@ fn apply_lane_binary(
     lhs: &[u8],
     rhs: &[u8],
 ) {
+    // Unsigned-interpretation kinds route through `lane_uint_op!` on the
+    // unsigned view of the lane width; everything else keeps the signed
+    // path. q15mulr is i16-only and needs i32 intermediates.
     match shape {
         LaneShape::I8x16 => {
-            dst[0] = lane_int_op!(kind, lhs[0], rhs[0], i8) as u8;
+            if kind == V128BinaryKind::Q15MulrSatS {
+                unreachable!("q15mulr_sat_s is i16x8-only");
+            }
+            if uses_unsigned_view(kind) {
+                dst[0] = lane_uint_op!(kind, lhs[0], rhs[0], u8);
+            } else {
+                dst[0] = lane_int_op!(kind, lhs[0], rhs[0], i8) as u8;
+            }
         }
         LaneShape::I16x8 => {
-            let a = i16::from_le_bytes(lhs.try_into().expect("width"));
-            let b = i16::from_le_bytes(rhs.try_into().expect("width"));
-            let result = lane_int_op!(kind, a, b, i16);
+            let (a, b) = (
+                i16::from_le_bytes(lhs.try_into().expect("width")),
+                i16::from_le_bytes(rhs.try_into().expect("width")),
+            );
+            let result = if kind == V128BinaryKind::Q15MulrSatS {
+                // q15: saturate_i16((a*b + 0x4000) >> 15) on i32 lanes.
+                let product = a as i32 * b as i32;
+                let shifted = (product + 0x4000) >> 15;
+                shifted.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+            } else if uses_unsigned_view(kind) {
+                lane_uint_op!(kind, a, b, u16) as i16
+            } else {
+                lane_int_op!(kind, a, b, i16)
+            };
             dst.copy_from_slice(&result.to_le_bytes());
         }
         LaneShape::I32x4 => {
-            let a = i32::from_le_bytes(lhs.try_into().expect("width"));
-            let b = i32::from_le_bytes(rhs.try_into().expect("width"));
-            let result = lane_int_op!(kind, a, b, i32);
+            let (a, b) = (
+                i32::from_le_bytes(lhs.try_into().expect("width")),
+                i32::from_le_bytes(rhs.try_into().expect("width")),
+            );
+            let result = if uses_unsigned_view(kind) {
+                lane_uint_op!(kind, a, b, u32) as i32
+            } else {
+                lane_int_op!(kind, a, b, i32)
+            };
             dst.copy_from_slice(&result.to_le_bytes());
         }
         LaneShape::I64x2 => {
-            let a = i64::from_le_bytes(lhs.try_into().expect("width"));
-            let b = i64::from_le_bytes(rhs.try_into().expect("width"));
+            let (a, b) = (
+                i64::from_le_bytes(lhs.try_into().expect("width")),
+                i64::from_le_bytes(rhs.try_into().expect("width")),
+            );
             let result = lane_int_op!(kind, a, b, i64);
             dst.copy_from_slice(&result.to_le_bytes());
         }
         LaneShape::F32x4 => {
             let a = f32::from_bits(u32::from_le_bytes(lhs.try_into().expect("width")));
             let b = f32::from_bits(u32::from_le_bytes(rhs.try_into().expect("width")));
-            let result = lane_float_op!(kind, a, b, f32);
+            let result = match kind {
+                V128BinaryKind::FMin => wasm_f32_min(a, b),
+                V128BinaryKind::FMax => wasm_f32_max(a, b),
+                V128BinaryKind::PMin => {
+                    if b < a {
+                        b
+                    } else {
+                        a
+                    }
+                }
+                V128BinaryKind::PMax => {
+                    if a < b {
+                        b
+                    } else {
+                        a
+                    }
+                }
+                _ => lane_float_op!(kind, a, b, f32),
+            };
             dst.copy_from_slice(&result.to_bits().to_le_bytes());
         }
         LaneShape::F64x2 => {
             let a = f64::from_bits(u64::from_le_bytes(lhs.try_into().expect("width")));
             let b = f64::from_bits(u64::from_le_bytes(rhs.try_into().expect("width")));
-            let result = lane_float_op!(kind, a, b, f64);
+            let result = match kind {
+                V128BinaryKind::FMin => wasm_f64_min(a, b),
+                V128BinaryKind::FMax => wasm_f64_max(a, b),
+                V128BinaryKind::PMin => {
+                    if b < a {
+                        b
+                    } else {
+                        a
+                    }
+                }
+                V128BinaryKind::PMax => {
+                    if a < b {
+                        b
+                    } else {
+                        a
+                    }
+                }
+                _ => lane_float_op!(kind, a, b, f64),
+            };
             dst.copy_from_slice(&result.to_bits().to_le_bytes());
         }
+    }
+}
+
+/// Whether the kind interprets lanes as unsigned (the `_u` families).
+fn uses_unsigned_view(kind: V128BinaryKind) -> bool {
+    matches!(
+        kind,
+        V128BinaryKind::AddSatU
+            | V128BinaryKind::SubSatU
+            | V128BinaryKind::MinU
+            | V128BinaryKind::MaxU
+            | V128BinaryKind::AvgrU
+    )
+}
+
+/// Lane-wise integer unary. abs/neg WRAP on the type's MIN value
+/// (spec: i8x16.abs(-128) = -128).
+fn v128_unary(shape: LaneShape, kind: V128UnaryKind, dst: &mut [u8], src: &[u8]) {
+    match shape {
+        LaneShape::I8x16 => {
+            for (d, s) in dst.iter_mut().zip(src.iter()) {
+                *d = match kind {
+                    V128UnaryKind::Abs => (*s as i8).wrapping_abs() as u8,
+                    V128UnaryKind::Neg => (*s as i8).wrapping_neg() as u8,
+                    V128UnaryKind::Popcnt => s.count_ones() as u8,
+                };
+            }
+        }
+        LaneShape::I16x8 => {
+            for (d, s) in dst.chunks_exact_mut(2).zip(src.chunks_exact(2)) {
+                let v = i16::from_le_bytes(s.try_into().expect("width"));
+                let r = match kind {
+                    V128UnaryKind::Abs => v.wrapping_abs(),
+                    V128UnaryKind::Neg => v.wrapping_neg(),
+                    V128UnaryKind::Popcnt => unreachable!("no i16x8 popcnt"),
+                };
+                d.copy_from_slice(&r.to_le_bytes());
+            }
+        }
+        LaneShape::I32x4 => {
+            for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+                let v = i32::from_le_bytes(s.try_into().expect("width"));
+                let r = match kind {
+                    V128UnaryKind::Abs => v.wrapping_abs(),
+                    V128UnaryKind::Neg => v.wrapping_neg(),
+                    V128UnaryKind::Popcnt => unreachable!("no i32x4 popcnt"),
+                };
+                d.copy_from_slice(&r.to_le_bytes());
+            }
+        }
+        LaneShape::I64x2 => {
+            for (d, s) in dst.chunks_exact_mut(8).zip(src.chunks_exact(8)) {
+                let v = i64::from_le_bytes(s.try_into().expect("width"));
+                let r = match kind {
+                    V128UnaryKind::Abs => v.wrapping_abs(),
+                    V128UnaryKind::Neg => v.wrapping_neg(),
+                    V128UnaryKind::Popcnt => unreachable!("no i64x2 popcnt"),
+                };
+                d.copy_from_slice(&r.to_le_bytes());
+            }
+        }
+        LaneShape::F32x4 | LaneShape::F64x2 => unreachable!("float unary is a later unit"),
+    }
+}
+
+/// Lane-wise compare. Result lanes are all-ones (true) or all-zeros
+/// (false) at the operand lane width. Integer shapes route s/u kinds
+/// through the signed/unsigned lane view; float shapes use Rust's
+/// ordered/unordered semantics (NaN compares false except `ne`;
+/// -0.0 == +0.0).
+fn v128_compare(shape: LaneShape, kind: V128CompareKind, dst: &mut [u8], a: &[u8], b: &[u8]) {
+    let int_kind = |x: i64, y: i64, signed: bool| -> bool {
+        match kind {
+            V128CompareKind::Eq => x == y,
+            V128CompareKind::Ne => x != y,
+            V128CompareKind::LtS | V128CompareKind::Lt if signed => x < y,
+            V128CompareKind::GtS | V128CompareKind::Gt if signed => x > y,
+            V128CompareKind::LeS | V128CompareKind::Le if signed => x <= y,
+            V128CompareKind::GeS | V128CompareKind::Ge if signed => x >= y,
+            _ => unreachable!("unsigned kind on signed view"),
+        }
+    };
+    let uint_kind = |x: u64, y: u64| -> bool {
+        match kind {
+            V128CompareKind::Eq => x == y,
+            V128CompareKind::Ne => x != y,
+            V128CompareKind::LtU => x < y,
+            V128CompareKind::GtU => x > y,
+            V128CompareKind::LeU => x <= y,
+            V128CompareKind::GeU => x >= y,
+            _ => unreachable!("signed/float kind on unsigned view"),
+        }
+    };
+    let float_kind = |x: f64, y: f64| -> bool {
+        match kind {
+            V128CompareKind::Eq => x == y,
+            V128CompareKind::Ne => x != y,
+            V128CompareKind::Lt => x < y,
+            V128CompareKind::Gt => x > y,
+            V128CompareKind::Le => x <= y,
+            V128CompareKind::Ge => x >= y,
+            _ => unreachable!("integer kind on float shape"),
+        }
+    };
+    let write = |d: &mut [u8], truth: bool| {
+        for byte in d.iter_mut() {
+            *byte = if truth { 0xFF } else { 0x00 };
+        }
+    };
+    match shape {
+        LaneShape::I8x16 => {
+            for i in 0..16 {
+                let (x, y) = (a[i] as i8, b[i] as i8);
+                let truth = if uses_unsigned_compare(kind) {
+                    uint_kind(a[i] as u64, b[i] as u64)
+                } else {
+                    int_kind(x as i64, y as i64, true)
+                };
+                write(&mut dst[i..i + 1], truth);
+            }
+        }
+        LaneShape::I16x8 => {
+            for i in 0..8 {
+                let (x, y) = (
+                    i16::from_le_bytes(a[i * 2..i * 2 + 2].try_into().expect("width")),
+                    i16::from_le_bytes(b[i * 2..i * 2 + 2].try_into().expect("width")),
+                );
+                let truth = if uses_unsigned_compare(kind) {
+                    uint_kind(x as u16 as u64, y as u16 as u64)
+                } else {
+                    int_kind(x as i64, y as i64, true)
+                };
+                write(&mut dst[i * 2..i * 2 + 2], truth);
+            }
+        }
+        LaneShape::I32x4 => {
+            for i in 0..4 {
+                let (x, y) = (
+                    i32::from_le_bytes(a[i * 4..i * 4 + 4].try_into().expect("width")),
+                    i32::from_le_bytes(b[i * 4..i * 4 + 4].try_into().expect("width")),
+                );
+                let truth = if uses_unsigned_compare(kind) {
+                    uint_kind(x as u32 as u64, y as u32 as u64)
+                } else {
+                    int_kind(x as i64, y as i64, true)
+                };
+                write(&mut dst[i * 4..i * 4 + 4], truth);
+            }
+        }
+        LaneShape::I64x2 => {
+            for i in 0..2 {
+                let (x, y) = (
+                    i64::from_le_bytes(a[i * 8..i * 8 + 8].try_into().expect("width")),
+                    i64::from_le_bytes(b[i * 8..i * 8 + 8].try_into().expect("width")),
+                );
+                let truth = if uses_unsigned_compare(kind) {
+                    uint_kind(x as u64, y as u64)
+                } else {
+                    int_kind(x, y, true)
+                };
+                write(&mut dst[i * 8..i * 8 + 8], truth);
+            }
+        }
+        LaneShape::F32x4 => {
+            for i in 0..4 {
+                let (x, y) = (
+                    f32::from_bits(u32::from_le_bytes(
+                        a[i * 4..i * 4 + 4].try_into().expect("width"),
+                    )),
+                    f32::from_bits(u32::from_le_bytes(
+                        b[i * 4..i * 4 + 4].try_into().expect("width"),
+                    )),
+                );
+                let truth = float_kind(x as f64, y as f64);
+                write(&mut dst[i * 4..i * 4 + 4], truth);
+            }
+        }
+        LaneShape::F64x2 => {
+            for i in 0..2 {
+                let (x, y) = (
+                    f64::from_bits(u64::from_le_bytes(
+                        a[i * 8..i * 8 + 8].try_into().expect("width"),
+                    )),
+                    f64::from_bits(u64::from_le_bytes(
+                        b[i * 8..i * 8 + 8].try_into().expect("width"),
+                    )),
+                );
+                let truth = float_kind(x, y);
+                write(&mut dst[i * 8..i * 8 + 8], truth);
+            }
+        }
+    }
+}
+
+/// Whether the compare kind interprets integer lanes as unsigned.
+fn uses_unsigned_compare(kind: V128CompareKind) -> bool {
+    matches!(
+        kind,
+        V128CompareKind::LtU | V128CompareKind::GtU | V128CompareKind::LeU | V128CompareKind::GeU
+    )
+}
+
+/// Lane-wise shift by a scalar amount taken modulo the lane bit width.
+fn v128_shift(shape: LaneShape, kind: V128ShiftKind, dst: &mut [u8], src: &[u8], amount: i32) {
+    let bits = shape.lane_width() as u32 * 8;
+    let s = (amount as u32) % bits;
+    match shape {
+        LaneShape::I8x16 => {
+            for i in 0..16 {
+                let x = src[i] as i8;
+                let out: i8 = match kind {
+                    V128ShiftKind::Shl => ((x as u8) << s) as i8,
+                    V128ShiftKind::ShrS => x >> s,
+                    V128ShiftKind::ShrU => ((x as u8) >> s) as i8,
+                };
+                dst[i] = out as u8;
+            }
+        }
+        LaneShape::I16x8 => {
+            for (d, chunk) in dst.chunks_exact_mut(2).zip(src.chunks_exact(2)) {
+                let x = i16::from_le_bytes(chunk.try_into().expect("width"));
+                let out: i16 = match kind {
+                    V128ShiftKind::Shl => ((x as u16) << s) as i16,
+                    V128ShiftKind::ShrS => x >> s,
+                    V128ShiftKind::ShrU => ((x as u16) >> s) as i16,
+                };
+                d.copy_from_slice(&out.to_le_bytes());
+            }
+        }
+        LaneShape::I32x4 => {
+            for (d, chunk) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+                let x = i32::from_le_bytes(chunk.try_into().expect("width"));
+                let out: i32 = match kind {
+                    V128ShiftKind::Shl => ((x as u32) << s) as i32,
+                    V128ShiftKind::ShrS => x >> s,
+                    V128ShiftKind::ShrU => ((x as u32) >> s) as i32,
+                };
+                d.copy_from_slice(&out.to_le_bytes());
+            }
+        }
+        LaneShape::I64x2 => {
+            for (d, chunk) in dst.chunks_exact_mut(8).zip(src.chunks_exact(8)) {
+                let x = i64::from_le_bytes(chunk.try_into().expect("width"));
+                let out: i64 = match kind {
+                    V128ShiftKind::Shl => ((x as u64) << s) as i64,
+                    V128ShiftKind::ShrS => x >> s,
+                    V128ShiftKind::ShrU => ((x as u64) >> s) as i64,
+                };
+                d.copy_from_slice(&out.to_le_bytes());
+            }
+        }
+        LaneShape::F32x4 | LaneShape::F64x2 => unreachable!("no float shifts"),
+    }
+}
+
+/// Widen `src`'s selected half to double lane width. Dst shape is
+/// implied: I8x16→I16x8, I16x8→I32x4, I32x4→I64x2.
+fn v128_extend(src_shape: LaneShape, high: bool, signed: bool, dst: &mut [u8], src: &[u8]) {
+    match src_shape {
+        LaneShape::I8x16 => {
+            let half: &[u8] = if high { &src[8..] } else { &src[..8] };
+            for (d, s) in dst.chunks_exact_mut(2).zip(half.iter()) {
+                let lane: u16 = if signed {
+                    (*s as i8) as i16 as u16
+                } else {
+                    *s as u16
+                };
+                d.copy_from_slice(&lane.to_le_bytes());
+            }
+        }
+        LaneShape::I16x8 => {
+            let half: &[u8] = if high { &src[8..] } else { &src[..8] };
+            for (d, s) in dst.chunks_exact_mut(4).zip(half.chunks_exact(2)) {
+                let v = i16::from_le_bytes(s.try_into().expect("width"));
+                let lane: u32 = if signed {
+                    v as i32 as u32
+                } else {
+                    v as u16 as u32
+                };
+                d.copy_from_slice(&lane.to_le_bytes());
+            }
+        }
+        LaneShape::I32x4 => {
+            let half: &[u8] = if high { &src[8..] } else { &src[..8] };
+            for (d, s) in dst.chunks_exact_mut(8).zip(half.chunks_exact(4)) {
+                let v = i32::from_le_bytes(s.try_into().expect("width"));
+                let lane: u64 = if signed {
+                    v as i64 as u64
+                } else {
+                    v as u32 as u64
+                };
+                d.copy_from_slice(&lane.to_le_bytes());
+            }
+        }
+        _ => unreachable!("extend widens i8x16/i16x8/i32x4 only"),
+    }
+}
+
+/// Extended multiply: widen the selected half of both operands, then
+/// multiply lane-wise in double width.
+#[allow(clippy::unnecessary_cast)]
+fn v128_extmul(src_shape: LaneShape, high: bool, signed: bool, dst: &mut [u8], a: &[u8], b: &[u8]) {
+    match src_shape {
+        LaneShape::I8x16 => {
+            let (a_half, b_half): (&[u8], &[u8]) = if high {
+                (&a[8..], &b[8..])
+            } else {
+                (&a[..8], &b[..8])
+            };
+            for ((d, x), y) in dst
+                .chunks_exact_mut(2)
+                .zip(a_half.iter())
+                .zip(b_half.iter())
+            {
+                let product: i32 = if signed {
+                    (*x as i8 as i16 as i32) * (*y as i8 as i16 as i32)
+                } else {
+                    (*x as u8 as u16 as i32) * (*y as u8 as u16 as i32)
+                };
+                d.copy_from_slice(&(product as i16).to_le_bytes());
+            }
+        }
+        LaneShape::I16x8 => {
+            let (a_half, b_half): (&[u8], &[u8]) = if high {
+                (&a[8..], &b[8..])
+            } else {
+                (&a[..8], &b[..8])
+            };
+            for ((d, x), y) in dst
+                .chunks_exact_mut(4)
+                .zip(a_half.chunks_exact(2))
+                .zip(b_half.chunks_exact(2))
+            {
+                let x = i16::from_le_bytes(x.try_into().expect("width"));
+                let y = i16::from_le_bytes(y.try_into().expect("width"));
+                let product: i64 = if signed {
+                    (x as i32 as i64) * (y as i32 as i64)
+                } else {
+                    (x as u16 as u32 as i64) * (y as u16 as u32 as i64)
+                };
+                d.copy_from_slice(&(product as i32).to_le_bytes());
+            }
+        }
+        LaneShape::I32x4 => {
+            let (a_half, b_half): (&[u8], &[u8]) = if high {
+                (&a[8..], &b[8..])
+            } else {
+                (&a[..8], &b[..8])
+            };
+            for ((d, x), y) in dst
+                .chunks_exact_mut(8)
+                .zip(a_half.chunks_exact(4))
+                .zip(b_half.chunks_exact(4))
+            {
+                let x = i32::from_le_bytes(x.try_into().expect("width"));
+                let y = i32::from_le_bytes(y.try_into().expect("width"));
+                let product: i128 = if signed {
+                    (x as i64 as i128) * (y as i64 as i128)
+                } else {
+                    (x as u32 as u64 as i128) * (y as u32 as u64 as i128)
+                };
+                d.copy_from_slice(&(product as i64).to_le_bytes());
+            }
+        }
+        _ => unreachable!("extmul widens i8x16/i16x8/i32x4 only"),
+    }
+}
+
+/// Pairwise sum of adjacent lanes, doubling width. Never overflows the
+/// wider lane.
+#[allow(clippy::unnecessary_cast)]
+fn v128_extadd_pairwise(src_shape: LaneShape, signed: bool, dst: &mut [u8], src: &[u8]) {
+    match src_shape {
+        LaneShape::I8x16 => {
+            for (d, pair) in dst.chunks_exact_mut(2).zip(src.chunks_exact(2)) {
+                let sum: i32 = if signed {
+                    (pair[0] as i8 as i16 as i32) + (pair[1] as i8 as i16 as i32)
+                } else {
+                    (pair[0] as u8 as u16 as i32) + (pair[1] as u8 as u16 as i32)
+                };
+                d.copy_from_slice(&(sum as i16).to_le_bytes());
+            }
+        }
+        LaneShape::I16x8 => {
+            for (d, pair) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+                let (x, y) = (
+                    i16::from_le_bytes(pair[..2].try_into().expect("width")),
+                    i16::from_le_bytes(pair[2..].try_into().expect("width")),
+                );
+                let sum: i64 = if signed {
+                    (x as i32 as i64) + (y as i32 as i64)
+                } else {
+                    (x as u16 as u32 as i64) + (y as u16 as u32 as i64)
+                };
+                d.copy_from_slice(&(sum as i32).to_le_bytes());
+            }
+        }
+        _ => unreachable!("extadd_pairwise widens i8x16/i16x8 only"),
+    }
+}
+
+/// Saturating narrow: a's lanes → dst low half, b's lanes → dst high
+/// half. `_s` saturates to the signed range; `_u` clamps negatives to 0
+/// and saturates at the unsigned max (operating on the SIGNED source
+/// value).
+#[allow(clippy::unnecessary_cast)]
+fn v128_narrow(dst_shape: LaneShape, signed: bool, dst: &mut [u8], a: &[u8], b: &[u8]) {
+    let (dst_w, src_w) = match dst_shape {
+        LaneShape::I8x16 => (1usize, 2usize),
+        LaneShape::I16x8 => (2usize, 4usize),
+        _ => unreachable!("narrow halves width only"),
+    };
+    let mid = 16 / 2;
+    for (d, s) in dst[..mid]
+        .chunks_exact_mut(dst_w)
+        .zip(a.chunks_exact(src_w))
+    {
+        let v = match src_w {
+            2 => i16::from_le_bytes(s.try_into().expect("width")) as i32,
+            _ => i32::from_le_bytes(s.try_into().expect("width")),
+        };
+        let out = if signed {
+            v.clamp(
+                (-(1i32 << (dst_w * 8 - 1))) as i32,
+                (1i32 << (dst_w * 8 - 1)) - 1,
+            )
+        } else {
+            v.clamp(0, (1i32 << (dst_w * 8)) - 1)
+        };
+        d.copy_from_slice(&(out as u16).to_le_bytes()[..dst_w]);
+    }
+    for (d, s) in dst[mid..]
+        .chunks_exact_mut(dst_w)
+        .zip(b.chunks_exact(src_w))
+    {
+        let v = match src_w {
+            2 => i16::from_le_bytes(s.try_into().expect("width")) as i32,
+            _ => i32::from_le_bytes(s.try_into().expect("width")),
+        };
+        let out = if signed {
+            v.clamp(
+                (-(1i32 << (dst_w * 8 - 1))) as i32,
+                (1i32 << (dst_w * 8 - 1)) - 1,
+            )
+        } else {
+            v.clamp(0, (1i32 << (dst_w * 8)) - 1)
+        };
+        d.copy_from_slice(&(out as u16).to_le_bytes()[..dst_w]);
+    }
+}
+
+/// i32x4.dot_i16x8_s: dst lane i = a[2i]·b[2i] + a[2i+1]·b[2i+1] on
+/// SIGNED i16 lanes, products and sum WRAPPING at i32 (2·(−32768)²
+/// wraps to i32::MIN per spec).
+fn v128_dot(dst: &mut [u8], a: &[u8], b: &[u8]) {
+    for (d, i) in dst.chunks_exact_mut(4).zip(0..4usize) {
+        let lane = |bytes: &[u8], idx: usize| {
+            i16::from_le_bytes(bytes[idx * 2..idx * 2 + 2].try_into().expect("width")) as i32
+        };
+        let acc = lane(a, 2 * i)
+            .wrapping_mul(lane(b, 2 * i))
+            .wrapping_add(lane(a, 2 * i + 1).wrapping_mul(lane(b, 2 * i + 1)));
+        d.copy_from_slice(&acc.to_le_bytes());
+    }
+}
+
+fn v128_float_unary(shape: LaneShape, kind: V128FloatUnaryKind, dst: &mut [u8], src: &[u8]) {
+    let width = shape.lane_width();
+    match width {
+        4 => {
+            for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+                let v = f32::from_bits(u32::from_le_bytes(s.try_into().expect("width")));
+                let r = match kind {
+                    V128FloatUnaryKind::Abs => f32::from_bits(v.to_bits() & 0x7FFF_FFFF),
+                    V128FloatUnaryKind::Neg => f32::from_bits(v.to_bits() ^ 0x8000_0000),
+                    V128FloatUnaryKind::Sqrt => libm::sqrtf(v),
+                    V128FloatUnaryKind::Ceil => libm::ceilf(v),
+                    V128FloatUnaryKind::Floor => libm::floorf(v),
+                    V128FloatUnaryKind::Trunc => libm::truncf(v),
+                    V128FloatUnaryKind::Nearest => libm::rintf(v),
+                };
+                d.copy_from_slice(&r.to_bits().to_le_bytes());
+            }
+        }
+        8 => {
+            for (d, s) in dst.chunks_exact_mut(8).zip(src.chunks_exact(8)) {
+                let v = f64::from_bits(u64::from_le_bytes(s.try_into().expect("width")));
+                let r = match kind {
+                    V128FloatUnaryKind::Abs => f64::from_bits(v.to_bits() & 0x7FFF_FFFF_FFFF_FFFF),
+                    V128FloatUnaryKind::Neg => f64::from_bits(v.to_bits() ^ 0x8000_0000_0000_0000),
+                    V128FloatUnaryKind::Sqrt => libm::sqrt(v),
+                    V128FloatUnaryKind::Ceil => libm::ceil(v),
+                    V128FloatUnaryKind::Floor => libm::floor(v),
+                    V128FloatUnaryKind::Trunc => libm::trunc(v),
+                    V128FloatUnaryKind::Nearest => libm::rint(v),
+                };
+                d.copy_from_slice(&r.to_bits().to_le_bytes());
+            }
+        }
+        _ => unreachable!("float unary is f32x4/f64x2 only"),
+    }
+}
+
+fn v128_convert(kind: V128ConvertKind, dst: &mut [u8], src: &[u8]) {
+    match kind {
+        V128ConvertKind::TruncSatF32x4S => {
+            for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+                let v = f32::from_bits(u32::from_le_bytes(s.try_into().expect("width")));
+                d.copy_from_slice(&(v as i32).to_le_bytes());
+            }
+        }
+        V128ConvertKind::TruncSatF32x4U => {
+            for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+                let v = f32::from_bits(u32::from_le_bytes(s.try_into().expect("width")));
+                d.copy_from_slice(&(v as u32).to_le_bytes());
+            }
+        }
+        V128ConvertKind::ConvertI32x4S => {
+            for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+                let v = i32::from_le_bytes(s.try_into().expect("width"));
+                d.copy_from_slice(&((v as f32).to_bits()).to_le_bytes());
+            }
+        }
+        V128ConvertKind::ConvertI32x4U => {
+            for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+                let v = u32::from_le_bytes(s.try_into().expect("width"));
+                d.copy_from_slice(&((v as f32).to_bits()).to_le_bytes());
+            }
+        }
+        V128ConvertKind::TruncSatF64x2SZero => {
+            for (d, s) in dst.chunks_exact_mut(4).take(2).zip(src.chunks_exact(8)) {
+                let v = f64::from_bits(u64::from_le_bytes(s.try_into().expect("width")));
+                d.copy_from_slice(&(v as i32).to_le_bytes());
+            }
+            for d in dst[8..].chunks_exact_mut(4) {
+                d.copy_from_slice(&0i32.to_le_bytes());
+            }
+        }
+        V128ConvertKind::TruncSatF64x2UZero => {
+            for (d, s) in dst.chunks_exact_mut(4).take(2).zip(src.chunks_exact(8)) {
+                let v = f64::from_bits(u64::from_le_bytes(s.try_into().expect("width")));
+                d.copy_from_slice(&(v as u32).to_le_bytes());
+            }
+            for d in dst[8..].chunks_exact_mut(4) {
+                d.copy_from_slice(&0u32.to_le_bytes());
+            }
+        }
+        V128ConvertKind::DemoteF64x2Zero => {
+            for (d, s) in dst.chunks_exact_mut(4).take(2).zip(src.chunks_exact(8)) {
+                let v = f64::from_bits(u64::from_le_bytes(s.try_into().expect("width")));
+                d.copy_from_slice(&((v as f32).to_bits()).to_le_bytes());
+            }
+            for d in dst[8..].chunks_exact_mut(4) {
+                d.copy_from_slice(&0f32.to_bits().to_le_bytes());
+            }
+        }
+        V128ConvertKind::PromoteLowF32x4 => {
+            for (d, s) in dst.chunks_exact_mut(8).zip(src.chunks_exact(4).take(2)) {
+                let v = f32::from_bits(u32::from_le_bytes(s.try_into().expect("width")));
+                d.copy_from_slice(&((v as f64).to_bits()).to_le_bytes());
+            }
+        }
+        V128ConvertKind::ConvertLowI32x4S => {
+            for (d, s) in dst.chunks_exact_mut(8).zip(src.chunks_exact(4).take(2)) {
+                let v = i32::from_le_bytes(s.try_into().expect("width"));
+                d.copy_from_slice(&((v as f64).to_bits()).to_le_bytes());
+            }
+        }
+        V128ConvertKind::ConvertLowI32x4U => {
+            for (d, s) in dst.chunks_exact_mut(8).zip(src.chunks_exact(4).take(2)) {
+                let v = u32::from_le_bytes(s.try_into().expect("width"));
+                d.copy_from_slice(&((v as f64).to_bits()).to_le_bytes());
+            }
+        }
+    }
+}
+
+/// result[i] = b[i] < 16 ? a[b[i]] : 0.
+fn v128_swizzle(dst: &mut [u8], a: &[u8], b: &[u8]) {
+    for i in 0..16 {
+        dst[i] = if b[i] < 16 { a[b[i] as usize] } else { 0 };
+    }
+}
+
+/// result[i] = lanes[i] < 16 ? a[lanes[i]] : b[lanes[i] - 16]. Lane
+/// bounds are validated (< 32) before lowering.
+fn v128_shuffle(dst: &mut [u8], a: &[u8], b: &[u8], lanes: &[u8; 16]) {
+    for i in 0..16 {
+        let idx = lanes[i];
+        dst[i] = if idx < 16 {
+            a[idx as usize]
+        } else {
+            b[(idx - 16) as usize]
+        };
+    }
+}
+
+fn type_mismatch_v128(registers: &[Option<Value>], reg: Reg) -> RuntimeError {
+    let found = match get_reg(registers, reg) {
+        Ok(value) => value.val_type(),
+        Err(error) => return error,
+    };
+    RuntimeError {
+        kind: RuntimeErrorKind::TypeMismatch {
+            expected: ValType::Vec(crate::types::VecType::V128),
+            found,
+        },
     }
 }
 
@@ -1726,6 +4902,19 @@ fn get_reg(registers: &[Option<Value>], reg: Reg) -> Result<Value, RuntimeError>
         .ok_or(RuntimeError {
             kind: RuntimeErrorKind::UninitializedRegister { reg },
         })
+}
+
+/// Read a list of registers into a fresh value vector, reserving fallibly:
+/// an armed allocator must yield a clean refusal rather than abort on a
+/// large call or return operand list.
+fn read_reg_list(registers: &[Option<Value>], regs: &[Reg]) -> Result<Vec<Value>, RuntimeError> {
+    let mut out: Vec<Value> = Vec::new();
+    out.try_reserve(regs.len())
+        .map_err(|_| frame_allocation_failed())?;
+    for &reg in regs {
+        out.push(get_reg(registers, reg)?);
+    }
+    Ok(out)
 }
 
 fn execute_unary_op(

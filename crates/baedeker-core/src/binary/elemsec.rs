@@ -8,6 +8,7 @@
 
 use alloc::vec::Vec;
 
+use crate::binary::instr::decode_const_expr_bytes;
 use crate::binary::leb128::{self, Cursor};
 use crate::binary::section::RawSection;
 use crate::binary::typeparser::parse_ref_type as parse_binary_ref_type;
@@ -180,22 +181,18 @@ fn parse_expr_vec<'a>(
     Ok(exprs)
 }
 
+/// Parse an element/offset expression, returning its raw bytes (including
+/// the terminating `end`).
+///
+/// The boundary is found by walking the instruction stream, not by scanning
+/// for the first `0x0B` byte: operand bytes can themselves be `0x0B` (e.g.
+/// the LEB funcidx 11 in `ref.func 11`), which a raw scan misreads as the
+/// terminator.
 fn parse_init_expr<'a>(
     cursor: &mut Cursor<'a>,
     base_offset: usize,
 ) -> Result<&'a [u8], DecodeError> {
-    let start = cursor.position();
-    loop {
-        let pos = cursor.position();
-        let byte = cursor.read_byte().map_err(|_| DecodeError {
-            offset: ByteOffset(base_offset + pos),
-            context: DecodeContext::ElementSection,
-            kind: DecodeErrorKind::UnexpectedEof,
-        })?;
-        if byte == 0x0B {
-            return Ok(&cursor.original()[start..cursor.position()]);
-        }
-    }
+    decode_const_expr_bytes(cursor, base_offset, DecodeContext::ElementSection)
 }
 
 fn parse_elemkind(cursor: &mut Cursor<'_>, base_offset: usize) -> Result<RefType, DecodeError> {
@@ -284,6 +281,27 @@ mod tests {
     }
 
     #[test]
+    fn parse_ref_func_expr_operand_0x0b() {
+        // `ref.func 11` encodes as 0xD2 0x0B — the operand byte is itself
+        // 0x0B and must not be mistaken for the expression terminator.
+        let section = raw_element_section(&[
+            0x01, 0x05, 0x70, 0x02, // passive funcref exprs, 2 items
+            0xD2, 0x0B, 0x0B, // ref.func 11, end
+            0xD2, 0x0C, 0x0B, // ref.func 12, end
+        ]);
+        let elems = parse_element_section(&section).unwrap();
+        assert_eq!(elems.len(), 1);
+        match &elems[0].init {
+            ElementInit::Expressions(exprs) => {
+                assert_eq!(exprs.len(), 2);
+                assert_eq!(exprs[0].expr, &[0xD2, 0x0B, 0x0B]);
+                assert_eq!(exprs[1].expr, &[0xD2, 0x0C, 0x0B]);
+            }
+            _ => panic!("expected expression initializers"),
+        }
+    }
+
+    #[test]
     fn parse_typed_active_expr_elements() {
         let section = raw_element_section(&[
             0x01, 0x06, 0x00, 0x41, 0x00, 0x0B, 0x63, 0x01, 0x01, 0xD2, 0x00, 0x0B,
@@ -314,11 +332,11 @@ mod tests {
 
     #[test]
     fn reject_unknown_reference_type() {
-        let section = raw_element_section(&[0x01, 0x05, 0x6E, 0x00]);
+        let section = raw_element_section(&[0x01, 0x05, 0x68, 0x00]);
         let err = parse_element_section(&section).unwrap_err();
         assert!(matches!(
             err.kind,
-            DecodeErrorKind::UnknownRefType { byte: 0x6E }
+            DecodeErrorKind::UnknownRefType { byte: 0x68 }
         ));
     }
 

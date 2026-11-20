@@ -193,10 +193,14 @@ mod tests {
             tables: Vec::new(),
             elements: Vec::new(),
             types: Vec::new(),
+            type_defs: Vec::new(),
             data: Vec::new(),
             imported_memory_count: 0,
             imported_global_count: 0,
             imported_table_count: 0,
+            tags: Vec::new(),
+            imported_tags: Vec::new(),
+            rec_groups: Vec::new(),
         }
     }
 
@@ -274,7 +278,12 @@ mod tests {
     fn memory_module() -> RegModule {
         let mut module = empty_module();
         module.memories.push(crate::types::MemType {
-            limits: crate::types::Limits { min: 1, max: None },
+            limits: crate::types::Limits {
+                min: 1,
+                max: None,
+                is64: false,
+                shared: false,
+            },
         });
         module
     }
